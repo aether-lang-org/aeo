@@ -1,0 +1,59 @@
+// Real bhyve bring-up test (FreeBSD, ROOT required). Boots an actual
+// bhyve VM via the driver against a UEFI bootrom + disk image, verifies it
+// is alive at the hypervisor level (pidfile process), then tears it down
+// (kill + bhyvectl --destroy).
+//
+// Build (unprivileged):  ae build test/real_bhyve.ae -o /tmp/real_bhyve --lib lib
+// Provision + run (root): sudo sh test/setup-bhyve.sh ; sudo /tmp/real_bhyve
+//
+// No health command is passed: with an empty disk the guest sits at the
+// UEFI shell, so there's no in-guest service to reach. The test exercises
+// the driver's real spawn → process-liveness probe → destroy lifecycle
+// against real bhyve/bhyvectl. Host-side health (nc into a real guest) is
+// exercised separately on a host with a bootable image + networking.
+
+import driver_vm
+import std.string (string_length)
+
+main() {
+    nm = "aeo-vm1"
+    img = "/zroot/images/aeo-vm1.raw"
+
+    // Clean any prior run.
+    driver_vm.down("bhyve", nm)
+
+    // Bring the VM up: 1 vCPU, 512M, no NIC (no networking needed for the
+    // lifecycle test), empty UEFI disk.
+    err = driver_vm.up("bhyve", nm, img, 1, "512M", "")
+    if string_length(err) > 0 {
+        println("FAIL up: ${err}")
+        return
+    }
+    println("PASS: bhyve up")
+
+    // Give bhyve a moment to be scheduled, then probe process-liveness.
+    sleep(1500)
+    if driver_vm.probe("bhyve", nm, "") != 1 {
+        println("FAIL: probe(process-alive) expected 1")
+        driver_vm.down("bhyve", nm)
+        return
+    }
+    println("PASS: probe(process-alive) == 1")
+
+    // Tear down: kill + bhyvectl --destroy.
+    derr = driver_vm.down("bhyve", nm)
+    if string_length(derr) > 0 {
+        println("FAIL down: ${derr}")
+        return
+    }
+    sleep(1000)
+    println("PASS: bhyve down")
+
+    // Confirm gone (pidfile removed / process dead).
+    if driver_vm.probe("bhyve", nm, "") != 0 {
+        println("FAIL: VM still alive after down")
+        return
+    }
+    println("PASS: VM actually gone")
+    println("=== real bhyve bring-up: ALL PASS ===")
+}
