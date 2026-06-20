@@ -1,0 +1,75 @@
+// Real jail bring-up test (FreeBSD, ROOT required). Boots an actual jail
+// via the driver against a minimal root populated with /rescue (the
+// host's statically-linked tools), then probes liveness with a real
+// jexec health check, then tears it down.
+//
+// Build (unprivileged):  ae build test/real_jail.ae -o /tmp/real_jail --lib lib
+// Provision + run (root): see test/setup-jail-root.sh then `sudo /tmp/real_jail`
+//
+// The jail root is /zroot/jails/aeo-rj with /rescue/sh available, so the
+// health check `/rescue/test -d /` exercises a real in-jail jexec.
+
+import driver_bsd
+import std.string (string_length)
+
+main() {
+    nm = "aeo-rj"
+    dataset = "zroot/jails/aeo-rj"
+    root = "/zroot/jails/aeo-rj"
+
+    // Clean any prior run.
+    driver_bsd.down(nm)
+
+    // Bring the jail up. The dataset is pre-created+populated by the
+    // setup script (aeo would normally run provision() to do this); here
+    // root() points at the already-populated path so up() just `jail -c`s.
+    // start command keeps nothing running — a persist jail's liveness is
+    // its existence, which jls reports.
+    err = driver_bsd.up(nm, "", root, "", "")
+    if string_length(err) > 0 {
+        println("FAIL up: ${err}")
+        return
+    }
+    println("PASS: jail up")
+
+    // Probe: running + a real in-jail health check via jexec.
+    if driver_bsd.probe(nm, "", "") != 1 {
+        println("FAIL: probe(running) expected 1")
+        driver_bsd.down(nm)
+        return
+    }
+    println("PASS: probe(running) == 1")
+
+    // Health check that runs INSIDE the jail (jexec). /rescue/test is the
+    // statically-linked test(1); `-d /` is true inside any jail root.
+    if driver_bsd.probe(nm, "/rescue/test -d /", "") != 1 {
+        println("FAIL: in-jail health check expected 1")
+        driver_bsd.down(nm)
+        return
+    }
+    println("PASS: in-jail jexec health check == 1")
+
+    // A failing in-jail health check returns 0.
+    if driver_bsd.probe(nm, "/rescue/test -d /nonexistent-xyz", "") != 0 {
+        println("FAIL: failing in-jail health check expected 0")
+        driver_bsd.down(nm)
+        return
+    }
+    println("PASS: failing in-jail health check == 0")
+
+    // Tear down.
+    derr = driver_bsd.down(nm)
+    if string_length(derr) > 0 {
+        println("FAIL down: ${derr}")
+        return
+    }
+    println("PASS: jail down")
+
+    // Confirm gone.
+    if driver_bsd.probe(nm, "", "") != 0 {
+        println("FAIL: jail still present after down")
+        return
+    }
+    println("PASS: jail actually gone")
+    println("=== real jail bring-up: ALL PASS ===")
+}
