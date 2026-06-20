@@ -32,9 +32,26 @@ case "${1:-}" in
     exit 0
     ;;
 --resnap)
+    # Golden-image hygiene: a clone must re-initialize its identity +
+    # networking, else it inherits the base's machine-id/cloud-init state
+    # and never DHCPs (verified). Clean cloud-init + machine-id INSIDE the
+    # running base over ssh, THEN stop + snapshot. After this, each clone
+    # re-runs cloud-init on first boot → fresh machine-id → fresh DHCP.
+    echo "cleaning base identity for cloning (cloud-init + machine-id)..."
+    MAC=$(grep -o 'network0_mac="[^"]*"' "/zroot/vm/$BASE/$BASE.conf" | cut -d'"' -f2)
+    for n in $(seq 200 254); do ping -c1 -W1 192.168.0.$n >/dev/null 2>&1; done
+    BIP=$(arp -a 2>/dev/null | grep -i "$MAC" | grep -oE '192.168.0.[0-9]+' | head -1)
+    if [ -n "$BIP" ]; then
+        ssh -i /home/paul/.ssh/id_rsa -o StrictHostKeyChecking=no ubuntu@"$BIP" \
+          'sudo cloud-init clean --logs 2>/dev/null; sudo truncate -s0 /etc/machine-id; sudo rm -f /var/lib/dbus/machine-id /etc/netplan/50-cloud-init.yaml; sudo rm -rf /var/lib/cloud/instances/* 2>/dev/null; sync' \
+          2>&1 | tail -2
+    else
+        echo "WARN: base has no IP; cleaning via console not automated — clones may not network"
+    fi
     vm stop "$BASE" 2>/dev/null || true; sleep 3
+    for i in $(seq 1 15); do sleep 2; vm list 2>/dev/null | grep -qE "$BASE.*[Ss]topped" && break; done
     vm snapshot -f "$BASE@golden"
-    echo "re-snapshotted $BASE@golden"
+    echo "re-snapshotted $BASE@golden (clones will re-init networking)"
     exit 0
     ;;
 esac
