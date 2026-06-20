@@ -32,26 +32,46 @@ case "${1:-}" in
     exit 0
     ;;
 --resnap)
-    # Golden-image hygiene: a clone must re-initialize its identity +
-    # networking, else it inherits the base's machine-id/cloud-init state
-    # and never DHCPs (verified). Clean cloud-init + machine-id INSIDE the
-    # running base over ssh, THEN stop + snapshot. After this, each clone
-    # re-runs cloud-init on first boot → fresh machine-id → fresh DHCP.
-    echo "cleaning base identity for cloning (cloud-init + machine-id)..."
+    # Golden-image hygiene so CLONES network. A naive clone boots but gets
+    # no IP (inherits the base's machine-id/cloud-init state). Two parts,
+    # both verified:
+    #  1. reset identity (fresh machine-id/ssh-host-keys per clone), and
+    #  2. install a PERSISTENT static netplan that DHCPs any e* interface by
+    #     MAC, with cloud-init network management DISABLED — so each clone
+    #     DHCPs on boot regardless of its fresh identity (doesn't depend on
+    #     cloud-init re-running). match:e* + dhcp-identifier:mac handles the
+    #     enp0s6/ens5 naming + the clone's new MAC.
+    echo "prepping base for cloning (persistent DHCP netplan + identity reset)..."
     MAC=$(grep -o 'network0_mac="[^"]*"' "/zroot/vm/$BASE/$BASE.conf" | cut -d'"' -f2)
     for n in $(seq 200 254); do ping -c1 -W1 192.168.0.$n >/dev/null 2>&1; done
     BIP=$(arp -a 2>/dev/null | grep -i "$MAC" | grep -oE '192.168.0.[0-9]+' | head -1)
     if [ -n "$BIP" ]; then
-        ssh -i /home/paul/.ssh/id_rsa -o StrictHostKeyChecking=no ubuntu@"$BIP" \
-          'sudo cloud-init clean --logs 2>/dev/null; sudo truncate -s0 /etc/machine-id; sudo rm -f /var/lib/dbus/machine-id /etc/netplan/50-cloud-init.yaml; sudo rm -rf /var/lib/cloud/instances/* 2>/dev/null; sync' \
-          2>&1 | tail -2
+        ssh -i /home/paul/.ssh/id_rsa -o StrictHostKeyChecking=no ubuntu@"$BIP" '
+          sudo tee /etc/netplan/99-aeo-dhcp.yaml >/dev/null <<EOF
+network:
+  version: 2
+  ethernets:
+    allnics:
+      match: {name: "e*"}
+      dhcp4: true
+      dhcp-identifier: mac
+      optional: true
+EOF
+          sudo chmod 600 /etc/netplan/99-aeo-dhcp.yaml
+          echo "network: {config: disabled}" | sudo tee /etc/cloud/cloud.cfg.d/99-disable-network.cfg >/dev/null
+          sudo netplan apply 2>/dev/null || true
+          sudo cloud-init clean --logs
+          sudo truncate -s0 /etc/machine-id
+          sudo rm -f /var/lib/dbus/machine-id
+          sudo rm -rf /var/lib/cloud/instances/*
+          sync; echo prepped' 2>&1 | tail -2
     else
-        echo "WARN: base has no IP; cleaning via console not automated — clones may not network"
+        echo "WARN: base has no IP; cannot prep — clones will not network"; exit 1
     fi
     vm stop "$BASE" 2>/dev/null || true; sleep 3
-    for i in $(seq 1 15); do sleep 2; vm list 2>/dev/null | grep -qE "$BASE.*[Ss]topped" && break; done
-    vm snapshot -f "$BASE@golden"
-    echo "re-snapshotted $BASE@golden (clones will re-init networking)"
+    for i in $(seq 1 20); do sleep 2; vm list 2>/dev/null | grep -qE "$BASE.*[Ss]topped" && break; done
+    vm snapshot "$BASE@golden"
+    echo "re-snapshotted $BASE@golden (clones DHCP via persistent netplan)"
     exit 0
     ;;
 esac
