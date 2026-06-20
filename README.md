@@ -132,6 +132,32 @@ any resource** when a composition can't run here:
 `aeo dry-run` runs all of this validation and prints the resolved bring-up plan
 without starting anything — the operator's pre-flight.
 
+## Principles of containment
+
+aeo is, at heart, an exercise in
+[The Principles of Containment](https://paulhammant.com/2016/12/14/principles-of-containment/):
+the container sees and drives the contained; the contained only suspects it is
+contained and cannot casually reach back unless the container configured it to;
+and this should nest, restricting further at each boundary without the contained
+knowing its depth. An honest scorecard of how aeo measures up today:
+
+| Principle | aeo fit |
+|---|---|
+| Container sees the contained, drives it | **Strong** — aeo holds live handles and runs `up` / `wait_for_it_to_be_up` / `down`. |
+| Contained can't casually reach the container | **Strong at the control plane** (a resource has no handle back to aeo; authority is `cap`-injected, not constructed); **weak at the data plane** — sibling/host network isolation isn't enforced yet (`ip()` is the hook, firewall generation is a follow-up). |
+| Reach out only where configured | **Strong** — the `image`/`command`/`dataset`/`ip`/`health` setters _are_ the explicit, declared I/O surface. |
+| Authority injected, not constructed (DI) | **Strong** — `aeo(cap)`: the composition receives its authority to spawn, it does not build it. This is constructor injection (the [PicoContainer](https://picocontainer.com/) principle) applied to live infrastructure. |
+| **Nestable; restrict at each boundary, depth-agnostic** | **Weak** — aeo is one level deep today. Nested virt (a bhyve VM that contains LXC; a jail that contains sub-jails) is _designed_ (`aeo-design.md`, substrate-independence §) but unbuilt; "tree" currently means a boot-order DAG, not a containment hierarchy. |
+
+So aeo is a faithful realization of the post's **directionality and injection**
+principles — arguably more so than some of the post's own exhibits, because
+Aether's native capability model closes the "subvert IoC from within" hole the
+post laments in the DOM. It is **not yet** a realization of the post's
+**nesting** principle, which the post treats as the defining one. Closing that
+gap (an `inside(handle)` form where a resource contains resources, restricted
+further at each boundary) is the work that would take aeo from "the principles,
+mostly" to "the post, implemented."
+
 ## Layout
 
 ```
