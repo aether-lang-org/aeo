@@ -30,49 +30,61 @@ import std.config
 import std.string (string_length, string_char_at, string_from_int)
 
 exports (
-    resource, kind, image, command, health, dataset, ip, depends,
+    resource, image, command, health, dataset, ip, depends,
     health_interval, health_budget,
     count, name_at,
     get_kind, get_image, get_command, get_health, get_dataset, get_ip,
     get_depends, get_interval, get_budget
 )
 
-// --- declaration setters ---------------------------------------------
+// --- the trailing-block builder DSL ----------------------------------
+//
+//     resource("db", "container") {
+//         image("docker.io/library/postgres:16")
+//         health("pg_isready")
+//         depends("...")
+//     }
+//
+// `resource(name, kind)` declares the resource and RETURNS its name. Per
+// the closure-DSL mechanism (aether docs/closures-and-builder-dsl.md), the
+// return value is pushed onto the builder-context stack for the trailing
+// block, so each inner setter's auto-injected `_ctx` IS that name. The
+// setters interpolate `${_ctx}` to key their config writes — no need to
+// repeat the name on every line. Bare-name calls inside the block resolve
+// to these setters via the receiver fallback (#333) when the operator
+// writes `compose.resource(...) { ... }`.
 
 // Declare a resource `nm` of kind `k` ("jail"/"bhyve"/"lxc"/"docker"/…).
-// Appends to the ordered resource list and records its kind. Calling
-// resource() twice with the same name overwrites the kind but does not
-// duplicate the list entry.
-resource(nm: string, k: string) {
+// Appends to the ordered list, records its kind, and returns `nm` as the
+// context for the trailing block. Re-declaring the same name overwrites
+// the kind without duplicating the list entry.
+resource(nm: string, k: string) -> string {
     if config.get("aeo.cmp.kind.${nm}") == "" {
         n = _count()
         config.put("aeo.cmp.name.${n}", nm)
         config.put("aeo.cmp.count", string_from_int(n + 1))
     }
     config.put("aeo.cmp.kind.${nm}", k)
+    return nm
 }
 
-// Alias for resource()'s kind, for `kind("db","jail")` call-site taste.
-kind(nm: string, k: string) {
-    config.put("aeo.cmp.kind.${nm}", k)
-}
+// Inner setters — `_ctx: ptr` is the resource name pushed by resource().
+// `${_ctx}` interpolates it back to the name string for the config key.
+image(_ctx: ptr, v: string)   { config.put("aeo.cmp.image.${_ctx}", v) }
+command(_ctx: ptr, v: string) { config.put("aeo.cmp.command.${_ctx}", v) }
+health(_ctx: ptr, v: string)  { config.put("aeo.cmp.health.${_ctx}", v) }
+dataset(_ctx: ptr, v: string) { config.put("aeo.cmp.dataset.${_ctx}", v) }
+ip(_ctx: ptr, v: string)      { config.put("aeo.cmp.ip.${_ctx}", v) }
 
-image(nm: string, v: string)   { config.put("aeo.cmp.image.${nm}", v) }
-command(nm: string, v: string) { config.put("aeo.cmp.command.${nm}", v) }
-health(nm: string, v: string)  { config.put("aeo.cmp.health.${nm}", v) }
-dataset(nm: string, v: string) { config.put("aeo.cmp.dataset.${nm}", v) }
-ip(nm: string, v: string)      { config.put("aeo.cmp.ip.${nm}", v) }
-
-// `depends(app, db)` — app depends on db, so db is brought up first and
-// torn down last. One dependency per call (single-arg-per-call); a real
-// multi-dep resource repeats the call. v0 records the LAST dependency
-// (the common single-upstream tier chain); a fuller multi-dep model is a
-// follow-up.
-depends(nm: string, on: string) { config.put("aeo.cmp.depends.${nm}", on) }
+// `depends("db")` inside app's block — app depends on db, so db is brought
+// up first and torn down last. One per call (Aether is fixed-arity); v0
+// records the LAST dependency (the common single-upstream tier chain), a
+// fuller multi-dep model is a follow-up.
+depends(_ctx: ptr, on: string) { config.put("aeo.cmp.depends.${_ctx}", on) }
 
 // Per-resource health poll tuning (ms between probes; max probe attempts).
-health_interval(nm: string, ms: int) { config.put("aeo.cmp.interval.${nm}", string_from_int(ms)) }
-health_budget(nm: string, n: int)    { config.put("aeo.cmp.budget.${nm}", string_from_int(n)) }
+health_interval(_ctx: ptr, ms: int) { config.put("aeo.cmp.interval.${_ctx}", string_from_int(ms)) }
+health_budget(_ctx: ptr, n: int)    { config.put("aeo.cmp.budget.${_ctx}", string_from_int(n)) }
 
 // --- reader helpers (the runner consumes these) ----------------------
 

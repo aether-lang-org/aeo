@@ -1,7 +1,7 @@
 // examples/aeo_compose — a sample operator composition (config IS code).
 //
 // This is what an operator writes: a real Aether module that declares a
-// resource tree by calling the compose-DSL setters. It exposes
+// resource tree using the trailing-block compose DSL. It exposes
 // aeo_declare(cap), which the aeo runner calls before bring-up. The `cap`
 // is the injected authority handle (unused in this data-only declaration,
 // but threaded to mirror the design's cap discipline).
@@ -11,30 +11,31 @@
 // ordered, health-gated bring-up + reverse teardown without real images.
 // Swap image()/command()/health() for real tiers.
 //
-// NOTE: setters are called NAMESPACED (`compose.resource(...)`) via a
-// whole-module `import compose`, NOT a bare selective import. A selective
-// bare import (`import compose (resource)`) does NOT propagate when THIS
-// module is itself imported by the runner — the bare calls fail to link
-// as `compose_resource undefined`. Whole-module import is the portable
-// form for a module that will be imported transitively.
+// The block reads like config: `compose.resource(name, kind) { ... }`
+// opens a resource and the bare-name setters inside configure it (the
+// resource name flows in as the block's _ctx — no need to repeat it).
+// Bare-name setters resolve via the receiver fallback (#333) because the
+// opener is written member-access as `compose.resource(...)`.
 
 import compose
 
 exports ( aeo_declare )
 
 aeo_declare(cap: ptr) {
-    compose.resource("aeo-db", "container")
-    compose.image("aeo-db", "docker.io/library/busybox:latest")
-    compose.command("aeo-db", "sleep 600")
-    compose.health("aeo-db", "true")
-    compose.health_interval("aeo-db", 500)
-    compose.health_budget("aeo-db", 30)
+    compose.resource("aeo-db", "container") {
+        image("docker.io/library/busybox:latest")
+        command("sleep 600")
+        health("true")
+        health_interval(500)
+        health_budget(30)
+    }
 
-    compose.resource("aeo-app", "container")
-    compose.image("aeo-app", "docker.io/library/busybox:latest")
-    compose.command("aeo-app", "sleep 600")
-    compose.health("aeo-app", "true")
-    compose.health_interval("aeo-app", 500)
-    compose.health_budget("aeo-app", 30)
-    compose.depends("aeo-app", "aeo-db")     // app comes up only after db is up
+    compose.resource("aeo-app", "container") {
+        image("docker.io/library/busybox:latest")
+        command("sleep 600")
+        health("true")
+        health_interval(500)
+        health_budget(30)
+        depends("aeo-db")            // app comes up only after db is up
+    }
 }
