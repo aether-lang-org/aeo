@@ -1,8 +1,15 @@
 # aeo — design doc
 
-Status: **design sketch**, pre-implementation. Written to capture the
-shape of aeo and the decisions still open before the first commit. Sibling
-to `aether` (the language), `aeb` (the build runner). Lives at `~/scm/aeo/`.
+Status: **implementation underway** (was a pre-impl sketch). The two open
+decisions are now RESOLVED — **1B** (native Aether supervision) and **2A**
+(actor per resource) — and a working v0 is committed: host probe, Linux
+(podman/docker) + FreeBSD (jail) drivers, the actor-based runtime, the
+compose DSL, host-gating fast-fail, and the `aeo [up|down|status]
+<compose.ae>` front-door. Proven green end-to-end on Linux/podman; jail
+driver proven on FreeBSD short of the privileged boot. See `LLM.md` for the
+current state and the Aether constraints navigated; this doc remains the
+design source of truth. Sibling to `aether` (the language), `aeb` (the
+build runner). Lives at `~/scm/aeo/`.
 
 ## One paragraph
 
