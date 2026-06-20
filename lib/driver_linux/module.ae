@@ -21,11 +21,11 @@
 
 import std.os (run_capture, os_which)
 import std.list
-import std.string (string_length, string_contains)
+import std.string (string_length, string_contains, string_char_at, string_substring)
 
 exports (
     name, engine_resolve,
-    up, down, probe,
+    up, down, probe, exec_capture,
     ps_running_argv, run_argv, stop_argv, rm_argv, exec_health_argv
 )
 
@@ -211,4 +211,40 @@ probe(res_name: string, health: string, engine_pref: string) -> int {
         return 1
     }
     return 0
+}
+
+// Run `cmd` inside the container via `<engine> exec NAME /bin/sh -c CMD`
+// and return its stdout (trimmed of a trailing newline). "" on any spawn
+// failure / non-zero exit. This is the "make a node compute something and
+// read the result" primitive — the executable counterpart to probe's
+// boolean liveness. (The eventual nested/remote path is the same shape
+// over ssh into a guest instead of `engine exec`.)
+exec_capture(res_name: string, cmd: string, engine_pref: string) -> string {
+    eng = engine_resolve(engine_pref)
+    if eng == "" {
+        return ""
+    }
+    av = exec_health_argv(res_name, cmd)
+    out, status, err = run_capture(eng, av, null)
+    list_free(av)
+    if err != "" {
+        return ""
+    }
+    if status != 0 {
+        return ""
+    }
+    return _chomp(out)
+}
+
+// Strip a single trailing newline from command output.
+_chomp(s: string) -> string {
+    n = string_length(s)
+    if n == 0 {
+        return s
+    }
+    last = string_char_at(s, n - 1)
+    if last == 10 {
+        return string_substring(s, 0, n - 1)
+    }
+    return s
 }
