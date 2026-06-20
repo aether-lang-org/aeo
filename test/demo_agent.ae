@@ -1,0 +1,149 @@
+// demo_agent.ae — aeo-agent v0 end-to-end: a parent hands an agent a `boot`
+// command over the file transport; the agent boots a real container and
+// reports back OUT; the parent reads the report. Proves the recursive
+// orchestration mechanism — instruction in, work done locally, report out
+// — at the simplest boundary (two host processes sharing the rendezvous).
+//
+//   ae build bin/aeo-agent.ae -o /tmp/aeo-agent --lib lib
+//   ae build test/demo_agent.ae -o /tmp/da --lib lib && /tmp/da
+//
+// Needs podman + the prebuilt /tmp/aeo-agent. No root. Exits 0 on ALL PASS.
+//
+// Directionality (the Principles-of-Containment point): the parent only
+// ever WRITES to the agent's inbox and READS its outbox. The agent acts
+// inside and reports outward. Neither reaches through the other.
+
+import std.os (run_capture, run_pipe_drain_and_wait)
+import std.list
+import std.string (string_length, string_contains)
+import protocol
+import transport_file (ensure_dirs, inbox_dir, outbox_dir, put, recv_one)
+import driver_linux
+
+extern exit(code: int)
+
+NODE() -> string { return "agent-node" }
+TOKEN() -> string { return "s3cr3t-tok" }
+
+check(label: string, got: string, want: string) -> int {
+    if got == want {
+        println("  PASS ${label}: ${got}")
+        return 1
+    }
+    println("  FAIL ${label}: got '${got}', want '${want}'")
+    _cleanup()
+    exit(1)
+    return 0
+}
+
+main() {
+    if driver_linux.engine_resolve("") == "" {
+        println("SKIP: no container engine on PATH")
+        return
+    }
+    println("=== aeo-agent v0: parent hands boot, agent acts + reports ===")
+    _cleanup()
+    ensure_dirs(NODE())
+
+    passed = 0
+
+    // --- parent hands the agent a boot command (writes its inbox) ---
+    inbox = inbox_dir(NODE())
+    boot = protocol.encode_boot(TOKEN(), NODE())
+    perr = put(inbox, 1, boot)
+    println("  parent wrote inbox: ${boot} (err='${perr}')")
+
+    // --- launch the agent as a subprocess (the "contained" running its
+    //     agent). It reads the inbox, boots the container, writes outbox.
+    //     Env stamps its identity + token + what to boot — exactly what a
+    //     parent stamps when launching the host an agent rides in. ---
+    _launch_agent_bg()
+
+    // --- parent waits for the agent's report (reads its outbox) ---
+    outbox = outbox_dir(NODE())
+    rpt = _await_report(outbox, 40)
+    println("  parent read outbox: ${rpt}")
+    passed = passed + check("agent announced/reported a line", _nonempty(rpt), "yes")
+    passed = passed + check("report verb", protocol.verb_of(rpt), "report")
+    passed = passed + check("report node", protocol.arg1_of(rpt), NODE())
+    passed = passed + check("report state", protocol.arg2_of(rpt), "up")
+
+    // --- and the node the AGENT booted is really running ---
+    passed = passed + check("agent's node actually up", _itoa(driver_linux.probe(NODE(), "", "")), "1")
+
+    // --- the booted node computes (it's a real, working container) ---
+    passed = passed + check("agent's node computes 2+2", driver_linux.exec_capture(NODE(), "echo $((2+2))", ""), "4")
+
+    _cleanup()
+    println("=== ALL ${_itoa(passed)} PASS — agent received, acted, reported ===")
+}
+
+// Launch the agent in the background; it polls, boots, reports, then idles
+// out. We don't wait on it — the parent waits on the report instead.
+_launch_agent_bg() {
+    av = list_new()
+    list_add(av, "-c")
+    // Stamp identity/token/boot-target, then run the prebuilt agent detached.
+    list_add(av, "AEO_NODE=${NODE()} AEO_TOKEN=${TOKEN()} AEO_BOOT_CMD='sleep 600' /tmp/aeo-agent >/tmp/aeo-agent.log 2>&1 &")
+    _o, _s, _e = run_capture("/bin/sh", av, null)
+    list_free(av)
+}
+
+// Drain the outbox until a `report` line appears (skip the `announce`), or
+// `secs` elapse. Returns the report line or "".
+_await_report(outbox: string, secs: int) -> string {
+    waited = 0
+    while waited < secs * 1000 {
+        line = recv_one(outbox)
+        if line != "" {
+            if protocol.verb_of(line) == "report" {
+                return line
+            }
+            // else it was the announce; keep draining.
+        } else {
+            sleep(250)
+            waited = waited + 250
+        }
+    }
+    return ""
+}
+
+_cleanup() {
+    driver_linux.down(NODE(), "")
+    av = list_new()
+    list_add(av, "-rf")
+    list_add(av, "/tmp/aeo-rendezvous")
+    _o, _s, _e = run_capture("/bin/rm", av, null)
+    list_free(av)
+}
+
+_nonempty(s: string) -> string {
+    if string_length(s) > 0 {
+        return "yes"
+    }
+    return "no"
+}
+
+_itoa(n: int) -> string {
+    if n == 0 { return "0" }
+    v = n
+    s = ""
+    while v > 0 {
+        d = v - (v / 10) * 10
+        s = "${_d(d)}${s}"
+        v = v / 10
+    }
+    return s
+}
+_d(x: int) -> string {
+    if x == 0 { return "0" }
+    if x == 1 { return "1" }
+    if x == 2 { return "2" }
+    if x == 3 { return "3" }
+    if x == 4 { return "4" }
+    if x == 5 { return "5" }
+    if x == 6 { return "6" }
+    if x == 7 { return "7" }
+    if x == 8 { return "8" }
+    return "9"
+}

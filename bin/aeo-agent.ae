@@ -1,0 +1,197 @@
+// bin/aeo-agent — the recursive orchestration agent (v0).
+//
+// The container hands its contained an aeo-agent; the agent receives the
+// instructions for its node (and, later, everything nested below it),
+// brings its node up locally, and reports back OUT to its parent. It never
+// reaches through a boundary — it acts inside, reports outward. The runner
+// is just the depth-0 agent whose parent is the operator; this is the same
+// role one boundary down.
+//
+// v0 scope: a single agent, file transport, driving a Linux container as
+// its node. Bootstrap from env (the parent stamps these when it launches
+// the host the agent rides in):
+//   AEO_NODE   — which node this agent IS (its name in the parent's tree)
+//   AEO_TOKEN  — the per-agent secret; the agent rejects commands whose
+//                token doesn't match (v0: warn; the http transport will
+//                fail-closed — single-parent security).
+//   AEO_RENDEZVOUS — optional override of the shared transport root.
+//
+// Loop: announce → poll inbox → handle (boot/halt/probe) → report. The
+// driver calls are the SAME ones the runner uses (driver_linux) — the
+// agent and the runner share the bring-up mechanism; only "where work
+// comes from" differs (transport vs compiled-in composition).
+//
+// Recursion (next): when a node the agent boots itself has get_host children,
+// the agent hands THEM to their agents — same code it received work through.
+
+import std.os
+import std.config
+import std.string (string_length, string_char_at)
+import protocol
+import transport_file (ensure_dirs, inbox_dir, outbox_dir, put, recv_one)
+import driver_linux
+
+extern exit(code: int)
+
+main() {
+    me = _env_or("AEO_NODE", "")
+    token = _env_or("AEO_TOKEN", "")
+    if string_length(me) == 0 {
+        println("aeo-agent: AEO_NODE not set — don't know who I am")
+        exit(2)
+    }
+    println("aeo-agent[${me}]: starting (token=${_mask(token)})")
+    ensure_dirs(me)
+
+    // Reach OUT: tell the parent I'm alive and ready for work.
+    outbox = outbox_dir(me)
+    _ = put(outbox, _next(), protocol.encode_announce(token, me))
+
+    // Poll for work. v0: a bounded loop so the agent exits cleanly in
+    // tests; a real agent loops until a shutdown command.
+    inbox = inbox_dir(me)
+    polls = 0
+    running = 1
+    while running == 1 {
+        line = recv_one(inbox)
+        if line == "" {
+            polls = polls + 1
+            if polls > 600 {           // ~60s at 100ms — give up if idle
+                println("aeo-agent[${me}]: idle timeout, exiting")
+                running = 0
+            } else {
+                sleep(100)
+            }
+        } else {
+            polls = 0
+            running = _handle(me, token, outbox, line)
+        }
+    }
+}
+
+// Handle one command. Returns 1 to keep looping, 0 to stop (on halt).
+_handle(me: string, token: string, outbox: string, line: string) -> int {
+    v = protocol.verb_of(line)
+    tok = protocol.token_of(line)
+    node = protocol.arg1_of(line)
+
+    // Single-parent check. v0: warn on mismatch (the http transport will
+    // reject). The field is here from day one so that's enforcement, not a
+    // protocol change.
+    if tok != token {
+        println("aeo-agent[${me}]: WARN command with wrong token (got '${_mask(tok)}'), v0 proceeds")
+    }
+
+    if v == "boot" {
+        println("aeo-agent[${me}]: boot ${node}")
+        err = _boot_node(node)
+        st = "up"
+        if err != "" {
+            println("aeo-agent[${me}]: boot ${node} failed: ${err}")
+            st = "failed"
+        }
+        _ = put(outbox, _next(), protocol.encode_report(token, node, st))
+        return 1
+    }
+    if v == "probe" {
+        alive = driver_linux.probe(node, "", "")
+        st = "down"
+        if alive == 1 {
+            st = "up"
+        }
+        _ = put(outbox, _next(), protocol.encode_report(token, node, st))
+        return 1
+    }
+    if v == "halt" {
+        println("aeo-agent[${me}]: halt ${node}")
+        _de = driver_linux.down(node, "")
+        _ = put(outbox, _next(), protocol.encode_report(token, node, "down"))
+        // A halt of the agent's OWN node ends the agent.
+        if node == me {
+            return 0
+        }
+        return 1
+    }
+    println("aeo-agent[${me}]: unknown verb '${v}'")
+    return 1
+}
+
+// Bring a node up locally, INSIDE wherever this agent runs. v0 reads the
+// node's image/command from env the parent stamped (AEO_<NODE>_IMAGE /
+// _CMD); a richer agent will receive the full spec in the boot command.
+_boot_node(node: string) -> string {
+    img = _env_or("AEO_BOOT_IMAGE", "docker.io/library/busybox:latest")
+    cmd = _env_or("AEO_BOOT_CMD", "sleep 600")
+    return driver_linux.up(node, img, cmd, "")
+}
+
+// os.getenv returns NULL (not "") when unset, and null != "" — so guard on
+// length and fall back to `def`. (The unset-env footgun.)
+_env_or(name: string, def: string) -> string {
+    v = os.getenv(name)
+    if string_length(v) == 0 {
+        return def
+    }
+    return v
+}
+
+// --- monotonic seq for outbox filenames (counter in a config-KV cell;
+// Aether has no top-level mutable global) ---
+_next() -> int {
+    v = config.get("aeo.agent.seq")
+    n = 0
+    if string_length(v) > 0 {
+        n = _atoi(v)
+    }
+    n = n + 1
+    config.put("aeo.agent.seq", _itoa(n))
+    return n
+}
+
+_mask(t: string) -> string {
+    if string_length(t) == 0 {
+        return "<none>"
+    }
+    return "***"
+}
+
+_atoi(s: string) -> int {
+    n = string_length(s)
+    acc = 0
+    i = 0
+    while i < n {
+        c = string_char_at(s, i)
+        if c >= 48 {
+            if c <= 57 {
+                acc = acc * 10 + (c - 48)
+            }
+        }
+        i = i + 1
+    }
+    return acc
+}
+_itoa(n: int) -> string {
+    if n == 0 {
+        return "0"
+    }
+    v = n
+    s = ""
+    while v > 0 {
+        d = v - (v / 10) * 10
+        s = "${_d(d)}${s}"
+        v = v / 10
+    }
+    return s
+}
+_d(x: int) -> string {
+    if x == 0 { return "0" }
+    if x == 1 { return "1" }
+    if x == 2 { return "2" }
+    if x == 3 { return "3" }
+    if x == 4 { return "4" }
+    if x == 5 { return "5" }
+    if x == 6 { return "6" }
+    if x == 7 { return "7" }
+    if x == 8 { return "8" }
+    return "9"
+}
