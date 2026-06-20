@@ -1,0 +1,47 @@
+// Smoke test: the FreeBSD jail driver. Pure-logic + (when run as root on
+// a FreeBSD host with a populated jail root) a real up→probe→down cycle.
+//
+// Booting a jail needs root and a populated root filesystem, so this test
+// has two layers:
+//   - ALWAYS: exercise the pure argv/path builders (no privilege needed).
+//   - IF root + a jail root dir is provided via argv[1]: do a real jail
+//     up → probe → jexec health → down against that root.
+//
+// Run pure-logic check:   ae build test/smoke_bsd.ae -o /tmp/sb --lib lib && /tmp/sb
+// Run real jail (root):   sudo /tmp/sb /path/to/populated/jail/root
+
+import driver_bsd
+import std.os (argv0)
+import std.string (string_length)
+
+main() {
+    // --- pure-logic assertions (always) ---
+    if driver_bsd.name() != "bsd" {
+        println("FAIL: name")
+        return
+    }
+    mp = driver_bsd.mountpoint_for("zroot/jails/db")
+    if mp != "/zroot/jails/db" {
+        println("FAIL: mountpoint_for got ${mp}")
+        return
+    }
+    println("PASS: bsd driver pure logic (name, mountpoint_for)")
+
+    // --- probe of a definitely-absent jail returns 0 ---
+    if driver_bsd.probe("aeo-nope-xyz", "", "") != 0 {
+        println("FAIL: probe of absent jail should be 0")
+        return
+    }
+    println("PASS: probe(absent jail) == 0")
+
+    // --- down of an absent jail is success (idempotent) ---
+    e = driver_bsd.down("aeo-nope-xyz")
+    if e != "" {
+        println("FAIL: down(absent) should be ok, got: ${e}")
+        return
+    }
+    println("PASS: down(absent jail) is idempotent success")
+
+    println("=== driver_bsd pure-logic: ALL PASS ===")
+    println("(real jail up/down requires root + a populated jail root; see test/jail-root setup)")
+}

@@ -1,0 +1,188 @@
+// lib/driver_bsd — FreeBSD jail backend.
+//
+// The BSD arm of the driver split. Same contract as driver_linux —
+// idempotent up/down + a liveness probe, all shelling os.run_capture —
+// but the resource is a FreeBSD jail over a ZFS dataset.
+//
+// A jail needs three things to exist: a ZFS dataset to hold its root, a
+// populated root filesystem under that dataset's mountpoint, and a
+// `jail -c` create call. aeo owns dataset creation and the create/stop
+// calls; populating the root (a base userland, or a thin "pkg base"
+// install) is the operator's `provision(...)` step — aeo does not ship a
+// userland.
+//
+// Idempotency, mirroring the Linux driver:
+//   up    — if `jls -j NAME` shows it running, no-op; else ensure the
+//           dataset exists, then `jail -c` it.
+//   down  — `jail -r NAME`; an already-stopped jail is success.
+//   probe — (int) 1 if `jls -j NAME` exits 0 AND (no health, or the
+//           health command exits 0 under `jexec`).
+//
+// Paths: jail roots live at the dataset's mountpoint. aeo derives the
+// mountpoint by convention as /<dataset> unless the operator set one;
+// for the common zroot/jails/<name> layout that is /zroot/jails/<name>.
+//
+// NOTE: jail/jexec/jls/zfs live in /usr/sbin and /sbin; we use absolute
+// paths so a non-login ssh PATH (which often omits /usr/sbin) still works.
+
+import std.os (run_capture)
+import std.list
+import std.string (string_length)
+
+exports (
+    name,
+    up, down, probe,
+    jls_running_argv, jail_create_argv, jail_remove_argv,
+    zfs_create_argv, jexec_health_argv, mountpoint_for
+)
+
+name() -> string {
+    return "bsd"
+}
+
+// Convention: a dataset `zroot/jails/db` mounts at `/zroot/jails/db`.
+// (ZFS default mountpoint == /<dataset> unless overridden.) Operators
+// who set a custom mountpoint pass the path directly as `root`.
+mountpoint_for(dataset: string) -> string {
+    return "/${dataset}"
+}
+
+// --- pure argv builders ----------------------------------------------
+
+// `jls -j NAME jid` — exits 0 iff a jail named NAME exists/runs.
+jls_running_argv(res_name: string) -> ptr {
+    av = list_new()
+    list_add(av, "-j")
+    list_add(av, res_name)
+    list_add(av, "jid")
+    return av
+}
+
+// `zfs create -p DATASET` — -p creates parents, and is idempotent-ish
+// (errors if it already exists; we treat that as fine at the call site).
+zfs_create_argv(dataset: string) -> ptr {
+    av = list_new()
+    list_add(av, "create")
+    list_add(av, "-p")
+    list_add(av, dataset)
+    return av
+}
+
+// `jail -c name=NAME path=ROOT host.hostname=NAME ip4.addr=IP
+//        command=/bin/sh -c CMD persist` — create + start. We use
+// persist so the jail stays up after the (possibly short) command;
+// liveness is then the jail's existence, probed via jls.
+jail_create_argv(res_name: string, root: string, ip: string, start_cmd: string) -> ptr {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "name=${res_name}")
+    list_add(av, "path=${root}")
+    list_add(av, "host.hostname=${res_name}")
+    if string_length(ip) > 0 {
+        list_add(av, "ip4.addr=${ip}")
+    }
+    list_add(av, "persist")
+    if string_length(start_cmd) > 0 {
+        list_add(av, "exec.start=${start_cmd}")
+    }
+    return av
+}
+
+// `jail -r NAME` — stop + remove a running jail.
+jail_remove_argv(res_name: string) -> ptr {
+    av = list_new()
+    list_add(av, "-r")
+    list_add(av, res_name)
+    return av
+}
+
+// `jexec NAME /bin/sh -c HEALTH` — run the health probe inside the jail.
+jexec_health_argv(res_name: string, health: string) -> ptr {
+    av = list_new()
+    list_add(av, res_name)
+    list_add(av, "/bin/sh")
+    list_add(av, "-c")
+    list_add(av, health)
+    return av
+}
+
+// --- exec'ing entry points -------------------------------------------
+
+// Bring the jail up idempotently. `dataset` backs the root; `root` is
+// the populated jail root path (mountpoint_for(dataset) if ""); `ip` may
+// be ""; `start_cmd` may be "". Returns "" on success else an error.
+up(res_name: string, dataset: string, root: string, ip: string, start_cmd: string) -> string {
+    // Already running? no-op.
+    if probe(res_name, "", "") == 1 {
+        return ""
+    }
+    jail_root = root
+    if string_length(jail_root) == 0 {
+        if string_length(dataset) == 0 {
+            return "aeo: jail '${res_name}' has neither root() nor dataset() set"
+        }
+        jail_root = mountpoint_for(dataset)
+    }
+    // Ensure the dataset exists (ignore "already exists" failure).
+    if string_length(dataset) > 0 {
+        zav = zfs_create_argv(dataset)
+        _zo, _zs, _ze = run_capture("/sbin/zfs", zav, null)
+        list_free(zav)
+    }
+    // Create + start the jail.
+    cav = jail_create_argv(res_name, jail_root, ip, start_cmd)
+    out, status, err = run_capture("/usr/sbin/jail", cav, null)
+    list_free(cav)
+    if err != "" {
+        return "aeo: jail spawn failed for '${res_name}': ${err}"
+    }
+    if status != 0 {
+        return "aeo: 'jail -c' failed for '${res_name}' (exit ${status}): ${out}"
+    }
+    return ""
+}
+
+// Tear the jail down. Absent jail == success.
+down(res_name: string) -> string {
+    if probe(res_name, "", "") == 0 {
+        return ""
+    }
+    rav = jail_remove_argv(res_name)
+    out, status, err = run_capture("/usr/sbin/jail", rav, null)
+    list_free(rav)
+    if err != "" {
+        return "aeo: jail teardown spawn failed for '${res_name}': ${err}"
+    }
+    if status != 0 {
+        return "aeo: 'jail -r' failed for '${res_name}' (exit ${status}): ${out}"
+    }
+    return ""
+}
+
+// Liveness probe. 1 if the jail exists/runs (and the health command, when
+// given, exits 0 under jexec), else 0. Plain int (not a tuple) for the
+// same reason as driver_linux.probe.
+probe(res_name: string, health: string, _unused: string) -> int {
+    jav = jls_running_argv(res_name)
+    out, status, err = run_capture("/usr/sbin/jls", jav, null)
+    list_free(jav)
+    if err != "" {
+        return 0
+    }
+    if status != 0 {
+        return 0
+    }
+    if string_length(health) == 0 {
+        return 1
+    }
+    hav = jexec_health_argv(res_name, health)
+    hout, hstatus, herr = run_capture("/usr/sbin/jexec", hav, null)
+    list_free(hav)
+    if herr != "" {
+        return 0
+    }
+    if hstatus == 0 {
+        return 1
+    }
+    return 0
+}
