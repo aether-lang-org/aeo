@@ -17,7 +17,7 @@ import compose (dataset, command, health, depends, health_interval, health_budge
 exports ( aeo_declare )
 
 aeo_declare(cap: ptr) {
-    jail("aeo-jdb") {
+    db = jail("aeo-jdb") {
         dataset("zroot/jails/aeo-jdb")
         command("/rescue/sh -c 'sleep 600'")
         health("/rescue/test -d /")
@@ -25,12 +25,12 @@ aeo_declare(cap: ptr) {
         health_budget(30)
     }
 
-    jail("aeo-japp") {
+    app = jail("aeo-japp") {
         dataset("zroot/jails/aeo-japp")
         command("/rescue/sh -c 'sleep 600'")
         health("/rescue/test -d /")
         health_interval(500)
         health_budget(30)
-        depends("aeo-jdb")           // app jail after db jail
+        depends(db)                  // app jail after db jail
     }
 }

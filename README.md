@@ -55,25 +55,27 @@ exports ( aeo_declare )
 
 aeo_declare(cap: ptr) {
     // Tier 1: database
-    container("db") {
+    db = container("db") {
         image("docker.io/library/postgres:16")
         health("pg_isready")
     }
 
     // Tier 2: app — depends on db, so db comes up (and is healthy) first
-    container("app") {
+    app = container("app") {
         image("docker.io/library/myapp:latest")
         health("curl -fsS http://localhost:8080/healthz")
-        depends("db")
+        depends(db)
     }
 }
 ```
 
 The **kind is the verb** — `container(name) { ... }`, `jail(name) { ... }` — and
-the bare-name setters inside configure that resource (its name flows in as the
-block's context, so you don't repeat it). This is Aether's trailing-block
-builder DSL: the call site reads like config, but the body is full Aether
-(control flow, env lookups, conditionals). See
+the opener returns a **handle** you can bind (`db = container("db") { ... }`) and
+pass to `depends(db)`, so a typo'd dependency is a compile error rather than a
+silent bad string. The bare-name setters inside configure that resource (its
+name flows in as the block's context, so you don't repeat it). This is Aether's
+trailing-block builder DSL: the call site reads like config, but the body is
+full Aether (control flow, env lookups, conditionals). See
 [`docs/closures-and-builder-dsl.md`](https://github.com/aether-lang-org/aether/blob/main/docs/closures-and-builder-dsl.md)
 in the language repo for the mechanism.
 
@@ -88,9 +90,12 @@ operator writes the tree once; direction is aeo's job.
 Kind verbs: `container` / `docker` / `lxc` / `kvm` (Linux), `jail` / `bhyve`
 (FreeBSD). Block setters (one arg per call — Aether is fixed-arity): `image`,
 `command`, `health`, `dataset`, `ip`, `depends`, `health_interval`,
-`health_budget`. (`resource(name, kind) { ... }` remains as a general escape
-hatch.) See `examples/` for a Linux-container and a FreeBSD-jail composition
-with the same `db ◄ app` shape — substrate independence at the DSL layer.
+`health_budget`. `depends` accepts either a handle (`depends(db)`) or a name
+string (`depends("db")`) — handles are typo-checked, the string form is there
+for references you don't have a binding for. (`resource(name, kind) { ... }`
+remains as a general escape hatch.) See `examples/` for a Linux-container and a
+FreeBSD-jail composition with the same `db ◄ app` shape — substrate
+independence at the DSL layer.
 
 ## Running it
 

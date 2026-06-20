@@ -10,10 +10,14 @@
 // with a trivial `true` health check — enough to exercise dependency-
 // ordered, health-gated bring-up + reverse teardown without real images.
 //
-// The kind is the verb: `container("db") { ... }`. The bare-name setters
-// inside configure that resource (its name flows in as the block's _ctx).
-// Two import lines: the openers, then the block setters — the standard
-// ecosystem idiom (cf. aeb's `import bash (script, jobs, env)`).
+// The kind is the verb: `container("db") { ... }`. The opener returns a
+// handle (the resource name) you can bind and pass to depends(), matching
+// the design doc's `db = jail(cap, "db") { ... } ... depends(db)` shape —
+// a typo'd depends(dbb) is then a compile error, not a silent bad string.
+// The bare-name setters inside configure that resource (its name flows in
+// as the block's _ctx). Two import lines: the openers, then the block
+// setters — the standard ecosystem idiom (cf. aeb's `import bash (script,
+// jobs, env)`).
 
 import compose (container)
 import compose (image, command, health, depends, health_interval, health_budget)
@@ -21,7 +25,7 @@ import compose (image, command, health, depends, health_interval, health_budget)
 exports ( aeo_declare )
 
 aeo_declare(cap: ptr) {
-    container("aeo-db") {
+    db = container("aeo-db") {
         image("docker.io/library/busybox:latest")
         command("sleep 600")
         health("true")
@@ -29,12 +33,12 @@ aeo_declare(cap: ptr) {
         health_budget(30)
     }
 
-    container("aeo-app") {
+    app = container("aeo-app") {
         image("docker.io/library/busybox:latest")
         command("sleep 600")
         health("true")
         health_interval(500)
         health_budget(30)
-        depends("aeo-db")            // app comes up only after db is up
+        depends(db)                  // app comes up only after db is up
     }
 }
