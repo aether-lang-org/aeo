@@ -251,6 +251,58 @@ _status() {
     }
 }
 
+// Host-gating preflight (design § Host adaptation rule 2): every declared
+// kind is checked against the host family BEFORE any resource is touched.
+// A kind the host can't run is a fast, loud error at composition-eval
+// time — not a silent no-op, not a failure three nodes deep. Returns ""
+// if all kinds are runnable here, else the first offending error.
+_preflight() -> string {
+    fam = family()
+    n = compose.count()
+    i = 0
+    while i < n {
+        nm = compose.name_at(i)
+        k = compose.get_kind(nm)
+        runnable = _kind_runnable(k, fam)
+        if runnable == 0 {
+            return "aeo: resource '${nm}' kind '${k}' cannot run on a ${fam} host"
+        }
+        i = i + 1
+    }
+    return ""
+}
+
+// Which host family each kind requires. jail/bhyve → bsd; lxc/docker/
+// container/kvm → linux. Unknown kinds are rejected.
+_kind_runnable(k: string, fam: string) -> int {
+    if k == "jail" {
+        return _eq(fam, "bsd")
+    }
+    if k == "bhyve" {
+        return _eq(fam, "bsd")
+    }
+    if k == "lxc" {
+        return _eq(fam, "linux")
+    }
+    if k == "docker" {
+        return _eq(fam, "linux")
+    }
+    if k == "container" {
+        return _eq(fam, "linux")
+    }
+    if k == "kvm" {
+        return _eq(fam, "linux")
+    }
+    return 0
+}
+
+_eq(a: string, b: string) -> int {
+    if a == b {
+        return 1
+    }
+    return 0
+}
+
 // ---- front-door entry ----
 // Subcommand comes from AEO_CMD (the front-door sets it): "up" (default),
 // "down", or "status". The operator's declaration is run first so the
@@ -265,6 +317,14 @@ main() {
     if cmd == "status" {
         _status()
         return
+    }
+
+    // Fast-fail host gating before any bring-up or teardown touches a
+    // resource. Applies to up and down alike.
+    gate = _preflight()
+    if gate != "" {
+        println(gate)
+        exit(2)
     }
 
     if cmd == "down" {
