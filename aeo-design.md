@@ -248,6 +248,138 @@ aeo(cap) {
 `bhyve`/`jail`/`ssh`, it does not construct it. Mirrors aeb's `aeb(cap)`
 entrypoint convention exactly.
 
+## Worked example — three-tier app on one FreeBSD host
+
+The canonical end-user composition: a web tier, an app tier, and a database
+tier, all as **jails on a single FreeBSD host**, brought up in dependency
+order and torn down in reverse. This is the shape an operator actually writes.
+
+Everything below is *illustrative grammar* — the exact setter names and the
+handle model (actor vs plain struct) are still open decisions (see end of
+doc). What is NOT open: the **config-is-code** posture, single-arg setters,
+`cap` threading, dependency-ordered bring-up, liveness gating via
+`wait_for_*`, and reverse-order teardown.
+
+```
+// three-tier.ae  —  `aeo three-tier.ae`  (up)   /   `aeo down three-tier.ae`
+//
+// db  ◄── app  ◄── web        (dep edges; web depends on app depends on db)
+//
+// All three are jails on this host. bhyve/Capsicum variants shown afterwards.
+
+aeo(cap) {
+    // ---- Tier 1: database (PostgreSQL in a jail) ----
+    db = jail(cap, "db") {
+        dataset("tank/jails/db")          // ZFS dataset backing the jail root
+        ip("10.0.0.10")
+        memory_limit("2G")                // RCTL rule
+        provision("pkg install -y postgresql16-server")
+        start_command("service postgresql onestart")
+        health_check("pg_isready -h 10.0.0.10")   // probe for wait_for_*
+        health_timeout(60)
+    }
+
+    // ---- Tier 2: app server (depends on db) ----
+    app = jail(cap, "app") {
+        dataset("tank/jails/app")
+        ip("10.0.0.20")
+        memory_limit("4G")
+        depends(db)                        // ordering edge → db comes up first
+        provision("pkg install -y myapp")
+        env("DATABASE_URL", "postgres://10.0.0.10/app")
+        start_command("service myapp onestart")
+        health_check("curl -fsS http://10.0.0.20:8080/healthz")
+        health_timeout(90)
+    }
+
+    // ---- Tier 3: web / reverse proxy (depends on app) ----
+    web = jail(cap, "web") {
+        dataset("tank/jails/web")
+        ip("10.0.0.30")
+        depends(app)
+        provision("pkg install -y nginx")
+        env("UPSTREAM", "http://10.0.0.20:8080")
+        start_command("service nginx onestart")
+        health_check("curl -fsS http://10.0.0.30/")
+        health_timeout(30)
+    }
+
+    // ---- Bring-up: dependency order, gated on liveness ----
+    // aeo brings each up and blocks on its health_check before proceeding to
+    // dependents. db must be pg_isready before app starts; app must answer
+    // /healthz before web starts. This is the runtime-lifecycle layer aeb
+    // cannot express — ordering by *liveness*, not by artifact existence.
+    db.up();  db.wait_for_it_to_be_up()
+    app.up(); app.wait_for_it_to_be_up()
+    web.up(); web.wait_for_it_to_be_up()
+
+    println("three-tier stack up: http://10.0.0.30/")
+}
+```
+
+Teardown (`aeo down three-tier.ae`) walks the same tree in **reverse dependency
+order** — `web` → `app` → `db` — so the proxy stops before the app it fronts,
+and the app stops before the database it needs. The operator writes the tree
+*once*; direction is aeo's job, not the script's.
+
+### Variant A — mixed substrate (a bhyve VM leaf)
+
+Swap the app tier for a Linux appliance shipped as a bhyve VM. Only the node
+*kind* changes; the tree, deps, and `wait_for_*` are identical:
+
+```
+    app = vm(cap, "app") {
+        kind("bhyve")
+        image("/tank/images/myapp-linux.raw")
+        cpus(4)
+        memory("4G")
+        nic("10.0.0.20")
+        depends(db)
+        health_check("curl -fsS http://10.0.0.20:8080/healthz")
+        health_timeout(120)               // VMs boot slower than jails
+    }
+```
+
+`kind("bhyve")` resolves only on FreeBSD; on a Linux host this **fast-fails at
+composition-evaluation time** with a clear "bhyve requires a FreeBSD host"
+error — before `db` is ever touched (host-adaptation rule 2).
+
+### Variant B — opt into Capsicum containment for the db tier
+
+The database jail asks for kernel-enforced containment of a helper process.
+The `require_*` form is the **guarantee** posture — fast-fail if the host
+can't honor it:
+
+```
+    db = jail(cap, "db") {
+        dataset("tank/jails/db")
+        ip("10.0.0.10")
+        require_capsicum()                // guarantee → fast-fail if unavailable
+        // ... as before ...
+    }
+```
+
+On a host where `capsicum.available() == 0` (non-FreeBSD, or a kernel without
+Capsicum), `require_capsicum()` aborts the whole composition *before* bring-up,
+citing the failed probe. Had the operator written `prefer_capsicum()` instead
+(the **preference** posture), aeo would run the tier unconfined and emit a
+loud, `std.audit`-logged warning that enforcement was requested but
+unavailable. The guarantee-vs-preference distinction is the operator's, made
+explicit in the grammar (host-adaptation §, fast-fail-vs-degrade table).
+
+### What this example is NOT
+
+- **Not a build.** Nothing here compiles `myapp`; it `pkg install`s a built
+  artifact. If `myapp` needed building first, the script would shell out:
+  `os.run_capture("aeb", ["app:image"], env)` — aeo orchestrates, aeb builds
+  (the seam, above).
+- **Not multi-host.** Every node is local. The multi-host control-plane form
+  adds `host("other-box")` per node and aeo `ssh`-es the backend commands
+  there; the tree and ordering are unchanged (substrate-independence §).
+- **Not YAML.** This *is* the config. It has `println`, and could have `if
+  env_is("prod") { ... }`, env lookups, loops over a tier list — full Aether
+  underneath the config-shaped surface. That is the whole point.
+
 ## Upstream dependency: the `feat/freebsd-sandbox-parity` Aether branch
 
 aeo's Capsicum/host-gating story rests on an **existing but unmerged** Aether
