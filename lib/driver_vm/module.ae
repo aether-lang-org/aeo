@@ -212,17 +212,23 @@ _bhyve_provision(res_name: string, guest_image: string, ssh_key: string, network
     return ""
 }
 
-// Map a guest_image id to its fetch URL (a full URL passes through). Debian
-// genericcloud is UEFI + netplan-native (DHCP reliable under vm-bhyve).
+// Map a guest_image id to its fetch URL (a full URL passes through).
+// Ubuntu cloud images are the most reliable cloud-init+bhyve guest:
+// cloud-init is Canonical's project, pre-installed/enabled, NoCloud reads
+// the CIDATA seed, netplan-native, console behaves. (Debian genericcloud's
+// cloud-init didn't run under our vm-bhyve seed; Alpine's fought us too.)
 _image_url(id: string) -> string {
     if string_contains(id, "://") == 1 {
         return id
     }
+    if id == "ubuntu-22.04" {
+        return "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img"
+    }
+    if id == "ubuntu-24.04" {
+        return "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
+    }
     if id == "debian-12" {
         return "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2"
-    }
-    if id == "alpine-3.20" {
-        return "https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/cloud/nocloud_alpine-3.20.0-x86_64-uefi-cloudinit-metal-r0.qcow2"
     }
     return ""
 }

@@ -255,7 +255,7 @@ get_nic(nm: string) -> string     { return config.get("aeo.cmp.nic.${nm}") }
 get_guest_image(nm: string) -> string {
     v = config.get("aeo.cmp.guestimage.${nm}")
     if string_length(v) == 0 {
-        return "debian-12"
+        return "ubuntu-22.04"
     }
     return v
 }

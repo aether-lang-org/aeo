@@ -36,7 +36,7 @@ declare() {
         bhyve_vm("myapp") {
             cpus(2)
             memory("2G")
-            guest_image("debian-12")
+            guest_image("ubuntu-22.04")
             network("dhcp")
             ssh_key("/home/paul/.ssh/id_rsa.pub")
             app = container("app") {
@@ -105,7 +105,7 @@ main() {
     passed = passed + check("app has inline Dockerfile", _hasdf("app"), "yes")
 
     // The VM declares its guest in the DSL — aeo provisions it (vm-bhyve).
-    passed = passed + check("myapp guest_image", get_guest_image("myapp"), "debian-12")
+    passed = passed + check("myapp guest_image", get_guest_image("myapp"), "ubuntu-22.04")
 
     println("=== ALL ${_itoa(passed)} PASS — nested system resolved correctly ===")
     println("")

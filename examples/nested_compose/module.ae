@@ -56,7 +56,7 @@ aeo_orchestration() {
             cpus(2)
             memory("2G")
             // The guest, declared — aeo provisions it via vm-bhyve:
-            guest_image("debian-12")     // UEFI cloud image, netplan-native
+            guest_image("ubuntu-22.04")     // UEFI cloud image, netplan-native
             network("dhcp")              // get an IP on the host bridge
             ssh_key("/home/paul/.ssh/id_rsa.pub")   // so aeo can ssh in
 
