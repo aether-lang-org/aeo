@@ -328,10 +328,57 @@ _eq(a: string, b: string) -> int {
     return 0
 }
 
+// Print the planned bring-up order WITHOUT touching any resource. Mirrors
+// run_up's dependency-resolution passes but only prints; the same order
+// run_up would boot in. Resources whose depends() target appears later in
+// declaration order still sort correctly because the pass loop defers
+// them until the target has been "planned".
+_plan() {
+    n = compose.count()
+    println("aeo: dry-run — would bring up ${n} resource(s) in this order:")
+    // planned[] tracked via config flags so we can reuse get_state-free
+    // logic; here just simulate the same convergence the engine uses.
+    seen = 0
+    step = 1
+    pass = 0
+    while pass < n {
+        i = 0
+        while i < n {
+            nm = compose.name_at(i)
+            if config.get("aeo.plan.${nm}") == "" {
+                dep = compose.get_depends(nm)
+                ready = 0
+                if dep == "" {
+                    ready = 1
+                } else {
+                    if config.get("aeo.plan.${dep}") == "done" {
+                        ready = 1
+                    }
+                }
+                if ready == 1 {
+                    config.put("aeo.plan.${nm}", "done")
+                    k = compose.get_kind(nm)
+                    health = compose.get_health(nm)
+                    if dep == "" {
+                        println("  ${step}. ${nm} [${k}]  health='${health}'")
+                    } else {
+                        println("  ${step}. ${nm} [${k}] ◄ ${dep}  health='${health}'")
+                    }
+                    step = step + 1
+                    seen = seen + 1
+                }
+            }
+            i = i + 1
+        }
+        pass = pass + 1
+    }
+    println("aeo: teardown would be the reverse of the above")
+}
+
 // ---- front-door entry ----
 // Subcommand comes from AEO_CMD (the front-door sets it): "up" (default),
-// "down", or "status". The operator's declaration is run first so the
-// resource tree exists for every subcommand.
+// "down", "status", or "dry-run". The operator's declaration is run first
+// so the resource tree exists for every subcommand.
 main() {
     aeo_declare(null)            // operator compose populates the tree (data)
     cmd = config.get("AEO_CMD")
@@ -345,11 +392,18 @@ main() {
     }
 
     // Fast-fail host gating before any bring-up or teardown touches a
-    // resource. Applies to up and down alike.
+    // resource. Applies to up, down, and dry-run alike — dry-run is the
+    // operator's pre-flight check, so it MUST surface the same gating.
     gate = _preflight()
     if gate != "" {
         println(gate)
         exit(2)
+    }
+
+    if cmd == "dry-run" {
+        println(profile())
+        _plan()
+        return
     }
 
     if cmd == "down" {

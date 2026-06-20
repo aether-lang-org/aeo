@@ -2,10 +2,12 @@
 // bash trampoline).
 //
 // Usage:
-//   aeo <compose.ae>           bring the tree up
-//   aeo up <compose.ae>        (explicit) bring up
-//   aeo down <compose.ae>      tear down in reverse
-//   aeo status <compose.ae>    show each resource's live state
+//   aeo <compose.ae>            bring the tree up
+//   aeo up <compose.ae>         (explicit) bring up
+//   aeo down <compose.ae>       tear down in reverse
+//   aeo status <compose.ae>     show each resource's live state
+//   aeo dry-run <compose.ae>    validate + print the bring-up plan, touch nothing
+//   aeo --dry-run <compose.ae>  (flag spelling of dry-run)
 //
 // What it does — the "casually generate + supervise" seam:
 //   1. Resolve AEO_HOME (the install/dev tree holding lib/ + the runner).
@@ -49,15 +51,23 @@ main() {
         }
     }
 
+    // Accept the flag spelling `--dry-run` as well as the subcommand
+    // `dry-run`; normalize to the subcommand the runner understands.
+    if cmd == "--dry-run" {
+        cmd = "dry-run"
+    }
+
     if compose_path == "" {
-        println("usage: aeo [up|down|status] <compose.ae>")
+        println("usage: aeo [up|down|status|dry-run] <compose.ae>")
         exit(2)
     }
     if cmd != "up" {
         if cmd != "down" {
             if cmd != "status" {
-                println("aeo: unknown subcommand '${cmd}' (want up|down|status)")
-                exit(2)
+                if cmd != "dry-run" {
+                    println("aeo: unknown subcommand '${cmd}' (want up|down|status|dry-run)")
+                    exit(2)
+                }
             }
         }
     }
@@ -69,7 +79,11 @@ main() {
     }
 
     // --- assemble the build dir ---
+    // Clear it first: staging into a leftover dir from a prior run would
+    // mix compositions (the previous operator's aeo_compose module + a
+    // cached aeo-run binary would leak into this run). Start clean.
     work = "/tmp/aeo-build"
+    _ = _rmrf(work)
     _ = mkdir_p(work)
     libdst = string_concat(work, "/lib")
 
@@ -154,6 +168,20 @@ _cp_r(src: string, dst: string) -> int {
     list_add(av, string_concat(src, "/."))
     list_add(av, dst)
     out, status, err = run_capture("/bin/cp", av, null)
+    list_free(av)
+    if err != "" {
+        return 1
+    }
+    return status
+}
+
+// rm -rf PATH — clear the staging dir before a fresh build. Returns 0 on
+// success (absent path is also success).
+_rmrf(path: string) -> int {
+    av = list_new()
+    list_add(av, "-rf")
+    list_add(av, path)
+    out, status, err = run_capture("/bin/rm", av, null)
     list_free(av)
     if err != "" {
         return 1
