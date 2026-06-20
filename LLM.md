@@ -9,7 +9,9 @@ supervision, no bash trampoline) and **Decision 2 = 2A** (actor per
 resource). Read `aeo-design.md` for the full design; the OPEN-DECISIONS
 section below records how they were closed. The Aether upstream blockers
 the design doc names (capsicum/casper/signal/run_supervised) are MERGED as
-of ae 0.291 — see `docs/aether-actor-string-bug.md` and the memory notes.
+of ae 0.292. **aeo requires ae ≥ 0.295** (the actor-state string fix aeo
+reported landed there; the runner now holds real string state). Both the
+GhostBSD box and the Chromebook are on 0.295 — see the memory notes.
 
 What exists and is TESTED end-to-end:
 - `lib/host/` — host-profile probe (uname/platform → bsd/linux/other) +
@@ -99,12 +101,15 @@ silently re-litigate them.
   actors + operator compose body + `import`ing the library drivers
   (aeb-orchestrator-style). The examples/ file is the hand-written shape of
   that generated unit.
-- **A string message field retained in actor state corrupts** (dangles
-  after the message frees; the `string_concat` copy workaround hits a
-  codegen bug). Workaround in use: actors hold ONLY ints in state; all
-  string config is stashed to `std.config` KV keyed by resource name, read
-  fresh each handler. Full writeup + minimal repro:
-  `docs/aether-actor-string-bug.md`. File upstream; aeo is the pressure.
+- **A string message field retained in actor state corrupted** (dangled
+  after the message freed) on ae ≤ 0.291. **FIXED in ae 0.295** (reported by
+  aeo). aeo now **requires ae ≥ 0.295** and holds real string state in the
+  resource actor (`nm`/`kind` set once via a `Configure` message). The old
+  config-KV "hold only ints, stash strings" workaround has been REMOVED from
+  the runner + examples. `docs/aether-actor-string-bug.md` keeps the repro.
+  NOTE: `set_state`/`get_state` via `std.config` is still used — but that's
+  the legitimate main↔actor STATE BRIDGE (main polls the resource's
+  published state; it can't await an actor reply), not the string workaround.
 
 ## Repo topology & dependency direction (invariant)
 

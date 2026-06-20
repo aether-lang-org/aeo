@@ -3,9 +3,14 @@
 **Found by:** aeo (first real consumer of the actor model for long-lived
 stateful resources), 2026-06-20, against `ae 0.291.0`.
 
-**Status:** worked around in aeo; should be filed/fixed upstream. aeo is
-the downstream pressure to land the fix (per aether/LLM.md's "downstream
-finds the gaps" dynamic).
+**Status: FIXED in Aether 0.295.0** (reported by aeo; CHANGELOG [0.295.0]:
+the state-field retain now copies the borrowed string into an owned
+AetherString, and the `string.concat(in_n, "")` `_heap_n undeclared`
+codegen bug is fixed too). aeo now **requires ae ≥ 0.295** and holds real
+string state in the resource actor — the config-KV workaround below has
+been removed from `lib/aeo/runner.ae` and `examples/two-tier-linux.ae`.
+This document is kept as the historical record + minimal repro. Everything
+under "What DOES work (aeo's workaround)" is no longer needed on ≥0.295.
 
 ## Symptom
 

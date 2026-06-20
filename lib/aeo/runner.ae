@@ -31,37 +31,50 @@ import aeo_compose (aeo_declare)
 // `aeo_compose` providing `aeo_declare(cap)`. For a self-contained build,
 // build with `--lib <dir-with-aeo_compose>`; examples/ provide one.
 
-// ---- messages (in_-prefixed; strings stashed to config, never retained
-// in actor state — see docs/aether-actor-string-bug.md) ----
-message Boot { in_name: string }
-message Halt { in_name: string }
+// ---- messages ----
+// Configure sets the actor's identity (name + kind) once at spawn; Boot
+// and Halt then carry no payload — the actor reads nm/kind from its own
+// state. (The earlier in_name-on-every-message threading was a workaround
+// for an actor-state string-corruption bug fixed in ae 0.295; aeo now
+// requires >= 0.295, so the actor holds real string state.)
+message Configure { in_name: string, in_kind: string }
+message Boot {}
+message Halt {}
 
 // ---- the generic resource actor ----
-// No string state (heap-string-in-state corrupts; see
-// docs/aether-actor-string-bug.md). Poll tuning is read from compose data
-// and passed to _poll_to_up, not held in state.
+// One actor per declared resource. Holds its own identity (nm/kind) as
+// state, set once via Configure. Per-resource declaration details
+// (image/health/command/…) are read from the operator's compose data via
+// compose.get_*(nm) — that's the declaration source of truth, not actor
+// state. The main composition observes progress through the std.config
+// state bridge (set_state/get_state), since main can't await an actor
+// reply directly.
 actor Resource {
-    state _unused = 0
+    state nm = ""
+    state kind = ""
 
     receive {
-        Boot(in_name) -> {
-            set_state(in_name, STATE_BOOTING())
-            k = compose.get_kind(in_name)
-            err = driver_up(in_name, k)
+        Configure(in_name, in_kind) -> {
+            nm = in_name
+            kind = in_kind
+            set_state(nm, STATE_DOWN())
+        }
+        Boot -> {
+            set_state(nm, STATE_BOOTING())
+            err = driver_up(nm, kind)
             if err != "" {
-                println("aeo: [${in_name}] up failed: ${err}")
-                set_state(in_name, STATE_FAILED())
+                println("aeo: [${nm}] up failed: ${err}")
+                set_state(nm, STATE_FAILED())
             } else {
-                _poll_to_up(in_name, k, compose.get_interval(in_name), compose.get_budget(in_name))
+                _poll_to_up(nm, kind, compose.get_interval(nm), compose.get_budget(nm))
             }
         }
-        Halt(in_name) -> {
-            k = compose.get_kind(in_name)
-            err = driver_down(in_name, k)
+        Halt -> {
+            err = driver_down(nm, kind)
             if err != "" {
-                println("aeo: [${in_name}] down failed: ${err}")
+                println("aeo: [${nm}] down failed: ${err}")
             }
-            set_state(in_name, STATE_DOWN())
+            set_state(nm, STATE_DOWN())
         }
     }
 }
@@ -174,7 +187,8 @@ run_up() -> int {
                 }
                 if ready == 1 {
                     a = spawn(Resource())
-                    a ! Boot { in_name: nm }
+                    a ! Configure { in_name: nm, in_kind: compose.get_kind(nm) }
+                    a ! Boot {}
                     st = _await(nm, 120)
                     if st != STATE_UP() {
                         return 0
@@ -204,7 +218,8 @@ run_down() {
     while i >= 0 {
         nm = compose.name_at(i)
         a = spawn(Resource())
-        a ! Halt { in_name: nm }
+        a ! Configure { in_name: nm, in_kind: compose.get_kind(nm) }
+        a ! Halt {}
         _await_down(nm, 60)
         i = i - 1
     }

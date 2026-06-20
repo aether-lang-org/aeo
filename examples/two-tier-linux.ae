@@ -26,74 +26,67 @@ import driver_linux
 import resource (get_state, STATE_UP, STATE_BOOTING, STATE_DOWN, STATE_FAILED, set_state)
 
 // ---- messages ----
-// Every lifecycle message carries `in_name` — the resource's config-KV
-// namespace key. The actor holds ONLY ints in state (booting/probe
-// counters); all string config (image/command/health) lives in
-// std.config under "aeo.cfg.<name>.*", read fresh each handler.
-//
-// Why: a heap-string passed as a message field and RETAINED in actor
-// state across messages is corrupted by an upstream Aether bug (verified
-// 0.291 — the state field dangles after the message is freed; a
-// defensive string_concat copy hits a separate codegen bug). Strings ARE
-// valid for the duration of the handler that receives them, so we stash
-// them to config immediately and never hold a string in state. See
-// docs/aether-actor-string-bug.md.
+// Configure sets the actor's identity + config once at spawn; the actor
+// holds it as real string state (nm/image/command/health). Start/Probe/Stop
+// then carry no payload. (Holding strings in actor state needs ae >= 0.295,
+// where the actor-state string-retain bug aeo reported was fixed.)
 message Configure { in_name: string, in_image: string, in_command: string, in_health: string, in_interval_ms: int, in_budget: int }
-message Start { in_name: string }
-message Probe { in_name: string }
-message Stop { in_name: string }
+message Start {}
+message Probe {}
+message Stop {}
 
 // ---- the resource actor: one container, with a health-poll loop ----
 actor Container {
+    state nm = ""
+    state image = ""
+    state command = ""
+    state health = ""
     state probe_interval_ms = 1000
     state probe_left = 60
     state booting = 0
 
     receive {
         Configure(in_name, in_image, in_command, in_health, in_interval_ms, in_budget) -> {
-            // Stash string config while the message strings are live.
-            config.put("aeo.cfg.${in_name}.image", in_image)
-            config.put("aeo.cfg.${in_name}.command", in_command)
-            config.put("aeo.cfg.${in_name}.health", in_health)
+            nm = in_name
+            image = in_image
+            command = in_command
+            health = in_health
             probe_interval_ms = in_interval_ms
             probe_left = in_budget
-            set_state(in_name, STATE_DOWN())
+            set_state(nm, STATE_DOWN())
         }
-        Start(in_name) -> {
-            set_state(in_name, STATE_BOOTING())
+        Start -> {
+            set_state(nm, STATE_BOOTING())
             booting = 1
-            image = config.get("aeo.cfg.${in_name}.image")
-            command = config.get("aeo.cfg.${in_name}.command")
-            err = driver_linux.up(in_name, image, command, "")
+            err = driver_linux.up(nm, image, command, "")
             if err != "" {
-                println("aeo: [${in_name}] up failed: ${err}")
-                set_state(in_name, STATE_FAILED())
+                println("aeo: [${nm}] up failed: ${err}")
+                set_state(nm, STATE_FAILED())
                 booting = 0
             } else {
-                self ! Probe { in_name: in_name }
+                self ! Probe {}
             }
         }
         // Probe runs a bounded health-poll loop. Actors process one
         // message at a time, so this blocks only THIS resource's actor;
         // sibling resources (separate actor instances) poll concurrently.
         // The loop ends at up (state→up) or budget exhaustion (→failed).
-        Probe(in_name) -> {
+        Probe -> {
             if booting == 1 {
-                health = config.get("aeo.cfg.${in_name}.health")
                 left = probe_left
                 done = 0
                 while done == 0 {
-                    alive = driver_linux.probe(in_name, health, "")
+                    alive = driver_linux.probe(nm, health, "")
                     if alive == 1 {
-                        set_state(in_name, STATE_UP())
+                        set_state(nm, STATE_UP())
                         booting = 0
                         done = 1
-                        println("aeo: [${in_name}] up")
+                        println("aeo: [${nm}] up")
                     } else {
                         left = left - 1
                         if left <= 0 {
-                            println("aeo: [${in_name}] health budget exhausted — giving up")
-                            set_state(in_name, STATE_FAILED())
+                            println("aeo: [${nm}] health budget exhausted — giving up")
+                            set_state(nm, STATE_FAILED())
                             booting = 0
                             done = 1
                         } else {
@@ -103,13 +96,13 @@ actor Container {
                 }
             }
         }
-        Stop(in_name) -> {
+        Stop -> {
             booting = 0
-            err = driver_linux.down(in_name, "")
+            err = driver_linux.down(nm, "")
             if err != "" {
-                println("aeo: [${in_name}] down failed: ${err}")
+                println("aeo: [${nm}] down failed: ${err}")
             }
-            set_state(in_name, STATE_DOWN())
+            set_state(nm, STATE_DOWN())
         }
     }
 }
@@ -158,7 +151,7 @@ main() {
     // ---- dependency-ordered bring-up, gated on liveness ----
     // db comes up and must be healthy BEFORE app starts. That ordering is
     // by health, not by artifact existence — aeo's whole reason to exist.
-    db ! Start { in_name: "aeo-db" }
+    db ! Start {}
     db_st = await_up("aeo-db", 30)
     if db_st != STATE_UP() {
         println("aeo: db failed to come up (${db_st}); aborting bring-up")
@@ -166,7 +159,7 @@ main() {
         return
     }
 
-    app ! Start { in_name: "aeo-app" }
+    app ! Start {}
     app_st = await_up("aeo-app", 30)
     if app_st != STATE_UP() {
         println("aeo: app failed to come up (${app_st}); tearing down")
@@ -183,9 +176,9 @@ main() {
 
 // Reverse-order teardown. app stops before the db it depends on.
 _teardown(app: actor_ref, db: actor_ref) {
-    app ! Stop { in_name: "aeo-app" }
+    app ! Stop {}
     sleep(1500)
-    db ! Stop { in_name: "aeo-db" }
+    db ! Stop {}
     sleep(1500)
     wait_for_idle()
 }
