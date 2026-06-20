@@ -195,12 +195,22 @@ _bhyve_provision(res_name: string, guest_image: string, ssh_key: string, network
     if string_length(key) == 0 {
         key = "/home/paul/.ssh/id_rsa.pub"
     }
-    net = _netconfig(network)
-    // One shell command: fetch image if absent, then create. argv elements
-    // are controlled (ids/paths), so the shell composition is safe.
+    // Generate a cloud-init user-data with the hard-won fixes baked in:
+    //  - datasource_list:[NoCloud,None] — don't hang ~2min probing network
+    //    metadata; read our seed (verified: avoids the long init stall).
+    //  - ssh key install (so aeo can ssh into the guest).
+    //  - a console password (ubuntu:aeo) for debugging.
+    //  - runcmd `for i in ...: ip link set eth0 up; dhclient -1 eth0` —
+    //    Ubuntu's netplan rendered eth0 but left it DOWN under vm-bhyve, so
+    //    nothing DHCP'd (verified: manual up+dhclient instantly got a lease).
+    //    runcmd (late, after the network stage so the virtio NIC is ready —
+    //    bootcmd ran too early) with a retry loop forces link-up + DHCP.
+    // The shell here writes the YAML to a temp file then `vm create -C -u`.
+    // (heredoc-style via printf; $-vars are escaped so the guest sees them.)
+    ud = "/tmp/aeo-ud-${res_name}.yml"
     sh = list_new()
     list_add(sh, "-c")
-    list_add(sh, "sudo -n vm img 2>/dev/null | grep -q ${file} || sudo -n vm img ${url}; sudo -n vm create -t linux -i ${file} -C -k ${key} -n '${net}' ${res_name}")
+    list_add(sh, "set -e; KEY=$(cat ${key}); printf '#cloud-config\\ndatasource_list: [ NoCloud, None ]\\nssh_pwauth: true\\nchpasswd:\\n  expire: false\\n  list: |\\n    ubuntu:aeo\\n    root:aeo\\nssh_authorized_keys:\\n  - %s\\nruncmd:\\n  - [ sh, -c, \"for i in 1 2 3 4 5 6; do ip link set eth0 up; dhclient -1 eth0 && break; sleep 3; done\" ]\\n' \"$KEY\" > ${ud}; sudo -n vm img 2>/dev/null | grep -q ${file} || sudo -n vm img ${url}; sudo -n vm create -t linux -i ${file} -C -u ${ud} ${res_name}")
     out, status, err = run_capture("/bin/sh", sh, null)
     list_free(sh)
     if err != "" {
