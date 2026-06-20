@@ -64,7 +64,8 @@ aeo_orchestration() {
 FROM docker.io/library/busybox:latest
 RUN echo "myapp v1, built by aeo" > /etc/myapp-release
 CMD ["sh", "-c", "while true; do echo ok | nc -l -p 8080; done"]
-DOCKER)
+DOCKER
+                )
                 health("nc -z localhost 8080")
                 depends(db)
             }

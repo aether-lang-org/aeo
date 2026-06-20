@@ -142,12 +142,16 @@ command(_ctx: ptr, v: string) { config.put("aeo.cmp.command.${_ctx}", v) }
 
 // Inline Dockerfile (heredoc). When set, aeo BUILDS the image from this
 // text and runs the result, instead of pulling image(). Pass it a
-// <<DOCKER … DOCKER heredoc so the Dockerfile lives in the composition:
+// <<DOCKER … DOCKER heredoc so the Dockerfile lives in the composition.
+// IMPORTANT: the closing `)` must go on its OWN line — a heredoc terminator
+// must be alone on its line, so `DOCKER)` does NOT parse (the heredoc eats
+// the rest of the file). Write it:
 //   container("app") {
 //       dockerfile(<<DOCKER
 //   FROM docker.io/library/busybox:latest
 //   CMD ["sh","-c","sleep 600"]
-//   DOCKER)
+//   DOCKER
+//       )
 //   }
 // (Convenience for small self-contained images. For anything nontrivial,
 // build with aeb and reference the resulting image via image().)

@@ -15,12 +15,17 @@
 //          └─ app (container, INSIDE myapp) ── depends ──► db
 
 import compose (system, bhyve_vm, jail, container)
-import compose (dataset, command, image, cpus, memory, health, depends)
-import compose (count, name_at, get_kind, get_system, get_host, get_depends, syscount, sysname_at)
+import compose (dataset, command, dockerfile, cpus, memory, health, depends)
+import compose (count, name_at, get_kind, get_system, get_host, get_depends, get_dockerfile, syscount, sysname_at)
+import std.string (string_contains)
 
 extern exit(code: int)
 
 // ---- the composition, exactly as an operator would write it ----
+// `app` is a REAL, buildable image — an inline heredoc Dockerfile, not a
+// fictional registry reference. On the GhostBSD box this is built and run
+// INSIDE the bhyve Linux guest by the aeo-agent that lives there; the
+// Dockerfile is also where the agent gets baked in.
 declare() {
     system("red222") {
         db = jail("db") {
@@ -32,8 +37,13 @@ declare() {
             cpus(2)
             memory("2G")
             app = container("app") {
-                image("docker.io/library/myapp:latest")
-                health("curl -fsS http://localhost:8080/healthz")
+                dockerfile(<<DOCKER
+FROM docker.io/library/busybox:latest
+RUN echo "myapp v1, built by aeo" > /etc/myapp-release
+CMD ["sh", "-c", "while true; do echo ok | nc -l -p 8080; done"]
+DOCKER
+                )
+                health("nc -z localhost 8080")
                 depends(db)
             }
         }
@@ -86,6 +96,10 @@ main() {
     // The dependency crosses the VM boundary: app depends on db.
     passed = passed + check("app depends", get_depends("app"), "db")
 
+    // app is a real, buildable image: an inline heredoc Dockerfile, not a
+    // fictional registry reference.
+    passed = passed + check("app has inline Dockerfile", _hasdf("app"), "yes")
+
     println("=== ALL ${_itoa(passed)} PASS — nested system resolved correctly ===")
     println("")
     println("Tree:")
@@ -93,6 +107,15 @@ main() {
     println("    db    [jail]      (host level)")
     println("    myapp [bhyve]     (host level)")
     println("      app [container] (inside myapp) -> depends db")
+}
+
+// "yes" if app's dockerfile resolved and looks like a real Dockerfile.
+_hasdf(nm: string) -> string {
+    df = get_dockerfile(nm)
+    if string_contains(df, "FROM ") == 1 {
+        return "yes"
+    }
+    return "no"
 }
 
 // helpers
