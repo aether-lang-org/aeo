@@ -1,0 +1,83 @@
+// lib/protocol — the aeo-agent command language (the wire protocol).
+//
+// The durable artifact of aeo-agent: a small text command language that
+// the parent (runner or a higher agent) and a child agent exchange. v0
+// carries it as lines in a shared file; a later transport (std.http.server
+// with single-parent auth) carries the SAME verbs over a different
+// envelope. The verbs + fields are the stable contract; the transport
+// under them is replaceable.
+//
+// Wire format — one command per line, space-separated fields:
+//
+//   inbound  (parent → agent):
+//     boot  <token> <node>          bring <node> up (in the agent's subtree)
+//     halt  <token> <node>          tear <node> down
+//     probe <token> <node>          report <node>'s current state
+//
+//   outbound (agent → parent):
+//     announce <token> <agent> up   "I'm <agent>, alive, ready for work"
+//     report   <token> <node> <st>  "<node> is now <st>" (up/down/failed)
+//
+// `token` is a per-agent secret the parent stamps at bootstrap. v0 carries
+// it in every message and checks it (warn-on-mismatch); the eventual
+// http-server transport flips it to fail-closed — "only one parent,
+// securely" becomes enforcement, not a redesign. Because the field is in
+// the protocol from day one, that pivot is non-breaking.
+//
+// The verb set WILL evolve (provision, nest, …). This is the agile v0;
+// keep the encoder/parser the single place the format lives.
+
+import std.string (string_length, string_index_of, string_substring)
+
+exports (
+    encode_boot, encode_halt, encode_probe,
+    encode_announce, encode_report,
+    verb_of, token_of, arg1_of, arg2_of
+)
+
+// ---- encoders (callers build a line, hand it to a transport) ----
+
+encode_boot(token: string, node: string) -> string {
+    return "boot ${token} ${node}"
+}
+encode_halt(token: string, node: string) -> string {
+    return "halt ${token} ${node}"
+}
+encode_probe(token: string, node: string) -> string {
+    return "probe ${token} ${node}"
+}
+encode_announce(token: string, agent: string) -> string {
+    return "announce ${token} ${agent} up"
+}
+encode_report(token: string, node: string, st: string) -> string {
+    return "report ${token} ${node} ${st}"
+}
+
+// ---- accessors (a receiver splits a line into fields) ----
+// Field 0 = verb, field 1 = token, field 2 = arg1 (node/agent),
+// field 3 = arg2 (state, for `report`). Pure string splitting so the
+// transport just hands us a line.
+
+verb_of(line: string) -> string  { return _field(line, 0) }
+token_of(line: string) -> string { return _field(line, 1) }
+arg1_of(line: string) -> string  { return _field(line, 2) }
+arg2_of(line: string) -> string  { return _field(line, 3) }
+
+// Return the i-th space-separated field of `line` (0-based), or "".
+_field(line: string, idx: int) -> string {
+    rest = line
+    i = 0
+    while i < idx {
+        sp = string_index_of(rest, " ")
+        if sp < 0 {
+            return ""
+        }
+        rest = string_substring(rest, sp + 1, string_length(rest))
+        i = i + 1
+    }
+    sp = string_index_of(rest, " ")
+    if sp < 0 {
+        return rest
+    }
+    return string_substring(rest, 0, sp)
+}
