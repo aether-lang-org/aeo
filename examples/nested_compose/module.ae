@@ -34,7 +34,7 @@
 // and the block setters.
 
 import compose (system, bhyve_vm, jail, container)
-import compose (dockerfile, command, dataset, cpus, memory, health, expose, depends, health_interval, health_budget)
+import compose (dockerfile, command, dataset, cpus, memory, guest_image, network, ssh_key, health, expose, depends, health_interval, health_budget)
 
 exports ( aeo_orchestration )
 
@@ -55,6 +55,10 @@ aeo_orchestration() {
         bhyve_vm("myapp") {
             cpus(2)
             memory("2G")
+            // The guest, declared — aeo provisions it via vm-bhyve:
+            guest_image("debian-12")     // UEFI cloud image, netplan-native
+            network("dhcp")              // get an IP on the host bridge
+            ssh_key("/home/paul/.ssh/id_rsa.pub")   // so aeo can ssh in
 
             // `app` is THE workload — a real Python (stdlib, no pip) HTTP
             // arithmetic service, GET /add/2/3 -> "5". Built from this inline

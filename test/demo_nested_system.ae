@@ -15,8 +15,8 @@
 //          └─ app (container, INSIDE myapp) ── depends ──► db
 
 import compose (system, bhyve_vm, jail, container)
-import compose (dataset, command, dockerfile, cpus, memory, health, expose, depends)
-import compose (count, name_at, get_kind, get_system, get_host, get_depends, get_dockerfile, syscount, sysname_at)
+import compose (dataset, command, dockerfile, cpus, memory, guest_image, network, ssh_key, health, expose, depends)
+import compose (count, name_at, get_kind, get_system, get_host, get_depends, get_dockerfile, get_guest_image, syscount, sysname_at)
 import std.string (string_contains)
 
 extern exit(code: int)
@@ -36,6 +36,9 @@ declare() {
         bhyve_vm("myapp") {
             cpus(2)
             memory("2G")
+            guest_image("debian-12")
+            network("dhcp")
+            ssh_key("/home/paul/.ssh/id_rsa.pub")
             app = container("app") {
                 dockerfile(<<DOCKER
 FROM docker.io/library/python:3-alpine
@@ -100,6 +103,9 @@ main() {
     // app is a real, buildable image: an inline heredoc Dockerfile, not a
     // fictional registry reference.
     passed = passed + check("app has inline Dockerfile", _hasdf("app"), "yes")
+
+    // The VM declares its guest in the DSL — aeo provisions it (vm-bhyve).
+    passed = passed + check("myapp guest_image", get_guest_image("myapp"), "debian-12")
 
     println("=== ALL ${_itoa(passed)} PASS — nested system resolved correctly ===")
     println("")

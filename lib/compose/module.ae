@@ -36,12 +36,14 @@ exports (
     container, docker, lxc, kvm, jail, bhyve,
     image, command, dockerfile, health, dataset, ip, depends,
     cpus, memory, nic, expose,
+    guest_image, network, ssh_key,
     health_interval, health_budget,
     count, name_at, get_system, get_host,
     syscount, sysname_at,
     get_kind, get_image, get_dockerfile, get_command, get_health, get_dataset, get_ip,
     get_depends, get_interval, get_budget,
-    get_cpus, get_memory, get_nic, get_expose
+    get_cpus, get_memory, get_nic, get_expose,
+    get_guest_image, get_network, get_ssh_key
 )
 
 // --- the trailing-block builder DSL ----------------------------------
@@ -174,6 +176,19 @@ cpus(_ctx: ptr, n: int)       { config.put("aeo.cmp.cpus.${_ctx}", string_from_i
 memory(_ctx: ptr, v: string)  { config.put("aeo.cmp.memory.${_ctx}", v) }
 nic(_ctx: ptr, v: string)     { config.put("aeo.cmp.nic.${_ctx}", v) }
 
+// VM guest provisioning (bhyve via vm-bhyve) — config IS code, down into
+// the VM. Declared on the bhyve_vm block; the driver realizes them as a
+// `vm create -i <image> -C -k <key> -n <netconfig>` if the VM doesn't yet
+// exist, so the operator declares the guest and aeo provisions it.
+//   guest_image  — a known image id ("debian-12") or a full URL; the
+//                  driver maps an id to its fetch URL.
+//   network      — "dhcp" (default) or a static spec
+//                  "ip=10.0.0.5/24;gateway4=10.0.0.1".
+//   ssh_key      — path to the pubkey cloud-init installs so aeo can ssh in.
+guest_image(_ctx: ptr, v: string) { config.put("aeo.cmp.guestimage.${_ctx}", v) }
+network(_ctx: ptr, v: string)     { config.put("aeo.cmp.network.${_ctx}", v) }
+ssh_key(_ctx: ptr, v: string)     { config.put("aeo.cmp.sshkey.${_ctx}", v) }
+
 // `depends("db")` inside app's block — app depends on db, so db is brought
 // up first and torn down last. One per call (Aether is fixed-arity); v0
 // records the LAST dependency (the common single-upstream tier chain), a
@@ -234,6 +249,24 @@ get_dataset(nm: string) -> string { return config.get("aeo.cmp.dataset.${nm}") }
 get_ip(nm: string) -> string      { return config.get("aeo.cmp.ip.${nm}") }
 get_depends(nm: string) -> string { return config.get("aeo.cmp.depends.${nm}") }
 get_nic(nm: string) -> string     { return config.get("aeo.cmp.nic.${nm}") }
+
+// Guest provisioning getters (defaults make a bhyve_vm work with no
+// explicit provisioning setters — debian-12 + dhcp).
+get_guest_image(nm: string) -> string {
+    v = config.get("aeo.cmp.guestimage.${nm}")
+    if string_length(v) == 0 {
+        return "debian-12"
+    }
+    return v
+}
+get_network(nm: string) -> string {
+    v = config.get("aeo.cmp.network.${nm}")
+    if string_length(v) == 0 {
+        return "dhcp"
+    }
+    return v
+}
+get_ssh_key(nm: string) -> string { return config.get("aeo.cmp.sshkey.${nm}") }
 
 // Exposed port (0 = none declared).
 get_expose(nm: string) -> int {

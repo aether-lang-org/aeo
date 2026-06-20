@@ -152,7 +152,9 @@ driver_up(nm: string, k: string) -> string {
         return driver_bsd.up(nm, compose.get_dataset(nm), "", compose.get_ip(nm), compose.get_command(nm))
     }
     if k == "bhyve" {
-        return driver_vm.up("bhyve", nm, compose.get_image(nm), compose.get_cpus(nm), compose.get_memory(nm), compose.get_nic(nm))
+        // bhyve provisions-if-absent then starts via vm-bhyve, from the
+        // guest declaration (image/network/ssh_key + sizing).
+        return driver_vm.bhyve_up(nm, compose.get_guest_image(nm), compose.get_cpus(nm), compose.get_memory(nm), compose.get_network(nm), compose.get_ssh_key(nm))
     }
     if k == "kvm" {
         return driver_vm.up("kvm", nm, compose.get_image(nm), compose.get_cpus(nm), compose.get_memory(nm), compose.get_nic(nm))

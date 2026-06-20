@@ -30,11 +30,11 @@
 
 import std.os (run_capture, os_which)
 import std.list
-import std.string (string_length, string_char_at)
+import std.string (string_length, string_char_at, string_substring, string_contains)
 
 exports (
     name,
-    up, down, probe,
+    up, bhyve_up, down, probe,
     bhyve_argv, qemu_argv, bhyvectl_destroy_argv,
     pidfile_for, bootrom_path
 )
@@ -130,12 +130,8 @@ qemu_argv(res_name: string, image: string, cpus: int, mem: string, tap: string, 
 // disk; `cpus`/`mem` size it; `tap` is the host NIC ("" for none).
 // Returns "" on success else an error message.
 up(kind: string, res_name: string, image: string, cpus: int, mem: string, tap: string) -> string {
-    // Per-kind functions handle their own idempotency (bhyve checks
-    // vm-bhyve state; kvm checks the pidfile). bhyve via vm-bhyve doesn't
-    // need image() here — the VM was provisioned by setup-guest.sh.
-    if kind == "bhyve" {
-        return _up_bhyve(res_name, image, cpus, mem, tap)
-    }
+    // bhyve has its own entry (bhyve_up — provisions via vm-bhyve from the
+    // guest declaration); this generic up() handles kvm (qemu).
     if kind == "kvm" {
         if string_length(image) == 0 {
             return "aeo: vm '${res_name}' has no image() set"
@@ -145,21 +141,25 @@ up(kind: string, res_name: string, image: string, cpus: int, mem: string, tap: s
     return "aeo: vm '${res_name}' has unknown kind '${kind}'"
 }
 
-// bhyve via vm-bhyve. The VM is provisioned once by test/setup-guest.sh
-// (vm create from a cloud image + cloud-init ssh key); aeo's up() is
-// `vm start <name>`. vm-bhyve owns the tap/disk/boot/networking; aeo
-// orchestrates it like it orchestrates podman. `vm` requires root, so we
-// run it under sudo (the operator pre-authorizes; on a root-run aeo the
-// sudo is a harmless no-op via `sudo -n` falling through). The res_name is
-// the vm-bhyve VM name.
-//
-// (The raw-bhyve path — bhyve_argv/_bg_command — is kept below as an
-// alternative for hosts without vm-bhyve, but the vm-bhyve path is the
-// supported one.)
-_up_bhyve(res_name: string, image: string, cpus: int, mem: string, tap: string) -> string {
-    // Already running? idempotent no-op (probe checks vm-bhyve state).
+// bhyve via vm-bhyve, provisioning-if-absent from the guest declaration.
+// config IS code down into the VM: the operator declares guest_image /
+// network / ssh_key on the bhyve_vm block, and aeo realizes them as
+//   vm img <url>                                    (fetch base image once)
+//   vm create -t linux -i <img> -C -k <key> -n <net> <name>   (if absent)
+//   vm start <name>
+// vm-bhyve owns tap/disk/boot/networking; aeo orchestrates it like podman.
+// `vm` needs root, so it runs under sudo (operator pre-authorizes; see the
+// NOPASSWD sudoers note). Idempotent: existing+running VM is a no-op.
+bhyve_up(res_name: string, guest_image: string, cpus: int, mem: string, network: string, ssh_key: string) -> string {
     if _bhyve_running(res_name) == 1 {
         return ""
+    }
+    // Provision if the VM doesn't exist yet.
+    if _bhyve_exists(res_name) == 0 {
+        perr = _bhyve_provision(res_name, guest_image, ssh_key, network)
+        if perr != "" {
+            return perr
+        }
     }
     if _vm_ok("start", res_name) == 1 {
         return ""
@@ -169,6 +169,93 @@ _up_bhyve(res_name: string, image: string, cpus: int, mem: string, tap: string) 
         return ""
     }
     return "aeo: 'vm start ${res_name}' failed: ${out}"
+}
+
+// 1 if vm-bhyve knows this VM (it's in `vm list`), else 0.
+_bhyve_exists(res_name: string) -> int {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "sudo -n vm list 2>/dev/null | awk -v n=${res_name} 'NR>1 && $1==n {print \"yes\"}'")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    if string_contains(out, "yes") == 1 {
+        return 1
+    }
+    return 0
+}
+
+// Fetch the base image (idempotent) + create the VM with cloud-init.
+_bhyve_provision(res_name: string, guest_image: string, ssh_key: string, network: string) -> string {
+    url = _image_url(guest_image)
+    if url == "" {
+        return "aeo: vm '${res_name}' unknown guest_image '${guest_image}'"
+    }
+    file = _image_file(url)
+    key = ssh_key
+    if string_length(key) == 0 {
+        key = "/home/paul/.ssh/id_rsa.pub"
+    }
+    net = _netconfig(network)
+    // One shell command: fetch image if absent, then create. argv elements
+    // are controlled (ids/paths), so the shell composition is safe.
+    sh = list_new()
+    list_add(sh, "-c")
+    list_add(sh, "sudo -n vm img 2>/dev/null | grep -q ${file} || sudo -n vm img ${url}; sudo -n vm create -t linux -i ${file} -C -k ${key} -n '${net}' ${res_name}")
+    out, status, err = run_capture("/bin/sh", sh, null)
+    list_free(sh)
+    if err != "" {
+        return "aeo: vm provision spawn failed for '${res_name}': ${err}"
+    }
+    if status != 0 {
+        return "aeo: vm provision failed for '${res_name}': ${out}"
+    }
+    return ""
+}
+
+// Map a guest_image id to its fetch URL (a full URL passes through). Debian
+// genericcloud is UEFI + netplan-native (DHCP reliable under vm-bhyve).
+_image_url(id: string) -> string {
+    if string_contains(id, "://") == 1 {
+        return id
+    }
+    if id == "debian-12" {
+        return "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2"
+    }
+    if id == "alpine-3.20" {
+        return "https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/cloud/nocloud_alpine-3.20.0-x86_64-uefi-cloudinit-metal-r0.qcow2"
+    }
+    return ""
+}
+
+// Basename of a URL (the local image filename vm-bhyve stores) — scan for
+// the last '/'. (std.string has no last_index_of.)
+_image_file(url: string) -> string {
+    n = string_length(url)
+    last = 0 - 1
+    i = 0
+    while i < n {
+        if string_char_at(url, i) == 47 {     // '/'
+            last = i
+        }
+        i = i + 1
+    }
+    if last < 0 {
+        return url
+    }
+    return string_substring(url, last + 1, n)
+}
+
+// Turn a network() spec into a vm-bhyve -n netconfig string.
+//   "dhcp"  -> "interface=eth0;ip=dhcp"
+//   "ip=..;gateway4=.." -> "interface=eth0;<spec>"  (passed through)
+_netconfig(spec: string) -> string {
+    if spec == "dhcp" {
+        return "interface=eth0;ip=dhcp"
+    }
+    if string_contains(spec, "interface=") == 1 {
+        return spec
+    }
+    return "interface=eth0;${spec}"
 }
 
 // 1 if vm-bhyve reports the VM in a running state. `vm list` shows a
