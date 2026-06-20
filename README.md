@@ -147,16 +147,22 @@ knowing its depth. An honest scorecard of how aeo measures up today:
 | Contained can't casually reach the container | **Strong at the control plane** (a resource has no handle back to aeo; authority is `cap`-injected, not constructed); **weak at the data plane** — sibling/host network isolation isn't enforced yet (`ip()` is the hook, firewall generation is a follow-up). |
 | Reach out only where configured | **Strong** — the `image`/`command`/`dataset`/`ip`/`health` setters _are_ the explicit, declared I/O surface. |
 | Authority injected, not constructed (DI) | **Strong** — `aeo(cap)`: the composition receives its authority to spawn, it does not build it. This is constructor injection (the [PicoContainer](https://picocontainer.com/) principle) applied to live infrastructure. |
-| **Nestable; restrict at each boundary, depth-agnostic** | **Weak** — aeo is one level deep today. Nested virt (a bhyve VM that contains LXC; a jail that contains sub-jails) is _designed_ (`aeo-design.md`, substrate-independence §) but unbuilt; "tree" currently means a boot-order DAG, not a containment hierarchy. |
+| **Nestable; restrict at each boundary, depth-agnostic** | **Partial** — the grammar nests: `bhyve_vm("myapp") { container("app") { … } }` declares a container _inside_ a VM, `get_host` records the containment, and the preflight gates a nested resource against its guest substrate (a Linux container inside a bhyve VM passes on a FreeBSD host). So the tree is a real containment hierarchy at the **declare + gate** level. What's not built yet is **executing** the nest — see below. |
 
 So aeo is a faithful realization of the post's **directionality and injection**
 principles — arguably more so than some of the post's own exhibits, because
 Aether's native capability model closes the "subvert IoC from within" hole the
-post laments in the DOM. It is **not yet** a realization of the post's
-**nesting** principle, which the post treats as the defining one. Closing that
-gap (an `inside(handle)` form where a resource contains resources, restricted
-further at each boundary) is the work that would take aeo from "the principles,
-mostly" to "the post, implemented."
+post laments in the DOM. Its **nesting** — the principle the post treats as
+defining — is now real in the grammar and data model (a container inside a VM
+inside a system, gated by guest substrate), but doesn't yet _execute_ a nested
+node. Closing that is **aeo-agent** (`docs/aeo-agent.md`): rather than aeo
+reaching _through_ a boundary (ssh-ing in — the directionality the post calls a
+disaster), the container hands its contained an agent, and that agent carries
+orchestration deeper — receiving the instructions for its node and everything
+below it, and in turn handing instructions to _its_ children's agents. Same
+actor protocol at every level, so no node knows its depth — which is exactly
+the post's "further restricted without knowledge of its nesting depth." That
+build takes aeo from "the principles, mostly" to "the post, implemented."
 
 ## Layout
 
