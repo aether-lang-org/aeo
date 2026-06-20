@@ -1,0 +1,195 @@
+// examples/two-tier-linux.ae  —  run with:  ae build examples/two-tier-linux.ae -o /tmp/two-tier && /tmp/two-tier
+//
+// A self-contained aeo composition for Linux containers, demonstrating
+// the full runtime-lifecycle layer end-to-end:
+//   - actor-per-resource handles (design Decision 2A), state machine
+//     down→booting→up, self-driven health polling via the `after` timer;
+//   - dependency-ordered bring-up GATED ON LIVENESS (db must be healthy
+//     before app starts) — ordering by health, not by artifact existence,
+//     the thing aeb structurally cannot express;
+//   - reverse-order teardown (app before db).
+//
+// Why one file: Aether actors/messages are single-compilation-unit only
+// (they don't cross `import`), so the resource actor lives here with the
+// composition. The DRIVERS (driver_linux) and the state bridge
+// (resource) ARE imported library modules — substrate-specific code stays
+// factored out; only the actor shell is inlined. The eventual `aeo
+// compose.ae` front-door generates this inlined shape from a clean
+// operator script (aeb-orchestrator-style codegen).
+//
+// `db` and `app` here are busybox containers running `sleep` with a
+// trivial `true` health check — enough to exercise ordering + gating +
+// teardown without external images. Swap image()/health() for real tiers.
+
+import std.config
+import driver_linux
+import resource (get_state, STATE_UP, STATE_BOOTING, STATE_DOWN, STATE_FAILED, set_state)
+
+// ---- messages ----
+// Every lifecycle message carries `in_name` — the resource's config-KV
+// namespace key. The actor holds ONLY ints in state (booting/probe
+// counters); all string config (image/command/health) lives in
+// std.config under "aeo.cfg.<name>.*", read fresh each handler.
+//
+// Why: a heap-string passed as a message field and RETAINED in actor
+// state across messages is corrupted by an upstream Aether bug (verified
+// 0.291 — the state field dangles after the message is freed; a
+// defensive string_concat copy hits a separate codegen bug). Strings ARE
+// valid for the duration of the handler that receives them, so we stash
+// them to config immediately and never hold a string in state. See
+// docs/aether-actor-string-bug.md.
+message Configure { in_name: string, in_image: string, in_command: string, in_health: string, in_interval_ms: int, in_budget: int }
+message Start { in_name: string }
+message Probe { in_name: string }
+message Stop { in_name: string }
+
+// ---- the resource actor: one container, with a health-poll loop ----
+actor Container {
+    state probe_interval_ms = 1000
+    state probe_left = 60
+    state booting = 0
+
+    receive {
+        Configure(in_name, in_image, in_command, in_health, in_interval_ms, in_budget) -> {
+            // Stash string config while the message strings are live.
+            config.put("aeo.cfg.${in_name}.image", in_image)
+            config.put("aeo.cfg.${in_name}.command", in_command)
+            config.put("aeo.cfg.${in_name}.health", in_health)
+            probe_interval_ms = in_interval_ms
+            probe_left = in_budget
+            set_state(in_name, STATE_DOWN())
+        }
+        Start(in_name) -> {
+            set_state(in_name, STATE_BOOTING())
+            booting = 1
+            image = config.get("aeo.cfg.${in_name}.image")
+            command = config.get("aeo.cfg.${in_name}.command")
+            err = driver_linux.up(in_name, image, command, "")
+            if err != "" {
+                println("aeo: [${in_name}] up failed: ${err}")
+                set_state(in_name, STATE_FAILED())
+                booting = 0
+            } else {
+                self ! Probe { in_name: in_name }
+            }
+        }
+        // Probe runs a bounded health-poll loop. Actors process one
+        // message at a time, so this blocks only THIS resource's actor;
+        // sibling resources (separate actor instances) poll concurrently.
+        // The loop ends at up (state→up) or budget exhaustion (→failed).
+        Probe(in_name) -> {
+            if booting == 1 {
+                health = config.get("aeo.cfg.${in_name}.health")
+                left = probe_left
+                done = 0
+                while done == 0 {
+                    alive = driver_linux.probe(in_name, health, "")
+                    if alive == 1 {
+                        set_state(in_name, STATE_UP())
+                        booting = 0
+                        done = 1
+                        println("aeo: [${in_name}] up")
+                    } else {
+                        left = left - 1
+                        if left <= 0 {
+                            println("aeo: [${in_name}] health budget exhausted — giving up")
+                            set_state(in_name, STATE_FAILED())
+                            booting = 0
+                            done = 1
+                        } else {
+                            sleep(probe_interval_ms)
+                        }
+                    }
+                }
+            }
+        }
+        Stop(in_name) -> {
+            booting = 0
+            err = driver_linux.down(in_name, "")
+            if err != "" {
+                println("aeo: [${in_name}] down failed: ${err}")
+            }
+            set_state(in_name, STATE_DOWN())
+        }
+    }
+}
+
+// ---- helper: block main until a resource is up or failed, with timeout.
+// This is `wait_for_it_to_be_up()` — main can't await an actor reply, so
+// it polls the config-KV bridge the actor publishes into.
+await_up(nm: string, secs: int) -> string {
+    waited = 0
+    step = 250
+    budget = secs * 1000
+    while waited < budget {
+        st = get_state(nm)
+        if st == STATE_UP() {
+            return st
+        }
+        if st == STATE_FAILED() {
+            return st
+        }
+        sleep(step)
+        waited = waited + step
+    }
+    return get_state(nm)
+}
+
+main() {
+    eng = driver_linux.engine_resolve("")
+    if eng == "" {
+        println("SKIP: no container engine (podman/docker) on PATH")
+        return
+    }
+    println(_banner())
+
+    img = "docker.io/library/busybox:latest"
+
+    // Clean any prior run.
+    driver_linux.down("aeo-db", "")
+    driver_linux.down("aeo-app", "")
+
+    db  = spawn(Container())
+    app = spawn(Container())
+
+    db  ! Configure { in_name: "aeo-db",  in_image: img, in_command: "sleep 600", in_health: "true", in_interval_ms: 500, in_budget: 30 }
+    app ! Configure { in_name: "aeo-app", in_image: img, in_command: "sleep 600", in_health: "true", in_interval_ms: 500, in_budget: 30 }
+
+    // ---- dependency-ordered bring-up, gated on liveness ----
+    // db comes up and must be healthy BEFORE app starts. That ordering is
+    // by health, not by artifact existence — aeo's whole reason to exist.
+    db ! Start { in_name: "aeo-db" }
+    db_st = await_up("aeo-db", 30)
+    if db_st != STATE_UP() {
+        println("aeo: db failed to come up (${db_st}); aborting bring-up")
+        _teardown(app, db)
+        return
+    }
+
+    app ! Start { in_name: "aeo-app" }
+    app_st = await_up("aeo-app", 30)
+    if app_st != STATE_UP() {
+        println("aeo: app failed to come up (${app_st}); tearing down")
+        _teardown(app, db)
+        return
+    }
+
+    println("aeo: two-tier stack UP (db ◄ app)")
+
+    // ---- reverse-order teardown: app before db ----
+    _teardown(app, db)
+    println("aeo: torn down in reverse (app → db)")
+}
+
+// Reverse-order teardown. app stops before the db it depends on.
+_teardown(app: actor_ref, db: actor_ref) {
+    app ! Stop { in_name: "aeo-app" }
+    sleep(1500)
+    db ! Stop { in_name: "aeo-db" }
+    sleep(1500)
+    wait_for_idle()
+}
+
+_banner() -> string {
+    return "aeo: composing two-tier Linux stack (db ◄ app), engine="
+}

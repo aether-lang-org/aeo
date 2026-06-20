@@ -1,0 +1,63 @@
+// lib/resource — the actor-per-resource handle (design Decision 2A).
+//
+// A resource (a jail, a VM, a container) is a long-lived stateful thing
+// you send lifecycle messages to: Start, Probe, Stop. That is exactly an
+// Aether actor — state machine + receive — so aeo models it as one. The
+// public surface the composition uses is up() / wait_for_it_to_be_up() /
+// down(); those are thin senders over the actor.
+//
+// State machine:  down ──Start──► booting ──(probe ok)──► up
+//                  ▲                                        │
+//                  └──────────────── Stop ─────────────────┘
+//
+// The main↔actor bridge. Actor messaging is async fire-and-forget and
+// there is no `receive` outside an actor body, so the composition (main)
+// cannot synchronously block on an actor reply. Instead the actor
+// publishes its current state into the process-global KV (std.config)
+// under "aeo.state.<name>", and main's wait_for_it_to_be_up() polls that
+// key with a timeout. config is BEAM-persistent_term-shaped: concurrent
+// reads, serialized writes — correct for one writer (the actor) and one
+// reader (main).
+//
+// The actor calls a driver (driver_linux / driver_bsd / driver_stub) to
+// do the real work; which driver is chosen is the caller's job (see
+// lib/aeo dispatch). This module is driver-agnostic: it stores the
+// resolved kind + parameters on the handle map and the actor reads them.
+//
+// NOTE: `state`, `message`, `receive` are reserved words; locals here use
+// `st` etc. to dodge the parser footgun (aether/LLM.md).
+
+import std.config
+import std.string (string_length)
+
+exports (
+    state_key, set_state, get_state,
+    STATE_DOWN, STATE_BOOTING, STATE_UP, STATE_FAILED
+)
+
+// State string constants (Aether has no top-level const; zero-arg fns,
+// same shape as std.signal / std.math).
+STATE_DOWN()    -> string { return "down" }
+STATE_BOOTING() -> string { return "booting" }
+STATE_UP()      -> string { return "up" }
+STATE_FAILED()  -> string { return "failed" }
+
+// The KV key a resource's state is published under.
+state_key(res_name: string) -> string {
+    return "aeo.state.${res_name}"
+}
+
+// Publish a resource's state (actor side, and used by the imperative
+// path too). Single writer per resource by construction.
+set_state(res_name: string, st: string) {
+    config.put(state_key(res_name), st)
+}
+
+// Read a resource's published state. "" (never set) reads as down.
+get_state(res_name: string) -> string {
+    v = config.get(state_key(res_name))
+    if string_length(v) == 0 {
+        return STATE_DOWN()
+    }
+    return v
+}

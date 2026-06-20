@@ -1,0 +1,214 @@
+// lib/driver_linux — Linux container backend (podman / docker).
+//
+// The load-bearing 80% of a backend: idempotent up/down plus a liveness
+// probe, all shelling through os.run_capture (argv-based, no shell). The
+// DSL layer above is substrate-agnostic; THIS file is where "linux means
+// a container engine" actually lives.
+//
+// Engine selection: prefer `podman` (rootless, no daemon) then `docker`.
+// Override per-resource with engine("docker"). Resolved once via os.which
+// so a host without either fails loud rather than three nodes deep.
+//
+// Idempotency is the contract that makes re-running a composition safe:
+//   up    — if a container of this name is already running, no-op; if it
+//           exists but is stopped, start it; else create+run it.
+//   down  — stop then rm; absent container is success, not error.
+//   probe — (alive, err): 1 if running AND (no health_check, or the
+//           health_check command exits 0 inside the container).
+//
+// All builders are pure string/argv assembly so they can be unit-tested
+// without a daemon; the exec is isolated in up/down/probe.
+
+import std.os (run_capture, os_which)
+import std.list
+import std.string (string_length, string_contains)
+
+exports (
+    name, engine_resolve,
+    up, down, probe,
+    ps_running_argv, run_argv, stop_argv, rm_argv, exec_health_argv
+)
+
+name() -> string {
+    return "linux"
+}
+
+// Resolve the container engine binary. `pref` is a preference ("" =
+// auto). Returns the absolute path, or "" if none found.
+engine_resolve(pref: string) -> string {
+    if pref != "" {
+        p = os_which(pref)
+        return p
+    }
+    p = os_which("podman")
+    if p != "" {
+        return p
+    }
+    return os_which("docker")
+}
+
+// --- pure argv builders (one per engine subcommand) ------------------
+
+// `<engine> ps --filter name=^NAME$ --filter status=running --format {{.Names}}`
+// Output is the container name iff it's running, else empty.
+ps_running_argv(res_name: string) -> ptr {
+    av = list_new()
+    list_add(av, "ps")
+    list_add(av, "--filter")
+    list_add(av, "name=^${res_name}$")
+    list_add(av, "--filter")
+    list_add(av, "status=running")
+    list_add(av, "--format")
+    list_add(av, "{{.Names}}")
+    return av
+}
+
+// `<engine> run -d --name NAME --replace IMAGE [/bin/sh -c CMD]` —
+// detached, idempotent via --replace (recreates a same-named stopped
+// container). `cmd` "" means "use the image's default entrypoint";
+// non-empty runs it under `/bin/sh -c` so a multi-word start command
+// (the design's start_command(...)) works without arg-splitting here.
+run_argv(res_name: string, image: string, cmd: string) -> ptr {
+    av = list_new()
+    list_add(av, "run")
+    list_add(av, "-d")
+    list_add(av, "--replace")
+    list_add(av, "--name")
+    list_add(av, res_name)
+    list_add(av, image)
+    if string_length(cmd) > 0 {
+        list_add(av, "/bin/sh")
+        list_add(av, "-c")
+        list_add(av, cmd)
+    }
+    return av
+}
+
+// `<engine> stop -t 5 NAME`
+stop_argv(res_name: string) -> ptr {
+    av = list_new()
+    list_add(av, "stop")
+    list_add(av, "-t")
+    list_add(av, "5")
+    list_add(av, res_name)
+    return av
+}
+
+// `<engine> rm -f NAME`
+rm_argv(res_name: string) -> ptr {
+    av = list_new()
+    list_add(av, "rm")
+    list_add(av, "-f")
+    list_add(av, res_name)
+    return av
+}
+
+// `<engine> exec NAME /bin/sh -c "HEALTH"` — run the health command
+// INSIDE the container; exit 0 == healthy.
+exec_health_argv(res_name: string, health: string) -> ptr {
+    av = list_new()
+    list_add(av, "exec")
+    list_add(av, res_name)
+    list_add(av, "/bin/sh")
+    list_add(av, "-c")
+    list_add(av, health)
+    return av
+}
+
+// --- exec'ing entry points -------------------------------------------
+
+// Bring the container up idempotently. Returns "" on success, else an
+// error message. `image` is required; `cmd` "" = image default;
+// `engine_pref` "" = auto-select.
+up(res_name: string, image: string, cmd: string, engine_pref: string) -> string {
+    eng = engine_resolve(engine_pref)
+    if eng == "" {
+        return "aeo: no container engine found (need podman or docker on PATH)"
+    }
+    if image == "" {
+        return "aeo: container '${res_name}' has no image() set"
+    }
+    // Already running? idempotent no-op.
+    if probe(res_name, "", engine_pref) == 1 {
+        return ""
+    }
+    av = run_argv(res_name, image, cmd)
+    out, status, err = run_capture(eng, av, null)
+    list_free(av)
+    if err != "" {
+        return "aeo: spawn failed for '${res_name}': ${err}"
+    }
+    if status != 0 {
+        return "aeo: '${eng} run' failed for '${res_name}' (exit ${status}): ${out}"
+    }
+    return ""
+}
+
+// Tear the container down. Absent container == success (idempotent).
+down(res_name: string, engine_pref: string) -> string {
+    eng = engine_resolve(engine_pref)
+    if eng == "" {
+        return "aeo: no container engine found (need podman or docker on PATH)"
+    }
+    // stop (ignore failure — may already be stopped), then rm -f.
+    sav = stop_argv(res_name)
+    _so, _ss, _se = run_capture(eng, sav, null)
+    list_free(sav)
+    rav = rm_argv(res_name)
+    out, status, err = run_capture(eng, rav, null)
+    list_free(rav)
+    if err != "" {
+        return "aeo: teardown spawn failed for '${res_name}': ${err}"
+    }
+    // `rm -f` on an absent container is non-fatal; only flag if the
+    // message isn't the benign "no such container".
+    if status != 0 {
+        if string_contains(out, "no such container") == 1 {
+            return ""
+        }
+        if string_contains(out, "No such container") == 1 {
+            return ""
+        }
+        return "aeo: '${eng} rm' failed for '${res_name}' (exit ${status}): ${out}"
+    }
+    return ""
+}
+
+// Liveness probe. Returns 1 if alive (running, and the health command —
+// when given — exits 0 inside the container), else 0. `health` "" means
+// "running is enough".
+//
+// Returns a plain int (not a tuple) deliberately: Aether can't return a
+// freshly-CONSTRUCTED tuple literal (only forward another tuple-returning
+// call), and `wait_for_it_to_be_up` only needs alive/not-alive to poll.
+// Probe-time spawn errors are treated as "not alive" — the resource is
+// unreachable, which is what the poller must act on anyway.
+probe(res_name: string, health: string, engine_pref: string) -> int {
+    eng = engine_resolve(engine_pref)
+    if eng == "" {
+        return 0
+    }
+    pav = ps_running_argv(res_name)
+    out, status, err = run_capture(eng, pav, null)
+    list_free(pav)
+    if err != "" {
+        return 0
+    }
+    // ps prints the name iff running; empty output == not running.
+    if string_length(out) == 0 {
+        return 0
+    }
+    if health == "" {
+        return 1
+    }
+    hav = exec_health_argv(res_name, health)
+    hout, hstatus, herr = run_capture(eng, hav, null)
+    list_free(hav)
+    if herr != "" {
+        return 0
+    }
+    if hstatus == 0 {
+        return 1
+    }
+    return 0
+}

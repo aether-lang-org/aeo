@@ -1,0 +1,39 @@
+// lib/driver_stub — the fail-loud driver.
+//
+// Mirrors Aether's own `spawn_sandboxed_stub.c`: the third arm of the
+// platform split that exists ONLY to fail clearly when neither the BSD
+// nor the Linux backend can run here. It is selected when the host
+// family is "other" (not FreeBSD, not Linux), or when a `kind(...)` is
+// requested that no available driver claims.
+//
+// Every entry point returns a non-empty error string (the aeo Go-style
+// convention: "" == ok, non-empty == failure message). Nothing here
+// touches a real resource — it cannot, and saying so loudly at the
+// first call is the whole point.
+
+exports (
+    up, down, probe, name
+)
+
+name() -> string {
+    return "stub"
+}
+
+// All operations refuse, citing the unsupported kind/host. `res_kind`
+// is the requested kind (e.g. "jail"); `res_name` is the handle name.
+up(res_kind: string, res_name: string) -> string {
+    return _refuse(res_kind, res_name, "bring up")
+}
+
+down(res_kind: string, res_name: string) -> string {
+    return _refuse(res_kind, res_name, "tear down")
+}
+
+// probe returns (alive, err). alive is always 0 here; err explains.
+probe(res_kind: string, res_name: string) -> {
+    return (0, _refuse(res_kind, res_name, "probe"))
+}
+
+_refuse(res_kind: string, res_name: string, verb: string) -> string {
+    return "aeo: cannot ${verb} '${res_name}': kind '${res_kind}' is not supported on this host (no BSD or Linux backend available — driver_stub is fail-loud by design)"
+}

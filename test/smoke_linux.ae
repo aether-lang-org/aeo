@@ -1,0 +1,73 @@
+// Smoke test: drive the Linux container driver end-to-end against the
+// real engine (podman/docker). up → probe(running) → probe(health) →
+// down → probe(gone). Uses busybox so it's tiny and universal.
+
+import driver_linux
+
+main() {
+    eng = driver_linux.engine_resolve("")
+    if eng == "" {
+        println("SKIP: no container engine (podman/docker) on PATH")
+        return
+    }
+    println("engine: ${eng}")
+
+    nm = "aeo-smoke-web"
+    img = "docker.io/library/busybox:latest"
+
+    // Make sure we start clean.
+    driver_linux.down(nm, "")
+
+    // up with a long-lived command so probe sees it alive.
+    e1 = driver_linux.up(nm, img, "sleep 120", "")
+    if e1 != "" {
+        println("FAIL up: ${e1}")
+        return
+    }
+    println("PASS up")
+
+    // probe running (no health)
+    al = driver_linux.probe(nm, "", "")
+    if al != 1 {
+        println("FAIL probe-running: alive=${al}")
+        driver_linux.down(nm, "")
+        return
+    }
+    println("PASS probe-running")
+
+    // probe with a health command that succeeds inside the container
+    ah = driver_linux.probe(nm, "true", "")
+    if ah != 1 {
+        println("FAIL probe-health-ok: alive=${ah}")
+        driver_linux.down(nm, "")
+        return
+    }
+    println("PASS probe-health-ok")
+
+    // probe with a health command that fails
+    af = driver_linux.probe(nm, "false", "")
+    if af != 0 {
+        println("FAIL probe-health-fail: expected 0, got alive=${af}")
+        driver_linux.down(nm, "")
+        return
+    }
+    println("PASS probe-health-fail")
+
+    // down
+    e2 = driver_linux.down(nm, "")
+    if e2 != "" {
+        println("FAIL down: ${e2}")
+        return
+    }
+    println("PASS down")
+
+    // probe gone
+    ag = driver_linux.probe(nm, "", "")
+    if ag != 0 {
+        println("FAIL probe-gone: expected 0, got alive=${ag}")
+        return
+    }
+    println("PASS probe-gone")
+
+    println("=== driver_linux: ALL PASS ===")
+}

@@ -1,0 +1,121 @@
+// lib/host — host-profile probe and capability gating.
+//
+// aeo adapts to whether the host is BSD or Linux and fast-fails grammar
+// the host can't honor. Two layers (per aeo-design.md § Host adaptation):
+//
+//   (a) backend selection — a `uname`-style profile that says which
+//       driver family (`bsd` / `linux` / `other`) runs here, so a
+//       `kind(...)` the host can't execute is a fast, loud error at
+//       composition-evaluation time, not a silent no-op three nodes deep.
+//   (b) capability probes — `capsicum.available()` / `casper.available()`
+//       already return 0 off-FreeBSD and degrade cleanly. aeo CONSUMES
+//       this contract; it does not reinvent Capsicum host-detection.
+//
+// The local host profile is derived from `os.platform()` (compile-time,
+// == the orchestrator's own OS, which is the host it drives locally) and
+// confirmed/printed via a runtime `uname -s`. Remote/nested-virt targets
+// gate on the *target's* profile, which a future remote driver supplies;
+// this module is the local case.
+
+import std.os (platform, run_capture)
+import std.capsicum
+import std.casper
+import std.list
+import std.string (string_length, string_char_at, string_substring)
+
+exports (
+    profile, is_bsd, is_linux, family,
+    uname_s, capsicum_available, casper_available
+)
+
+// The host family aeo selects a driver against. One of:
+//   "bsd"    FreeBSD (jail / bhyve)
+//   "linux"  Linux   (lxc / docker / kvm)
+//   "other"  anything else — only driver_stub (fail-loud) resolves
+family() -> string {
+    p = platform()
+    if p == "freebsd" {
+        return "bsd"
+    }
+    // openbsd/netbsd/dragonfly are BSD kernels but aeo's BSD driver
+    // targets FreeBSD jails specifically, so they fall to "other" until
+    // a driver exists. Keep this explicit rather than prefix-matching.
+    if p == "linux" {
+        return "linux"
+    }
+    return "other"
+}
+
+// 1 if the local host is FreeBSD, else 0.
+is_bsd() -> int {
+    if family() == "bsd" {
+        return 1
+    }
+    return 0
+}
+
+// 1 if the local host is Linux, else 0.
+is_linux() -> int {
+    if family() == "linux" {
+        return 1
+    }
+    return 0
+}
+
+// `uname -s` of the running host (runtime, not compile-time). Used for
+// the human-facing profile line and as the seed for remote-host gating
+// later. Returns "" if uname can't be run.
+uname_s() -> string {
+    av = list_new()
+    list_add(av, "-s")
+    out, status, err = run_capture("/usr/bin/uname", av, null)
+    list_free(av)
+    if err != "" {
+        // Fall back to the busybox/path-less location some hosts use.
+        return ""
+    }
+    // Trim the trailing newline uname emits.
+    return _chomp(out)
+}
+
+// 1 if Capsicum is usable on this host right now, 0 otherwise. Thin
+// pass-through to the std contract so callers read it from one place.
+capsicum_available() -> int {
+    return capsicum.available()
+}
+
+// 1 if Casper (DNS/passwd/sysctl delegation) is usable right now, else 0.
+casper_available() -> int {
+    return casper.available()
+}
+
+// A one-line human-facing host profile, e.g.
+//   "host: linux (family=linux, capsicum=no, casper=no)"
+profile() -> string {
+    u = uname_s()
+    if u == "" {
+        u = platform()
+    }
+    cap = "no"
+    if capsicum_available() == 1 {
+        cap = "yes"
+    }
+    cas = "no"
+    if casper_available() == 1 {
+        cas = "yes"
+    }
+    return "host: ${u} (family=${family()}, capsicum=${cap}, casper=${cas})"
+}
+
+// Strip a single trailing newline (uname/command output convention).
+_chomp(s: string) -> string {
+    n = string_length(s)
+    if n == 0 {
+        return s
+    }
+    last = string_char_at(s, n - 1)
+    if last == 10 {
+        return string_substring(s, 0, n - 1)
+    }
+    return s
+}

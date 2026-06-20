@@ -1,0 +1,13 @@
+// Smoke test: host profile probe. Build with:
+//   aetherc test/smoke_host.ae /tmp/smoke_host.c --lib lib && ...
+// or simpler, via the repo's build. Prints the host profile and the
+// family/capsicum booleans so we can eyeball BSD-vs-Linux adaptation.
+
+import host
+
+main() {
+    println(host.profile())
+    println("family=${host.family()} is_bsd=${host.is_bsd()} is_linux=${host.is_linux()}")
+    println("uname_s=${host.uname_s()}")
+    println("capsicum_available=${host.capsicum_available()} casper_available=${host.casper_available()}")
+}

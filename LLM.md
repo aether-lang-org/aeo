@@ -3,11 +3,35 @@
 Not a CLAUDE.md — short, opinionated, written for a future LLM picking up
 mid-task. Re-read at start of every session.
 
-**Status: design phase. No implementation exists yet.** The whole repo is
-`aeo-design.md` + `README.md` + this file. Your first real coding task will
-be scaffolding, not editing existing aeo code. Read `aeo-design.md` in full
-before doing anything — it is the source of truth and it records the open
-decisions you must NOT silently resolve.
+**Status: implementation underway (started 2026-06-20).** The two OPEN
+DECISIONS are now RESOLVED by the user: **Decision 1 = 1B** (native Aether
+supervision, no bash trampoline) and **Decision 2 = 2A** (actor per
+resource). Read `aeo-design.md` for the full design; the OPEN-DECISIONS
+section below records how they were closed. The Aether upstream blockers
+the design doc names (capsicum/casper/signal/run_supervised) are MERGED as
+of ae 0.291 — see `docs/aether-actor-string-bug.md` and the memory notes.
+
+What exists and is TESTED end-to-end:
+- `lib/host/` — host-profile probe (uname/platform → bsd/linux/other) +
+  capsicum/casper gating. Runs on Linux (family=linux, capsicum=no).
+- `lib/driver_linux/` — podman/docker backend: idempotent up/down +
+  liveness probe, shelling `os.run_capture`. Proven against real podman
+  (`test/smoke_linux.ae`).
+- `lib/driver_stub/` — fail-loud third arm.
+- `lib/resource/module.ae` — the config-KV state bridge (pure functions).
+- `examples/two-tier-linux.ae` — a self-contained composition proving the
+  WHOLE runtime layer: 2A actor handles, dependency-ordered bring-up gated
+  on health (db ◄ app), reverse-order teardown. Runs green on podman.
+
+Build/run on the Linux box: `ae build <file>.ae -o /tmp/out --lib lib`
+then run. The capsicum-capable `ae` is at `~/.local/bin/ae` (first on
+PATH); the system 0.279 `ae` lacks capsicum.
+
+NOT yet done: `lib/driver_bsd` (jail) end-to-end on the GhostBSD box; the
+`aeo` front-door proper (1B supervision + up/down/status subcommands +
+the aeb-style CODEGEN that inlines the resource actors into a generated
+entry file — needed because Aether actors are single-compilation-unit
+only and can't be imported; see below).
 
 ## What aeo is, in one paragraph
 
@@ -48,22 +72,39 @@ Division of labor (full table in design doc):
 | invoke | `aeb target:name` | `aeo compose.ae` |
 | one-liner | "build the tree" | "stand the tree up and keep it coherent" |
 
-## OPEN DECISIONS — do not resolve these silently
+## OPEN DECISIONS — now RESOLVED (2026-06-20)
 
-The design doc records two decisions left deliberately open. The user wants
-them to stay open until *they* choose. Do not pick one and start building as
-if it's settled. If a task forces the issue, surface the trade-off and ask.
+Both design-doc open decisions were closed by the user. Do NOT reopen or
+silently re-litigate them.
 
-1. **Front-door** (design doc Decision 1): bash trampoline like aeb today
-   (1A, ships now) vs native Aether supervision primitives (1B, cleaner but
-   blocked on upstream) vs a third cut (no supervision in v0; `aeo up` /
-   `aeo down` as separate invocations). The front-door is what earns aeo its
-   injected `cap`, lifecycle supervision, and subcommands — so *that* aeo owns
-   its entrypoint is settled; *how* is open.
-2. **Resource-handle model** (design doc Decision 2): Aether actor per
-   resource (2A — state machine + receive, concurrency falls out) vs plain
-   struct + imperative methods (2B — simpler v0). Public surface
-   (`up`/`wait_for_it_to_be_up`/`down`) can stay stable across a later switch.
+1. **Front-door = 1B** (native Aether supervision). Not the bash
+   trampoline. This was "blocked on upstream" in the design doc but is
+   UNBLOCKED at ae 0.291: `os.run_supervised(prog,argv,env,
+   new_process_group, forward_signals, timeout_secs, reap_group) ->
+   (exit_code, outcome)` exists, plus `std.signal` + `os.kill`/
+   `os.wait_pid_timeout`. Caveat: no general in-process `sigaction`
+   wrapper is exposed, so the front-door supervises by running the
+   composition as a supervised child and handling Ctrl-C via re-invocation
+   (`aeo down`), not an in-process trap. Front-door not built yet.
+2. **Resource handle = 2A** (actor per resource). Built and proven in
+   `examples/two-tier-linux.ae`. Public surface up()/wait_for_it_to_be_up()
+   /down() is realized as Start/Probe/Stop messages + a config-KV poll for
+   the blocking wait (main can't await an actor reply).
+
+**Two Aether constraints that shape 2A (both verified, both load-bearing):**
+- **Actors are single-compilation-unit only.** `actor`/`message` defs and
+  their `spawn`/`!` sites must be in the file with `main`; they do NOT
+  cross `import` (even wrapped). So resource actors can't be a lib module —
+  the `aeo` front-door must CODEGEN a single entry `.ae` inlining the
+  actors + operator compose body + `import`ing the library drivers
+  (aeb-orchestrator-style). The examples/ file is the hand-written shape of
+  that generated unit.
+- **A string message field retained in actor state corrupts** (dangles
+  after the message frees; the `string_concat` copy workaround hits a
+  codegen bug). Workaround in use: actors hold ONLY ints in state; all
+  string config is stashed to `std.config` KV keyed by resource name, read
+  fresh each handler. Full writeup + minimal repro:
+  `docs/aether-actor-string-bug.md`. File upstream; aeo is the pressure.
 
 ## Repo topology & dependency direction (invariant)
 
