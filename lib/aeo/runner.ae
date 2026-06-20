@@ -20,6 +20,7 @@
 import std.config
 import driver_linux
 import driver_bsd
+import driver_vm
 import compose
 import resource (set_state, get_state, STATE_DOWN, STATE_BOOTING, STATE_UP, STATE_FAILED)
 import host (family, profile)
@@ -106,6 +107,12 @@ driver_up(nm: string, k: string) -> string {
     if k == "jail" {
         return driver_bsd.up(nm, compose.get_dataset(nm), "", compose.get_ip(nm), compose.get_command(nm))
     }
+    if k == "bhyve" {
+        return driver_vm.up("bhyve", nm, compose.get_image(nm), compose.get_cpus(nm), compose.get_memory(nm), compose.get_nic(nm))
+    }
+    if k == "kvm" {
+        return driver_vm.up("kvm", nm, compose.get_image(nm), compose.get_cpus(nm), compose.get_memory(nm), compose.get_nic(nm))
+    }
     return "aeo: kind '${k}' has no up() driver on this host"
 }
 
@@ -113,12 +120,24 @@ driver_down(nm: string, k: string) -> string {
     if k == "jail" {
         return driver_bsd.down(nm)
     }
+    if k == "bhyve" {
+        return driver_vm.down("bhyve", nm)
+    }
+    if k == "kvm" {
+        return driver_vm.down("kvm", nm)
+    }
     return driver_linux.down(nm, _engine_of(k))
 }
 
 driver_probe(nm: string, k: string, health: string) -> int {
     if k == "jail" {
         return driver_bsd.probe(nm, health, "")
+    }
+    if k == "bhyve" {
+        return driver_vm.probe("bhyve", nm, health)
+    }
+    if k == "kvm" {
+        return driver_vm.probe("kvm", nm, health)
     }
     return driver_linux.probe(nm, health, _engine_of(k))
 }

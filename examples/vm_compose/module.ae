@@ -1,0 +1,26 @@
+// examples/vm_compose — a bhyve VM composition (FreeBSD).
+//
+// A single bhyve VM. Demonstrates the VM kind-verb + sizing setters.
+// Booting a real guest needs vmm.ko loaded, a UEFI bootrom (pkg
+// bhyve-firmware), a bootable disk image, and a tap on a host bridge —
+// the operator's host setup; aeo drives bhyve once those exist.
+//
+// The health check is HOST-SIDE reachability into the guest (here a TCP
+// port probe via nc), not a command run inside the VM.
+
+import compose (bhyve)
+import compose (image, cpus, memory, nic, health, health_interval, health_budget)
+
+exports ( aeo_declare )
+
+aeo_declare(cap: ptr) {
+    vm1 = bhyve("aeo-vm1") {
+        image("/zroot/images/guest.raw")
+        cpus(2)
+        memory("2G")
+        nic("tap0")
+        health("nc -z 10.0.0.50 22")     // host-side: guest reachable on ssh?
+        health_interval(2000)
+        health_budget(60)                // VMs boot slower than jails
+    }
+}

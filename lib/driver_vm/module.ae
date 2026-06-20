@@ -1,0 +1,361 @@
+// lib/driver_vm — VM backends: bhyve (FreeBSD) and kvm/qemu (Linux).
+//
+// The VM arm of the driver split. Same contract as the jail/container
+// drivers — idempotent up/down + a liveness probe, all shelling
+// os.run_capture — but the resource is a full virtual machine.
+//
+// VMs differ from jails/containers in how liveness is checked: there is no
+// in-guest `jexec`/`docker exec` without guest cooperation. So the probe is
+// HOST-SIDE, two-layer (fits the containment model — the container probes
+// the contained from outside):
+//   1. the hypervisor process is alive (we record a pidfile on spawn);
+//   2. if `health` is set, that command runs ON THE HOST (e.g.
+//      `nc -z <ip> 22` / `curl -fsS http://<ip>/`) — reachability INTO the
+//      guest, not a command run inside it.
+//
+//   up    — if the pidfile names a live process, no-op; else spawn the
+//           hypervisor in the background and record its pid.
+//   down  — kill the pid (bhyve: also `bhyvectl --destroy`); absent == ok.
+//   probe — (int) 1 if the pid is alive AND (no health, or the host-side
+//           health command exits 0).
+//
+// bhyve (FreeBSD): boots a disk image via UEFI bootrom — no bhyveload step,
+//   so any UEFI-bootable image works. Needs vmm.ko loaded + a bootrom
+//   (pkg bhyve-firmware → /usr/local/share/uefi-firmware/BHYVE_UEFI.fd).
+//   Networking via a tap added to a bridge (operator/provision sets the
+//   bridge up; aeo names the tap).
+// kvm (Linux): boots via qemu-system-x86_64 with -enable-kvm. Coded but
+//   untested here (no qemu installed on the dev box); exercised on a host
+//   with the full Linux VM landscape.
+
+import std.os (run_capture, os_which)
+import std.list
+import std.string (string_length, string_char_at)
+
+exports (
+    name,
+    up, down, probe,
+    bhyve_argv, qemu_argv, bhyvectl_destroy_argv,
+    pidfile_for, bootrom_path
+)
+
+name() -> string {
+    return "vm"
+}
+
+// Where a VM's pidfile lives. The pidfile is how up/down/probe across
+// separate aeo invocations find the running hypervisor process.
+pidfile_for(res_name: string) -> string {
+    return "/tmp/aeo-vm-${res_name}.pid"
+}
+
+// Canonical bhyve UEFI bootrom (pkg bhyve-firmware). Overridable later via
+// a setter; this is the default probe path.
+bootrom_path() -> string {
+    return "/usr/local/share/uefi-firmware/BHYVE_UEFI.fd"
+}
+
+// --- pure argv builders ----------------------------------------------
+
+// bhyve VM. UEFI boot of `image` (a raw/UEFI-bootable disk), `cpus` vCPUs,
+// `mem` RAM (e.g. "2G"), `tap` NIC (a tap device on a host bridge; "" =
+// no NIC). Runs in the foreground; the caller backgrounds it.
+//   bhyve -c CPUS -m MEM -A -H -P -l bootrom,UEFI.fd \
+//         -s 0,hostbridge -s 31,lpc \
+//         -s 4,virtio-blk,IMAGE [-s 5,virtio-net,TAP] NAME
+bhyve_argv(res_name: string, image: string, cpus: int, mem: string, tap: string) -> ptr {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, _itoa(cpus))
+    list_add(av, "-m")
+    list_add(av, mem)
+    list_add(av, "-A")
+    list_add(av, "-H")
+    list_add(av, "-P")
+    list_add(av, "-l")
+    list_add(av, "bootrom,${bootrom_path()}")
+    list_add(av, "-s")
+    list_add(av, "0,hostbridge")
+    list_add(av, "-s")
+    list_add(av, "31,lpc")
+    list_add(av, "-s")
+    list_add(av, "4,virtio-blk,${image}")
+    if string_length(tap) > 0 {
+        list_add(av, "-s")
+        list_add(av, "5,virtio-net,${tap}")
+    }
+    list_add(av, res_name)
+    return av
+}
+
+// `bhyvectl --vm=NAME --destroy` — tear down the kernel VM object after
+// the bhyve process exits (bhyve leaves the /dev/vmm/NAME object behind).
+bhyvectl_destroy_argv(res_name: string) -> ptr {
+    av = list_new()
+    list_add(av, "--vm=${res_name}")
+    list_add(av, "--destroy")
+    return av
+}
+
+// qemu/kvm VM (Linux). Coded, untested on this box.
+//   qemu-system-x86_64 -enable-kvm -name NAME -smp CPUS -m MEM \
+//       -drive file=IMAGE,if=virtio -display none -daemonize \
+//       -pidfile PIDFILE [-nic tap,ifname=TAP,script=no]
+qemu_argv(res_name: string, image: string, cpus: int, mem: string, tap: string, pidfile: string) -> ptr {
+    av = list_new()
+    list_add(av, "-enable-kvm")
+    list_add(av, "-name")
+    list_add(av, res_name)
+    list_add(av, "-smp")
+    list_add(av, _itoa(cpus))
+    list_add(av, "-m")
+    list_add(av, mem)
+    list_add(av, "-drive")
+    list_add(av, "file=${image},if=virtio")
+    list_add(av, "-display")
+    list_add(av, "none")
+    list_add(av, "-daemonize")
+    list_add(av, "-pidfile")
+    list_add(av, pidfile)
+    if string_length(tap) > 0 {
+        list_add(av, "-nic")
+        list_add(av, "tap,ifname=${tap},script=no")
+    }
+    return av
+}
+
+// --- exec'ing entry points -------------------------------------------
+
+// Bring the VM up idempotently. `kind` is "bhyve" or "kvm". `image` is the
+// disk; `cpus`/`mem` size it; `tap` is the host NIC ("" for none).
+// Returns "" on success else an error message.
+up(kind: string, res_name: string, image: string, cpus: int, mem: string, tap: string) -> string {
+    // Already running? idempotent no-op.
+    if _pid_alive(res_name) == 1 {
+        return ""
+    }
+    if string_length(image) == 0 {
+        return "aeo: vm '${res_name}' has no image() set"
+    }
+    if kind == "bhyve" {
+        return _up_bhyve(res_name, image, cpus, mem, tap)
+    }
+    if kind == "kvm" {
+        return _up_kvm(res_name, image, cpus, mem, tap)
+    }
+    return "aeo: vm '${res_name}' has unknown kind '${kind}'"
+}
+
+_up_bhyve(res_name: string, image: string, cpus: int, mem: string, tap: string) -> string {
+    bin = os_which("bhyve")
+    if bin == "" {
+        bin = "/usr/sbin/bhyve"
+    }
+    av = bhyve_argv(res_name, image, cpus, mem, tap)
+    // bhyve runs in the foreground; background it via /bin/sh and capture
+    // the child pid into the pidfile. Shell-out is the simplest correct
+    // backgrounding primitive (aeo shells freely).
+    pf = pidfile_for(res_name)
+    cmd = _bg_command(bin, av, pf)
+    list_free(av)
+    sh = list_new()
+    list_add(sh, "-c")
+    list_add(sh, cmd)
+    out, status, err = run_capture("/bin/sh", sh, null)
+    list_free(sh)
+    if err != "" {
+        return "aeo: bhyve spawn failed for '${res_name}': ${err}"
+    }
+    if status != 0 {
+        return "aeo: bhyve launch failed for '${res_name}' (exit ${status}): ${out}"
+    }
+    return ""
+}
+
+_up_kvm(res_name: string, image: string, cpus: int, mem: string, tap: string) -> string {
+    bin = os_which("qemu-system-x86_64")
+    if bin == "" {
+        return "aeo: kvm needs qemu-system-x86_64 on PATH (not found)"
+    }
+    // qemu's own -daemonize + -pidfile handle backgrounding and the pid
+    // record, so no shell wrapper is needed.
+    pf = pidfile_for(res_name)
+    av = qemu_argv(res_name, image, cpus, mem, tap, pf)
+    out, status, err = run_capture(bin, av, null)
+    list_free(av)
+    if err != "" {
+        return "aeo: qemu spawn failed for '${res_name}': ${err}"
+    }
+    if status != 0 {
+        return "aeo: qemu launch failed for '${res_name}' (exit ${status}): ${out}"
+    }
+    return ""
+}
+
+// Tear the VM down. Kills the recorded pid; for bhyve also destroys the
+// kernel VM object. Absent == success.
+down(kind: string, res_name: string) -> string {
+    pid = _read_pid(res_name)
+    if pid > 0 {
+        _kill(pid)
+    }
+    if kind == "bhyve" {
+        bc = os_which("bhyvectl")
+        if bc == "" {
+            bc = "/usr/sbin/bhyvectl"
+        }
+        dav = bhyvectl_destroy_argv(res_name)
+        // Ignore failure — the object may already be gone.
+        _do, _ds, _de = run_capture(bc, dav, null)
+        list_free(dav)
+    }
+    _rm_pidfile(res_name)
+    return ""
+}
+
+// Liveness probe. 1 if the hypervisor process is alive AND (no health, or
+// the host-side health command exits 0). Plain int, like the other
+// drivers' probe.
+probe(kind: string, res_name: string, health: string) -> int {
+    if _pid_alive(res_name) == 0 {
+        return 0
+    }
+    if string_length(health) == 0 {
+        return 1
+    }
+    // Host-side reachability check — run via /bin/sh -c so an operator can
+    // write `nc -z 10.0.0.20 22` or `curl -fsS http://10.0.0.20/`.
+    sh = list_new()
+    list_add(sh, "-c")
+    list_add(sh, health)
+    out, status, err = run_capture("/bin/sh", sh, null)
+    list_free(sh)
+    if err != "" {
+        return 0
+    }
+    if status == 0 {
+        return 1
+    }
+    return 0
+}
+
+// --- pidfile + process helpers ---------------------------------------
+
+// Build a shell command that launches `bin argv...` in the background and
+// writes its pid to `pf`. argv elements are space-joined; VM argv here is
+// controlled (paths/sizes), not arbitrary user text, so this is safe.
+_bg_command(bin: string, argv: ptr, pf: string) -> string {
+    line = bin
+    n = list_size(argv)
+    i = 0
+    while i < n {
+        a = list_get(argv, i)
+        line = "${line} ${a}"
+        i = i + 1
+    }
+    // `cmd & echo $! > pidfile` records the background pid.
+    return "${line} >/tmp/aeo-vm-out.log 2>&1 & echo $! > ${pf}"
+}
+
+_read_pid(res_name: string) -> int {
+    pf = pidfile_for(res_name)
+    av = list_new()
+    list_add(av, pf)
+    out, status, err = run_capture("/bin/cat", av, null)
+    list_free(av)
+    if err != "" {
+        return 0
+    }
+    if status != 0 {
+        return 0
+    }
+    return _atoi(out)
+}
+
+// 1 if the VM's recorded pid is alive (kill -0), else 0.
+_pid_alive(res_name: string) -> int {
+    pid = _read_pid(res_name)
+    if pid <= 0 {
+        return 0
+    }
+    av = list_new()
+    list_add(av, "-0")
+    list_add(av, _itoa(pid))
+    out, status, err = run_capture("/bin/kill", av, null)
+    list_free(av)
+    if err != "" {
+        return 0
+    }
+    if status == 0 {
+        return 1
+    }
+    return 0
+}
+
+_kill(pid: int) {
+    av = list_new()
+    list_add(av, _itoa(pid))
+    _o, _s, _e = run_capture("/bin/kill", av, null)
+    list_free(av)
+}
+
+_rm_pidfile(res_name: string) {
+    av = list_new()
+    list_add(av, "-f")
+    list_add(av, pidfile_for(res_name))
+    _o, _s, _e = run_capture("/bin/rm", av, null)
+    list_free(av)
+}
+
+// int → string (no std wrapper that avoids a tuple here; hand-roll).
+_itoa(n: int) -> string {
+    if n == 0 {
+        return "0"
+    }
+    neg = 0
+    v = n
+    if v < 0 {
+        neg = 1
+        v = 0 - v
+    }
+    s = ""
+    while v > 0 {
+        d = v - (v / 10) * 10
+        s = "${_digit(d)}${s}"
+        v = v / 10
+    }
+    if neg == 1 {
+        return "-${s}"
+    }
+    return s
+}
+
+_digit(d: int) -> string {
+    if d == 0 { return "0" }
+    if d == 1 { return "1" }
+    if d == 2 { return "2" }
+    if d == 3 { return "3" }
+    if d == 4 { return "4" }
+    if d == 5 { return "5" }
+    if d == 6 { return "6" }
+    if d == 7 { return "7" }
+    if d == 8 { return "8" }
+    return "9"
+}
+
+// Parse leading digits of a string to int (cat output may have a newline).
+_atoi(s: string) -> int {
+    n = string_length(s)
+    acc = 0
+    i = 0
+    while i < n {
+        c = string_char_at(s, i)
+        if c >= 48 {
+            if c <= 57 {
+                acc = acc * 10 + (c - 48)
+            }
+        }
+        i = i + 1
+    }
+    return acc
+}
