@@ -1,0 +1,23 @@
+# Aether / aeb build artifacts
+/target/
+/build/
+*.o
+*.d
+*.gcda
+*.gcno
+*.gcov
+
+# Generated C from .ae compilation
+*.ae.c
+
+# Lazy-built tool binaries (cached, gitignored — like aeb/tools/*)
+/tools/aeo-main
+/tools/aeo-link
+/tools/*[!.ae]
+
+# aeb per-project SDK symlinks (consumer-side)
+/.aeb/lib/*
+
+# Local scratch
+/tmp/
+*.swp
