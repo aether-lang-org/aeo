@@ -1,0 +1,136 @@
+// lib/compose — the operator-facing composition DSL (config IS code).
+//
+// An operator's compose.ae declares a tree of resources by calling these
+// setters. They accumulate a resource declaration into the process-global
+// KV (std.config) — data, not procedure — which aeo's fixed actor-bearing
+// runner then reads to drive dependency-ordered bring-up.
+//
+// Why data-in-config rather than a returned struct: aeo's resource actors
+// are single-compilation-unit only (they can't be imported), so the
+// runner that owns the actors is a FIXED unit; the only thing that varies
+// per composition is the declared resource list. Storing that list as
+// config-KV data lets the operator's compose.ae be an ordinary importable
+// module (no actors in it) that the runner consumes. The operator still
+// writes real Aether — control flow, env lookups, conditionals — around
+// these setters; the setters just record intent.
+//
+// Single-arg-per-call setters (Aether is fixed-arity), keyed by resource
+// name. Shape mirrors the design doc's worked example:
+//
+//     resource("db", "jail")
+//     dataset("db", "zroot/jails/db")
+//     image("web", "freebsd-14.ova")
+//     command("app", "service myapp onestart")
+//     health("db", "pg_isready -h 10.0.0.10")
+//     depends("app", "db")          // app depends on db → db up first
+//
+// The runner reads the count + per-name fields back via the get_* helpers.
+
+import std.config
+import std.string (string_length, string_char_at, string_from_int)
+
+exports (
+    resource, kind, image, command, health, dataset, ip, depends,
+    health_interval, health_budget,
+    count, name_at,
+    get_kind, get_image, get_command, get_health, get_dataset, get_ip,
+    get_depends, get_interval, get_budget
+)
+
+// --- declaration setters ---------------------------------------------
+
+// Declare a resource `nm` of kind `k` ("jail"/"bhyve"/"lxc"/"docker"/…).
+// Appends to the ordered resource list and records its kind. Calling
+// resource() twice with the same name overwrites the kind but does not
+// duplicate the list entry.
+resource(nm: string, k: string) {
+    if config.get("aeo.cmp.kind.${nm}") == "" {
+        n = _count()
+        config.put("aeo.cmp.name.${n}", nm)
+        config.put("aeo.cmp.count", string_from_int(n + 1))
+    }
+    config.put("aeo.cmp.kind.${nm}", k)
+}
+
+// Alias for resource()'s kind, for `kind("db","jail")` call-site taste.
+kind(nm: string, k: string) {
+    config.put("aeo.cmp.kind.${nm}", k)
+}
+
+image(nm: string, v: string)   { config.put("aeo.cmp.image.${nm}", v) }
+command(nm: string, v: string) { config.put("aeo.cmp.command.${nm}", v) }
+health(nm: string, v: string)  { config.put("aeo.cmp.health.${nm}", v) }
+dataset(nm: string, v: string) { config.put("aeo.cmp.dataset.${nm}", v) }
+ip(nm: string, v: string)      { config.put("aeo.cmp.ip.${nm}", v) }
+
+// `depends(app, db)` — app depends on db, so db is brought up first and
+// torn down last. One dependency per call (single-arg-per-call); a real
+// multi-dep resource repeats the call. v0 records the LAST dependency
+// (the common single-upstream tier chain); a fuller multi-dep model is a
+// follow-up.
+depends(nm: string, on: string) { config.put("aeo.cmp.depends.${nm}", on) }
+
+// Per-resource health poll tuning (ms between probes; max probe attempts).
+health_interval(nm: string, ms: int) { config.put("aeo.cmp.interval.${nm}", string_from_int(ms)) }
+health_budget(nm: string, n: int)    { config.put("aeo.cmp.budget.${nm}", string_from_int(n)) }
+
+// --- reader helpers (the runner consumes these) ----------------------
+
+count() -> int {
+    return _count()
+}
+
+_count() -> int {
+    v = config.get("aeo.cmp.count")
+    if string_length(v) == 0 {
+        return 0
+    }
+    return _to_int(v)
+}
+
+// Name of the i-th declared resource (declaration order).
+name_at(i: int) -> string {
+    return config.get("aeo.cmp.name.${i}")
+}
+
+get_kind(nm: string) -> string    { return config.get("aeo.cmp.kind.${nm}") }
+get_image(nm: string) -> string   { return config.get("aeo.cmp.image.${nm}") }
+get_command(nm: string) -> string { return config.get("aeo.cmp.command.${nm}") }
+get_health(nm: string) -> string  { return config.get("aeo.cmp.health.${nm}") }
+get_dataset(nm: string) -> string { return config.get("aeo.cmp.dataset.${nm}") }
+get_ip(nm: string) -> string      { return config.get("aeo.cmp.ip.${nm}") }
+get_depends(nm: string) -> string { return config.get("aeo.cmp.depends.${nm}") }
+
+// interval defaults to 1000ms, budget to 60 attempts, if unset.
+get_interval(nm: string) -> int {
+    v = config.get("aeo.cmp.interval.${nm}")
+    if string_length(v) == 0 {
+        return 1000
+    }
+    return _to_int(v)
+}
+
+get_budget(nm: string) -> int {
+    v = config.get("aeo.cmp.budget.${nm}")
+    if string_length(v) == 0 {
+        return 60
+    }
+    return _to_int(v)
+}
+
+// std.string lacks a to_int wrapper in this surface; parse digits.
+_to_int(s: string) -> int {
+    n = string_length(s)
+    acc = 0
+    i = 0
+    while i < n {
+        c = string_char_at(s, i)
+        if c >= 48 {
+            if c <= 57 {
+                acc = acc * 10 + (c - 48)
+            }
+        }
+        i = i + 1
+    }
+    return acc
+}

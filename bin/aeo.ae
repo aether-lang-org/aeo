@@ -1,0 +1,196 @@
+// bin/aeo — the aeo front-door (design Decision 1B: native Aether, no
+// bash trampoline).
+//
+// Usage:
+//   aeo <compose.ae>           bring the tree up
+//   aeo up <compose.ae>        (explicit) bring up
+//   aeo down <compose.ae>      tear down in reverse
+//   aeo status <compose.ae>    show each resource's live state
+//
+// What it does — the "casually generate + supervise" seam:
+//   1. Resolve AEO_HOME (the install/dev tree holding lib/ + the runner).
+//   2. Assemble a build dir: copy lib/ into it, copy the fixed runner to a
+//      TOP-LEVEL run.ae, and install the operator's compose.ae as the
+//      `aeo_compose` module (it must define aeo_declare(cap)). This single-
+//      lib-root, entry-outside-lib layout is required for Aether's
+//      transitive import resolution (see memory aeo-frontdoor-codegen).
+//   3. `ae build run.ae --lib lib` → a composition binary.
+//   4. Run that binary SUPERVISED via os.run_supervised — own process
+//      group, forward signals, reap the group. A Ctrl-C during bring-up
+//      forwards to the whole tree; the operator then runs `aeo down` to
+//      tear down (the v0 supervision model — no in-process trap, since
+//      Aether exposes no general sigaction wrapper; os.run_supervised's
+//      forward+reap is the native primitive we DO have).
+//
+// This earns aeo its three front-door properties (design Decision 1): an
+// injected cap (the build receives authority), lifecycle supervision, and
+// subcommands — none of which `ae run compose.ae` could provide.
+
+import std.os (run_capture, run_supervised, getenv, argv0)
+import std.fs (write_atomic, mkdir_p)
+import std.list
+import std.string (string_length, string_concat)
+
+extern aether_args_count() -> int
+extern aether_args_get(index: int) -> string
+extern exit(code: int)
+
+main() {
+    argc = aether_args_count()
+    // argv[0] is the program; parse [subcmd] <compose.ae>.
+    cmd = "up"
+    compose_path = ""
+    if argc == 2 {
+        compose_path = aether_args_get(1)
+    } else {
+        if argc >= 3 {
+            cmd = aether_args_get(1)
+            compose_path = aether_args_get(2)
+        }
+    }
+
+    if compose_path == "" {
+        println("usage: aeo [up|down|status] <compose.ae>")
+        exit(2)
+    }
+    if cmd != "up" {
+        if cmd != "down" {
+            if cmd != "status" {
+                println("aeo: unknown subcommand '${cmd}' (want up|down|status)")
+                exit(2)
+            }
+        }
+    }
+
+    home = getenv("AEO_HOME")
+    if home == "" {
+        println("aeo: AEO_HOME is not set (point it at the aeo tree holding lib/)")
+        exit(2)
+    }
+
+    // --- assemble the build dir ---
+    work = "/tmp/aeo-build"
+    _ = mkdir_p(work)
+    libdst = string_concat(work, "/lib")
+
+    // cp -r $AEO_HOME/lib/. $work/lib   (shell out — aeo shells freely)
+    if _cp_r(string_concat(home, "/lib"), libdst) != 0 {
+        println("aeo: failed to stage lib/ from ${home}")
+        exit(1)
+    }
+    // Install the operator's compose.ae as the aeo_compose module.
+    cmpdir = string_concat(libdst, "/aeo_compose")
+    _ = mkdir_p(cmpdir)
+    if _cp(compose_path, string_concat(cmpdir, "/module.ae")) != 0 {
+        println("aeo: cannot read compose file '${compose_path}'")
+        exit(1)
+    }
+    // Copy the fixed runner to a top-level run.ae (entry outside lib/).
+    if _cp(string_concat(home, "/lib/aeo/runner.ae"), string_concat(work, "/run.ae")) != 0 {
+        println("aeo: missing runner at ${home}/lib/aeo/runner.ae")
+        exit(1)
+    }
+
+    // --- build ---
+    // Build to a `.new` path, then rename onto `bin`. Reason: `ae build -o
+    // X` followed by an immediate exec of X fails ETXTBSY (exit 127) —
+    // the linker child still holds a write handle to X when run_supervised
+    // tries to exec it. Rename gives the exec a fresh inode the build
+    // never touched. (Found the hard way; see memory.)
+    bin = string_concat(work, "/aeo-run")
+    binnew = string_concat(work, "/aeo-run.new")
+    bav = list_new()
+    list_add(bav, "build")
+    list_add(bav, string_concat(work, "/run.ae"))
+    list_add(bav, "-o")
+    list_add(bav, binnew)
+    list_add(bav, "--lib")
+    list_add(bav, libdst)
+    println("aeo: building composition")
+    bout, bstatus, berr = run_capture("ae", bav, null)
+    list_free(bav)
+    if berr != "" {
+        println("aeo: build spawn failed: ${berr}")
+        exit(1)
+    }
+    if bstatus != 0 {
+        println("aeo: composition failed to build:")
+        println(bout)
+        exit(1)
+    }
+    // Recompute the paths: binnew was passed to list_add above and
+    // list_free(bav) released that shared buffer, so the original binnew
+    // now dangles (heap-string-into-list ownership — aeb/LLM.md). Fresh
+    // concats for the rename.
+    if _mv(string_concat(work, "/aeo-run.new"), string_concat(work, "/aeo-run")) != 0 {
+        println("aeo: failed to finalize built binary")
+        exit(1)
+    }
+
+    // --- run supervised, passing the subcommand via AEO_CMD ---
+    // run_supervised inherits our env; we set AEO_CMD for the child. Own
+    // process group + forward signals + reap the group: a Ctrl-C during
+    // bring-up forwards to the whole tree.
+    _ = _setenv("AEO_CMD", cmd)
+    rav = list_new()
+    code, outcome = run_supervised(bin, rav, null, 1, 1, 0, 1)
+    list_free(rav)
+    if outcome != "exited" {
+        println("aeo: composition ${outcome}")
+    }
+    if outcome != "exited" {
+        println("aeo: composition ${outcome} (exit ${code})")
+        exit(code)
+    }
+    exit(code)
+}
+
+// cp -r SRC/. DST  — copy directory contents. Returns 0 on success.
+_cp_r(src: string, dst: string) -> int {
+    _ = mkdir_p(dst)
+    av = list_new()
+    list_add(av, "-a")
+    // `cp -a src/. dst` copies contents into dst.
+    list_add(av, string_concat(src, "/."))
+    list_add(av, dst)
+    out, status, err = run_capture("/bin/cp", av, null)
+    list_free(av)
+    if err != "" {
+        return 1
+    }
+    return status
+}
+
+// mv SRC DST — rename onto the final path. Returns 0 on success.
+_mv(src: string, dst: string) -> int {
+    av = list_new()
+    list_add(av, "-f")
+    list_add(av, src)
+    list_add(av, dst)
+    out, status, err = run_capture("/bin/mv", av, null)
+    list_free(av)
+    if err != "" {
+        return 1
+    }
+    return status
+}
+
+// cp SRC DST (single file). Returns 0 on success.
+_cp(src: string, dst: string) -> int {
+    av = list_new()
+    list_add(av, src)
+    list_add(av, dst)
+    out, status, err = run_capture("/bin/cp", av, null)
+    list_free(av)
+    if err != "" {
+        return 1
+    }
+    return status
+}
+
+// setenv via the libc extern (os doesn't expose setenv in this surface;
+// see std.os note "callers reaching for os.setenv find them where…").
+extern setenv(name: string, value: string, overwrite: int) -> int
+_setenv(name: string, value: string) -> int {
+    return setenv(name, value, 1)
+}

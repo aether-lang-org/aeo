@@ -1,0 +1,34 @@
+// examples/jail_compose — a FreeBSD-jail operator composition.
+//
+// Same shape as the Linux container compose, different kind: a two-tier
+// jail stack db ◄ app over ZFS datasets. Demonstrates aeo's substrate
+// independence — only kind() and the per-kind setters change; the tree,
+// dependency edges, health gating, and reverse teardown are identical.
+//
+// The jail roots must be populated (an operator provision() step; aeo
+// ships no userland) — here pointed at /rescue-style minimal roots. Run
+// on a FreeBSD host as root:  AEO_HOME=~/aeo aeo up examples/jail_compose/module.ae
+//
+// Setters called NAMESPACED via whole-module import (transitive-import
+// rule — see examples/aeo_compose).
+
+import compose
+
+exports ( aeo_declare )
+
+aeo_declare(cap: ptr) {
+    compose.resource("aeo-jdb", "jail")
+    compose.dataset("aeo-jdb", "zroot/jails/aeo-jdb")
+    compose.command("aeo-jdb", "/rescue/sh -c 'sleep 600'")
+    compose.health("aeo-jdb", "/rescue/test -d /")
+    compose.health_interval("aeo-jdb", 500)
+    compose.health_budget("aeo-jdb", 30)
+
+    compose.resource("aeo-japp", "jail")
+    compose.dataset("aeo-japp", "zroot/jails/aeo-japp")
+    compose.command("aeo-japp", "/rescue/sh -c 'sleep 600'")
+    compose.health("aeo-japp", "/rescue/test -d /")
+    compose.health_interval("aeo-japp", 500)
+    compose.health_budget("aeo-japp", 30)
+    compose.depends("aeo-japp", "aeo-jdb")     // app jail after db jail
+}

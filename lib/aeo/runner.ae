@@ -1,0 +1,289 @@
+// lib/aeo/runner.ae — the fixed aeo runner (the single compilation unit).
+//
+// Owns the generic resource ACTOR and the bring-up/teardown ENGINE (main),
+// both of which must live in the unit with `main` because Aether actors
+// are single-compilation-unit (they don't cross `import`). Drivers, host
+// probe, the compose declaration DSL, and the state bridge are imported.
+//
+// The only per-composition variation is the operator's resource
+// declaration, which is data (compose-DSL setters → std.config). So this
+// runner is FIXED; the `aeo` front-door assembles a build dir (lib/ + this
+// runner copied to a top-level run.ae + the operator's compose.ae as the
+// `aeo_compose` module) and `ae build`s it. See bin/aeo and
+// memory aeo-frontdoor-codegen for the build-layout rules.
+//
+// Bring-up: declaration order, each resource gated on liveness, a resource
+// whose depends() target isn't up yet deferred to a later pass (converges
+// for any DAG depth ≤ N). Teardown: reverse boot order. Subcommand from
+// AEO_CMD env (the front-door sets it): up (default) / down / status.
+
+import std.config
+import driver_linux
+import driver_bsd
+import compose
+import resource (set_state, get_state, STATE_DOWN, STATE_BOOTING, STATE_UP, STATE_FAILED)
+import host (family, profile)
+import aeo_compose (aeo_declare)
+
+// `aeo_compose` is the operator's composition module. The `aeo` front-door
+// generates a one-line shim that re-exports the operator's compose.ae as
+// `aeo_compose` providing `aeo_declare(cap)`. For a self-contained build,
+// build with `--lib <dir-with-aeo_compose>`; examples/ provide one.
+
+// ---- messages (in_-prefixed; strings stashed to config, never retained
+// in actor state — see docs/aether-actor-string-bug.md) ----
+message Boot { in_name: string }
+message Halt { in_name: string }
+
+// ---- the generic resource actor ----
+// No string state (heap-string-in-state corrupts; see
+// docs/aether-actor-string-bug.md). Poll tuning is read from compose data
+// and passed to _poll_to_up, not held in state.
+actor Resource {
+    state _unused = 0
+
+    receive {
+        Boot(in_name) -> {
+            set_state(in_name, STATE_BOOTING())
+            k = compose.get_kind(in_name)
+            err = driver_up(in_name, k)
+            if err != "" {
+                println("aeo: [${in_name}] up failed: ${err}")
+                set_state(in_name, STATE_FAILED())
+            } else {
+                _poll_to_up(in_name, k, compose.get_interval(in_name), compose.get_budget(in_name))
+            }
+        }
+        Halt(in_name) -> {
+            k = compose.get_kind(in_name)
+            err = driver_down(in_name, k)
+            if err != "" {
+                println("aeo: [${in_name}] down failed: ${err}")
+            }
+            set_state(in_name, STATE_DOWN())
+        }
+    }
+}
+
+// Bounded health-poll loop (called from the Boot handler; blocks only
+// this actor). interval_ms/budget are passed in rather than read as actor
+// state fields — those are only in scope inside the actor's receive body,
+// not in a free function.
+_poll_to_up(nm: string, k: string, interval_ms: int, budget: int) {
+    health = compose.get_health(nm)
+    remaining = budget
+    done = 0
+    while done == 0 {
+        alive = driver_probe(nm, k, health)
+        if alive == 1 {
+            set_state(nm, STATE_UP())
+            done = 1
+            println("aeo: [${nm}] up")
+        } else {
+            remaining = remaining - 1
+            if remaining <= 0 {
+                println("aeo: [${nm}] health budget exhausted — giving up")
+                set_state(nm, STATE_FAILED())
+                done = 1
+            } else {
+                sleep(interval_ms)
+            }
+        }
+    }
+}
+
+// ---- driver dispatch by kind (exported; pure routing) ----
+driver_up(nm: string, k: string) -> string {
+    if k == "docker" {
+        return driver_linux.up(nm, compose.get_image(nm), compose.get_command(nm), "docker")
+    }
+    if k == "lxc" {
+        return driver_linux.up(nm, compose.get_image(nm), compose.get_command(nm), "")
+    }
+    if k == "container" {
+        return driver_linux.up(nm, compose.get_image(nm), compose.get_command(nm), "")
+    }
+    if k == "jail" {
+        return driver_bsd.up(nm, compose.get_dataset(nm), "", compose.get_ip(nm), compose.get_command(nm))
+    }
+    return "aeo: kind '${k}' has no up() driver on this host"
+}
+
+driver_down(nm: string, k: string) -> string {
+    if k == "jail" {
+        return driver_bsd.down(nm)
+    }
+    return driver_linux.down(nm, _engine_of(k))
+}
+
+driver_probe(nm: string, k: string, health: string) -> int {
+    if k == "jail" {
+        return driver_bsd.probe(nm, health, "")
+    }
+    return driver_linux.probe(nm, health, _engine_of(k))
+}
+
+_engine_of(k: string) -> string {
+    if k == "docker" {
+        return "docker"
+    }
+    return ""
+}
+
+// ---- bring-up engine ----
+// Dependency-ordered, liveness-gated. Spawns one actor per declared
+// resource, boots in dependency order (deferring a resource whose
+// depends() target isn't up yet), blocking on each until up or failed.
+// Returns 1 if every resource reached up, else 0 (partial bring-up; caller
+// should tear down).
+run_up() -> int {
+    n = compose.count()
+    pass = 0
+    while pass < n {
+        i = 0
+        while i < n {
+            nm = compose.name_at(i)
+            if get_state(nm) == STATE_DOWN() {
+                dep = compose.get_depends(nm)
+                ready = 0
+                if dep == "" {
+                    ready = 1
+                } else {
+                    if get_state(dep) == STATE_UP() {
+                        ready = 1
+                    }
+                }
+                if ready == 1 {
+                    a = spawn(Resource())
+                    a ! Boot { in_name: nm }
+                    st = _await(nm, 120)
+                    if st != STATE_UP() {
+                        return 0
+                    }
+                }
+            }
+            i = i + 1
+        }
+        pass = pass + 1
+    }
+    j = 0
+    while j < n {
+        if get_state(compose.name_at(j)) != STATE_UP() {
+            return 0
+        }
+        j = j + 1
+    }
+    return 1
+}
+
+// ---- teardown engine ----
+// Reverse declaration order: the last-declared (most-dependent) tier stops
+// first, the first-declared (its dependency) stops last.
+run_down() {
+    n = compose.count()
+    i = n - 1
+    while i >= 0 {
+        nm = compose.name_at(i)
+        a = spawn(Resource())
+        a ! Halt { in_name: nm }
+        _await_down(nm, 60)
+        i = i - 1
+    }
+    wait_for_idle()
+}
+
+// Block until `nm` is up or failed (or `secs` elapse). Returns the state.
+_await(nm: string, secs: int) -> string {
+    waited = 0
+    step = 250
+    budget = secs * 1000
+    while waited < budget {
+        st = get_state(nm)
+        if st == STATE_UP() {
+            return st
+        }
+        if st == STATE_FAILED() {
+            return st
+        }
+        sleep(step)
+        waited = waited + step
+    }
+    return get_state(nm)
+}
+
+// Block until `nm` reports down (best-effort; bounded).
+_await_down(nm: string, secs: int) {
+    waited = 0
+    step = 250
+    budget = secs * 1000
+    while waited < budget {
+        if get_state(nm) == STATE_DOWN() {
+            return
+        }
+        sleep(step)
+        waited = waited + step
+    }
+}
+
+// Print the declared tree and each resource's LIVE state. State is probed
+// from the driver (not the in-memory bridge), so `aeo status` reports the
+// truth about an already-running stack even though each invocation is a
+// fresh process with empty in-memory state.
+_status() {
+    n = compose.count()
+    println("aeo: ${n} resource(s) declared")
+    i = 0
+    while i < n {
+        nm = compose.name_at(i)
+        k = compose.get_kind(nm)
+        dep = compose.get_depends(nm)
+        live = driver_probe(nm, k, "")
+        st = "down"
+        if live == 1 {
+            st = "up"
+        }
+        if dep == "" {
+            println("  ${nm} [${k}] state=${st}")
+        } else {
+            println("  ${nm} [${k}] ◄ ${dep} state=${st}")
+        }
+        i = i + 1
+    }
+}
+
+// ---- front-door entry ----
+// Subcommand comes from AEO_CMD (the front-door sets it): "up" (default),
+// "down", or "status". The operator's declaration is run first so the
+// resource tree exists for every subcommand.
+main() {
+    aeo_declare(null)            // operator compose populates the tree (data)
+    cmd = config.get("AEO_CMD")
+    if cmd == "" {
+        cmd = os_getenv("AEO_CMD")
+    }
+
+    if cmd == "status" {
+        _status()
+        return
+    }
+
+    if cmd == "down" {
+        println(profile())
+        run_down()
+        println("aeo: torn down")
+        return
+    }
+
+    // default: up
+    println(profile())
+    ok = run_up()
+    if ok == 0 {
+        println("aeo: bring-up failed — tearing down partial tree")
+        run_down()
+        exit(1)
+    }
+    println("aeo: stack up")
+}
+
+import std.os (os_getenv)
+extern exit(code: int)
