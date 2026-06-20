@@ -13,7 +13,7 @@
 //   1. Resolve AEO_HOME (the install/dev tree holding lib/ + the runner).
 //   2. Assemble a build dir: copy lib/ into it, copy the fixed runner to a
 //      TOP-LEVEL run.ae, and install the operator's compose.ae as the
-//      `aeo_compose` module (it must define aeo_declare(cap)). This single-
+//      `aeo_compose` module (it must define aeo_orchestration()). This single-
 //      lib-root, entry-outside-lib layout is required for Aether's
 //      transitive import resolution (see memory aeo-frontdoor-codegen).
 //   3. `ae build run.ae --lib lib` → a composition binary.

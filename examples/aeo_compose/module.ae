@@ -1,44 +1,41 @@
 // examples/aeo_compose — a sample operator composition (config IS code).
 //
-// What an operator writes: a real Aether module that declares a resource
-// tree using the kind-verb trailing-block DSL. Exposes aeo_declare(cap),
-// which the aeo runner calls before bring-up. `cap` is the injected
-// authority handle (unused in this data-only declaration, threaded to
-// mirror the design's cap discipline).
+// What an operator writes: a real Aether module that declares a SYSTEM —
+// a deliberate tree of contained resources — and stands it up. The entry
+// is `aeo_orchestration()`; inside it, `system("name") { … }` is the
+// depth-0 container (the root of the tree), and the kind-verb openers
+// (`container`, `jail`, …) declare its resources.
 //
-// Two-tier Linux stack: db ◄ app. Both busybox containers running `sleep`
-// with a trivial `true` health check — enough to exercise dependency-
-// ordered, health-gated bring-up + reverse teardown without real images.
+// Two-tier Linux stack: db ◄ app, as a system named "two-tier". Both
+// busybox containers running `sleep` with a trivial `true` health check —
+// enough to exercise dependency-ordered, health-gated bring-up + reverse
+// teardown without real images.
 //
-// The kind is the verb: `container("db") { ... }`. The opener returns a
-// handle (the resource name) you can bind and pass to depends(), matching
-// the design doc's `db = jail(cap, "db") { ... } ... depends(db)` shape —
-// a typo'd depends(dbb) is then a compile error, not a silent bad string.
-// The bare-name setters inside configure that resource (its name flows in
-// as the block's _ctx). Two import lines: the openers, then the block
-// setters — the standard ecosystem idiom (cf. aeb's `import bash (script,
-// jobs, env)`).
+// Two import lines, the standard ecosystem idiom (cf. aeb's `import bash
+// (script, jobs, env)`): the openers, then the block setters.
 
-import compose (container)
+import compose (system, container)
 import compose (image, command, health, depends, health_interval, health_budget)
 
-exports ( aeo_declare )
+exports ( aeo_orchestration )
 
-aeo_declare(cap: ptr) {
-    db = container("aeo-db") {
-        image("docker.io/library/busybox:latest")
-        command("sleep 600")
-        health("true")
-        health_interval(500)
-        health_budget(30)
-    }
+aeo_orchestration() {
+    system("two-tier") {
+        db = container("aeo-db") {
+            image("docker.io/library/busybox:latest")
+            command("sleep 600")
+            health("true")
+            health_interval(500)
+            health_budget(30)
+        }
 
-    app = container("aeo-app") {
-        image("docker.io/library/busybox:latest")
-        command("sleep 600")
-        health("true")
-        health_interval(500)
-        health_budget(30)
-        depends(db)                  // app comes up only after db is up
+        app = container("aeo-app") {
+            image("docker.io/library/busybox:latest")
+            command("sleep 600")
+            health("true")
+            health_interval(500)
+            health_budget(30)
+            depends(db)              // app comes up only after db is up
+        }
     }
 }

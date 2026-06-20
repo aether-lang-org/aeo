@@ -24,12 +24,13 @@ import driver_vm
 import compose
 import resource (set_state, get_state, STATE_DOWN, STATE_BOOTING, STATE_UP, STATE_FAILED)
 import host (family, profile)
-import aeo_compose (aeo_declare)
+import aeo_compose (aeo_orchestration)
 
 // `aeo_compose` is the operator's composition module. The `aeo` front-door
-// generates a one-line shim that re-exports the operator's compose.ae as
-// `aeo_compose` providing `aeo_declare(cap)`. For a self-contained build,
-// build with `--lib <dir-with-aeo_compose>`; examples/ provide one.
+// installs the operator's compose.ae as that module; it must define
+// `aeo_orchestration()` — the entry that declares one or more
+// `system("name") { … }` blocks. For a self-contained build, build with
+// `--lib <dir-with-aeo_compose>`; examples/ provide one.
 
 // ---- messages ----
 // Configure sets the actor's identity (name + kind) once at spawn; Boot
@@ -264,22 +265,30 @@ _await_down(nm: string, secs: int) {
 // truth about an already-running stack even though each invocation is a
 // fresh process with empty in-memory state.
 _status() {
+    sys = compose.syscount()
     n = compose.count()
-    println("aeo: ${n} resource(s) declared")
+    println("aeo: ${sys} system(s), ${n} resource(s) declared")
     i = 0
     while i < n {
         nm = compose.name_at(i)
         k = compose.get_kind(nm)
         dep = compose.get_depends(nm)
+        host = compose.get_host(nm)
+        sysn = compose.get_system(nm)
         live = driver_probe(nm, k, "")
         st = "down"
         if live == 1 {
             st = "up"
         }
+        // Tag the resource with its system and, when nested, its host VM.
+        loc = "{${sysn}}"
+        if host != "" {
+            loc = "{${sysn}} inside ${host}"
+        }
         if dep == "" {
-            println("  ${nm} [${k}] state=${st}")
+            println("  ${nm} [${k}] ${loc} state=${st}")
         } else {
-            println("  ${nm} [${k}] ◄ ${dep} state=${st}")
+            println("  ${nm} [${k}] ◄ ${dep} ${loc} state=${st}")
         }
         i = i + 1
     }
@@ -414,7 +423,7 @@ _plan() {
 // "down", "status", or "dry-run". The operator's declaration is run first
 // so the resource tree exists for every subcommand.
 main() {
-    aeo_declare(null)            // operator compose populates the tree (data)
+    aeo_orchestration()          // operator compose populates the tree (data)
     cmd = config.get("AEO_CMD")
     if cmd == "" {
         cmd = os_getenv("AEO_CMD")

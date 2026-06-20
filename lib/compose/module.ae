@@ -30,12 +30,15 @@ import std.config
 import std.string (string_length, string_char_at, string_from_int)
 
 exports (
+    system,
+    bhyve_vm, kvm_vm,
     resource,
     container, docker, lxc, kvm, jail, bhyve,
     image, command, health, dataset, ip, depends,
     cpus, memory, nic,
     health_interval, health_budget,
-    count, name_at,
+    count, name_at, get_system, get_host,
+    syscount, sysname_at,
     get_kind, get_image, get_command, get_health, get_dataset, get_ip,
     get_depends, get_interval, get_budget,
     get_cpus, get_memory, get_nic
@@ -65,10 +68,51 @@ exports (
 // `import compose (image, health, depends, …)`), same shape aeb uses for
 // `import bash (script, jobs, env)`.
 
+// `system("name") { … }` — the depth-0 container, the root of the tree.
+// The operator's resources are declared inside it. Structural for now: it
+// names the system and records each enclosed resource's membership (the
+// "current system"), so a later per-system semantic (system-scoped up/down,
+// the cap boundary, nested `inside()`) has the grouping it needs. Returns
+// the name as the block context, so it nests like any opener — a `system`
+// can itself sit inside a `vm` block later.
+system(nm: string) -> string {
+    config.put("aeo.cmp.cursystem", nm)
+    config.put("aeo.cmp.curhost", "")        // entering a system resets host nesting
+    if config.get("aeo.cmp.sysknown.${nm}") == "" {
+        s = _syscount()
+        config.put("aeo.cmp.sysname.${s}", nm)
+        config.put("aeo.cmp.syscount", string_from_int(s + 1))
+        config.put("aeo.cmp.sysknown.${nm}", "1")
+    }
+    return nm
+}
+
+// Block-host VM openers — `bhyve_vm("myapp") { container("app") { … } }`.
+// Unlike the LEAF VM verbs (bhyve/kvm, which run a guest image directly),
+// these declare a VM that CONTAINS resources: the VM is itself a declared
+// resource (so it boots), and resources inside its block record that they
+// live INSIDE it (the nesting / `inside` relationship). This is the
+// substrate-crossing edge — a Linux container inside a bhyve VM on a BSD
+// host. NOTE (v0 limitation): nesting tracking is single-level and assumes
+// the host-block's children are declared within its block; a resource
+// declared as a direct sibling AFTER a host-block should open its own
+// system or host block rather than rely on reset.
+bhyve_vm(nm: string) -> string {
+    resource(nm, "bhyve")
+    config.put("aeo.cmp.curhost", nm)        // inner resources are inside this VM
+    return nm
+}
+kvm_vm(nm: string) -> string {
+    resource(nm, "kvm")
+    config.put("aeo.cmp.curhost", nm)
+    return nm
+}
+
 // The general opener: declare a resource `nm` of kind `k`. Appends to the
-// ordered list, records its kind, and returns `nm` as the trailing-block
-// context. Re-declaring the same name overwrites the kind without
-// duplicating the list entry. The kind-verbs below wrap this.
+// ordered list, records its kind + which system encloses it, and returns
+// `nm` as the trailing-block context. Re-declaring the same name overwrites
+// the kind without duplicating the list entry. The kind-verbs below wrap
+// this.
 resource(nm: string, k: string) -> string {
     if config.get("aeo.cmp.kind.${nm}") == "" {
         n = _count()
@@ -76,6 +120,8 @@ resource(nm: string, k: string) -> string {
         config.put("aeo.cmp.count", string_from_int(n + 1))
     }
     config.put("aeo.cmp.kind.${nm}", k)
+    config.put("aeo.cmp.system.${nm}", config.get("aeo.cmp.cursystem"))
+    config.put("aeo.cmp.host.${nm}", config.get("aeo.cmp.curhost"))
     return nm
 }
 
@@ -130,6 +176,28 @@ _count() -> int {
 // Name of the i-th declared resource (declaration order).
 name_at(i: int) -> string {
     return config.get("aeo.cmp.name.${i}")
+}
+
+// Which system a resource belongs to ("" if declared outside any system).
+get_system(nm: string) -> string { return config.get("aeo.cmp.system.${nm}") }
+
+// Which host (VM) a resource is nested INSIDE ("" if at the system/top
+// level — i.e. it runs directly on the orchestrator host).
+get_host(nm: string) -> string { return config.get("aeo.cmp.host.${nm}") }
+
+// Declared systems (the depth-0 containers), in declaration order.
+syscount() -> int {
+    return _syscount()
+}
+_syscount() -> int {
+    v = config.get("aeo.cmp.syscount")
+    if string_length(v) == 0 {
+        return 0
+    }
+    return _to_int(v)
+}
+sysname_at(i: int) -> string {
+    return config.get("aeo.cmp.sysname.${i}")
 }
 
 get_kind(nm: string) -> string    { return config.get("aeo.cmp.kind.${nm}") }

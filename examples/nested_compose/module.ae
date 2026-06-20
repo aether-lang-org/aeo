@@ -1,0 +1,54 @@
+// examples/nested_compose — the nesting demo: a Linux container INSIDE a
+// bhyve VM, INSIDE a system. The substrate-crossing tree.
+//
+// This is the "Linux inside GhostBSD" shape and aeo's realization of the
+// Principles of Containment nesting rule: each contained item is further
+// restricted without knowing its depth.
+//
+//   system("red222")
+//     └─ db   (container, on the system/host directly)
+//     └─ myapp (bhyve VM)
+//          └─ app (container, INSIDE the VM) ── depends ──► db
+//
+// What's REAL vs. what's the frontier:
+//   - REAL today: the grammar + the data model. `aeo dry-run` resolves the
+//     full nested tree — db at top level, myapp as a bhyve VM, app nested
+//     inside myapp with a cross-boundary depends(db). The bhyve VM boots
+//     via the driver_vm path (proven on FreeBSD).
+//   - FRONTIER: actually creating `app` INSIDE the running `myapp` VM needs
+//     the driver to run its container commands OVER SSH into the guest (the
+//     nested-host / remote-exec path) rather than locally. That dispatch is
+//     the next build; the nesting is declared and gated correctly now.
+//
+// Import the openers (system + the block-host bhyve_vm + container) and the
+// block setters.
+
+import compose (system, bhyve_vm, container)
+import compose (image, command, cpus, memory, health, depends, health_interval, health_budget)
+
+exports ( aeo_orchestration )
+
+aeo_orchestration() {
+    system("red222") {
+
+        // Tier 1: database — a container on the host directly.
+        db = container("db") {
+            image("docker.io/library/postgres:16")
+            health("pg_isready")
+        }
+
+        // Tier 2: app — a Linux container nested INSIDE a bhyve VM named
+        // "myapp". It depends on db, which lives one level out at the
+        // system level — the dependency edge crosses the VM boundary.
+        bhyve_vm("myapp") {
+            cpus(2)
+            memory("2G")
+
+            app = container("app") {
+                image("docker.io/library/myapp:latest")
+                health("curl -fsS http://localhost:8080/healthz")
+                depends(db)
+            }
+        }
+    }
+}

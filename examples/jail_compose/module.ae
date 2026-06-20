@@ -1,36 +1,36 @@
-// examples/jail_compose — a FreeBSD-jail operator composition.
+// examples/jail_compose — a FreeBSD-jail system composition.
 //
-// Same kind-verb DSL as the Linux container compose, different verb: a
-// two-tier jail stack db ◄ app over ZFS datasets. Demonstrates aeo's
-// substrate independence — only the verb and the per-kind setters change;
-// the tree, dependency edges, health gating, and reverse teardown are
-// identical.
+// Same shape as the Linux container system, different kind: a two-tier
+// jail stack db ◄ app over ZFS datasets, as a system named "two-tier-jail".
+// Demonstrates aeo's substrate independence — only the verb and the
+// per-kind setters change; the system, tree, dependency edges, health
+// gating, and reverse teardown are identical.
 //
-// The jail roots must be populated (an operator provision() step; aeo
-// ships no userland) — here pointed at /rescue-style minimal roots. Run
-// on a FreeBSD host as root:
+// Run on a FreeBSD host as root:
 //   AEO_HOME=~/aeo aeo up examples/jail_compose/module.ae
 
-import compose (jail)
+import compose (system, jail)
 import compose (dataset, command, health, depends, health_interval, health_budget)
 
-exports ( aeo_declare )
+exports ( aeo_orchestration )
 
-aeo_declare(cap: ptr) {
-    db = jail("aeo-jdb") {
-        dataset("zroot/jails/aeo-jdb")
-        command("/rescue/sh -c 'sleep 600'")
-        health("/rescue/test -d /")
-        health_interval(500)
-        health_budget(30)
-    }
+aeo_orchestration() {
+    system("two-tier-jail") {
+        db = jail("aeo-jdb") {
+            dataset("zroot/jails/aeo-jdb")
+            command("/rescue/sh -c 'sleep 600'")
+            health("/rescue/test -d /")
+            health_interval(500)
+            health_budget(30)
+        }
 
-    app = jail("aeo-japp") {
-        dataset("zroot/jails/aeo-japp")
-        command("/rescue/sh -c 'sleep 600'")
-        health("/rescue/test -d /")
-        health_interval(500)
-        health_budget(30)
-        depends(db)                  // app jail after db jail
+        app = jail("aeo-japp") {
+            dataset("zroot/jails/aeo-japp")
+            command("/rescue/sh -c 'sleep 600'")
+            health("/rescue/test -d /")
+            health_interval(500)
+            health_budget(30)
+            depends(db)              // app jail after db jail
+        }
     }
 }
