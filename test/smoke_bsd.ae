@@ -1,18 +1,11 @@
-// Smoke test: the FreeBSD jail driver. Pure-logic + (when run as root on
-// a FreeBSD host with a populated jail root) a real up→probe→down cycle.
+// Smoke test: the FreeBSD jail driver — pure-logic + idempotency checks
+// that need no privilege. A real jail up→probe→down cycle needs root + a
+// populated jail root and is driven separately (see test/jail-root setup
+// notes); this validates the driver's contract surface.
 //
-// Booting a jail needs root and a populated root filesystem, so this test
-// has two layers:
-//   - ALWAYS: exercise the pure argv/path builders (no privilege needed).
-//   - IF root + a jail root dir is provided via argv[1]: do a real jail
-//     up → probe → jexec health → down against that root.
-//
-// Run pure-logic check:   ae build test/smoke_bsd.ae -o /tmp/sb --lib lib && /tmp/sb
-// Run real jail (root):   sudo /tmp/sb /path/to/populated/jail/root
+// Run:  ae build test/smoke_bsd.ae -o /tmp/sb --lib lib && /tmp/sb
 
 import driver_bsd
-import std.os (argv0)
-import std.string (string_length)
 
 main() {
     // --- pure-logic assertions (always) ---
