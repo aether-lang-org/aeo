@@ -37,6 +37,13 @@ case "${1:-}" in
     ;;
 esac
 
+# 0. vm-bhyve needs qemu-img to convert cloud (qcow2) images to raw.
+if ! command -v qemu-img >/dev/null 2>&1; then
+    echo "ERROR: qemu-img is required for cloud images."
+    echo "Run once:  sudo pkg install -y qemu-tools"
+    exit 1
+fi
+
 # 1. Fetch the cloud image into the vm-bhyve image store (idempotent).
 if ! vm img | grep -q "$IMG_FILE"; then
     echo "fetching Alpine UEFI cloud image (~50MB)..."
