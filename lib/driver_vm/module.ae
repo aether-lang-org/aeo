@@ -200,17 +200,17 @@ _bhyve_provision(res_name: string, guest_image: string, ssh_key: string, network
     //    metadata; read our seed (verified: avoids the long init stall).
     //  - ssh key install (so aeo can ssh into the guest).
     //  - a console password (ubuntu:aeo) for debugging.
-    //  - runcmd `for i in ...: ip link set eth0 up; dhclient -1 eth0` —
-    //    Ubuntu's netplan rendered eth0 but left it DOWN under vm-bhyve, so
-    //    nothing DHCP'd (verified: manual up+dhclient instantly got a lease).
-    //    runcmd (late, after the network stage so the virtio NIC is ready —
-    //    bootcmd ran too early) with a retry loop forces link-up + DHCP.
-    // The shell here writes the YAML to a temp file then `vm create -C -u`.
-    // (heredoc-style via printf; $-vars are escaped so the guest sees them.)
+    //  - the guest networks via netplan's default DHCP (its NIC is
+    //    enp0s6, not eth0); with the datasource pin removing the init stall,
+    //    it gets a lease on its own. A name-agnostic runcmd brings up every
+    //    non-lo interface as a safety net.
+    //  - install podman (the in-guest container runtime aeo-agent uses to
+    //    run nested resources), so the guest is ready to host `app`.
+    // The shell writes the YAML to a temp file then `vm create -C -u`.
     ud = "/tmp/aeo-ud-${res_name}.yml"
     sh = list_new()
     list_add(sh, "-c")
-    list_add(sh, "set -e; KEY=$(cat ${key}); printf '#cloud-config\\ndatasource_list: [ NoCloud, None ]\\nssh_pwauth: true\\nchpasswd:\\n  expire: false\\n  list: |\\n    ubuntu:aeo\\n    root:aeo\\nssh_authorized_keys:\\n  - %s\\nruncmd:\\n  - [ sh, -c, \"for i in 1 2 3 4 5 6; do ip link set eth0 up; dhclient -1 eth0 && break; sleep 3; done\" ]\\n' \"$KEY\" > ${ud}; sudo -n vm img 2>/dev/null | grep -q ${file} || sudo -n vm img ${url}; sudo -n vm create -t linux -i ${file} -C -u ${ud} ${res_name}")
+    list_add(sh, "set -e; KEY=$(cat ${key}); printf '#cloud-config\\ndatasource_list: [ NoCloud, None ]\\nssh_pwauth: true\\nchpasswd:\\n  expire: false\\n  list: |\\n    ubuntu:aeo\\n    root:aeo\\nssh_authorized_keys:\\n  - %s\\npackage_update: true\\npackages:\\n  - podman\\nruncmd:\\n  - [ sh, -c, \"for i in $(ls /sys/class/net | grep -v lo); do ip link set $i up; done; dhclient || true\" ]\\n' \"$KEY\" > ${ud}; sudo -n vm img 2>/dev/null | grep -q ${file} || sudo -n vm img ${url}; sudo -n vm create -t linux -i ${file} -C -u ${ud} ${res_name}")
     out, status, err = run_capture("/bin/sh", sh, null)
     list_free(sh)
     if err != "" {
