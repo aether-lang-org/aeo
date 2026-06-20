@@ -15,7 +15,7 @@
 //          └─ app (container, INSIDE myapp) ── depends ──► db
 
 import compose (system, bhyve_vm, jail, container)
-import compose (dataset, command, dockerfile, cpus, memory, health, depends)
+import compose (dataset, command, dockerfile, cpus, memory, health, expose, depends)
 import compose (count, name_at, get_kind, get_system, get_host, get_depends, get_dockerfile, syscount, sysname_at)
 import std.string (string_contains)
 
@@ -38,12 +38,13 @@ declare() {
             memory("2G")
             app = container("app") {
                 dockerfile(<<DOCKER
-FROM docker.io/library/busybox:latest
-RUN echo "myapp v1, built by aeo" > /etc/myapp-release
-CMD ["sh", "-c", "while true; do echo ok | nc -l -p 8080; done"]
+FROM docker.io/library/python:3-alpine
+RUN printf 'import http.server as h\nclass A(h.BaseHTTPRequestHandler):\n def do_GET(self):\n  p=self.path.strip("/").split("/")\n  try: b=str(int(p[1])+int(p[2]))\n  except: b="err"\n  self.send_response(200); self.end_headers(); self.wfile.write(b.encode())\n def log_message(self,*a): pass\nh.HTTPServer(("0.0.0.0",8080),A).serve_forever()\n' > /app.py
+CMD ["python", "/app.py"]
 DOCKER
                 )
-                health("nc -z localhost 8080")
+                expose(8080)
+                health("curl -fsS http://localhost:8080/add/0/0")
                 depends(db)
             }
         }
