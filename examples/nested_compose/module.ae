@@ -32,7 +32,7 @@
 // and the block setters.
 
 import compose (system, bhyve_vm, jail, container)
-import compose (image, command, dataset, cpus, memory, health, depends, health_interval, health_budget)
+import compose (dockerfile, command, dataset, cpus, memory, health, depends, health_interval, health_budget)
 
 exports ( aeo_orchestration )
 
@@ -54,9 +54,16 @@ aeo_orchestration() {
             cpus(2)
             memory("2G")
 
+            // `app` is a real, buildable image — an inline Dockerfile
+            // (heredoc), not a fictional registry reference. aeo builds it
+            // and runs the result.
             app = container("app") {
-                image("docker.io/library/myapp:latest")
-                health("curl -fsS http://localhost:8080/healthz")
+                dockerfile(<<DOCKER
+FROM docker.io/library/busybox:latest
+RUN echo "myapp v1, built by aeo" > /etc/myapp-release
+CMD ["sh", "-c", "while true; do echo ok | nc -l -p 8080; done"]
+DOCKER)
+                health("nc -z localhost 8080")
                 depends(db)
             }
         }

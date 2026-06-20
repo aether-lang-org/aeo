@@ -18,6 +18,7 @@
 // AEO_CMD env (the front-door sets it): up (default) / down / status.
 
 import std.config
+import std.string (string_length, string_substring)
 import driver_linux
 import driver_bsd
 import driver_vm
@@ -107,16 +108,45 @@ _poll_to_up(nm: string, k: string, interval_ms: int, budget: int) {
     }
 }
 
+// Resolve the image a container resource runs: if it has an inline
+// dockerfile(), build that and use the built tag; otherwise use image().
+// Returns (image_or_tag, build_err). build_err "" means ok.
+_container_image(nm: string, engine_pref: string) -> string {
+    df = compose.get_dockerfile(nm)
+    if df == "" {
+        return compose.get_image(nm)
+    }
+    berr = driver_linux.build(nm, df, engine_pref)
+    if berr != "" {
+        // Signal the failure by returning the error text prefixed; driver_up
+        // checks for it. (Single-return constraint — no tuple literal.)
+        return "ERR:${berr}"
+    }
+    return driver_linux.built_tag(nm)
+}
+
 // ---- driver dispatch by kind (exported; pure routing) ----
 driver_up(nm: string, k: string) -> string {
     if k == "docker" {
-        return driver_linux.up(nm, compose.get_image(nm), compose.get_command(nm), "docker")
+        img = _container_image(nm, "docker")
+        if string_starts_err(img) == 1 {
+            return _strip_err(img)
+        }
+        return driver_linux.up(nm, img, compose.get_command(nm), "docker")
     }
     if k == "lxc" {
-        return driver_linux.up(nm, compose.get_image(nm), compose.get_command(nm), "")
+        img = _container_image(nm, "")
+        if string_starts_err(img) == 1 {
+            return _strip_err(img)
+        }
+        return driver_linux.up(nm, img, compose.get_command(nm), "")
     }
     if k == "container" {
-        return driver_linux.up(nm, compose.get_image(nm), compose.get_command(nm), "")
+        img = _container_image(nm, "")
+        if string_starts_err(img) == 1 {
+            return _strip_err(img)
+        }
+        return driver_linux.up(nm, img, compose.get_command(nm), "")
     }
     if k == "jail" {
         return driver_bsd.up(nm, compose.get_dataset(nm), "", compose.get_ip(nm), compose.get_command(nm))
@@ -161,6 +191,21 @@ _engine_of(k: string) -> string {
         return "docker"
     }
     return ""
+}
+
+// _container_image encodes a build failure as a leading "ERR:" sentinel
+// (it can't return a tuple). These detect and unwrap it.
+string_starts_err(s: string) -> int {
+    if string_length(s) < 4 {
+        return 0
+    }
+    if string_substring(s, 0, 4) == "ERR:" {
+        return 1
+    }
+    return 0
+}
+_strip_err(s: string) -> string {
+    return string_substring(s, 4, string_length(s))
 }
 
 // ---- bring-up engine ----

@@ -22,11 +22,13 @@
 import std.os (run_capture, os_which)
 import std.list
 import std.string (string_length, string_contains, string_char_at, string_substring)
+import std.fs (write_atomic)
 
 exports (
     name, engine_resolve,
-    up, down, probe, exec_capture,
-    ps_running_argv, run_argv, stop_argv, rm_argv, exec_health_argv
+    up, down, probe, exec_capture, build, built_tag,
+    ps_running_argv, run_argv, stop_argv, rm_argv, exec_health_argv,
+    build_argv
 )
 
 name() -> string {
@@ -234,6 +236,64 @@ exec_capture(res_name: string, cmd: string, engine_pref: string) -> string {
         return ""
     }
     return _chomp(out)
+}
+
+// The image tag aeo builds an inline-Dockerfile resource under. (Resource
+// names already tend to be aeo-prefixed by the operator, so the tag uses
+// the name as-is under an aeo-built/ repo to avoid double-prefixing.)
+built_tag(res_name: string) -> string {
+    return "localhost/aeo-built/${res_name}:latest"
+}
+
+// `<engine> build -t TAG -f DOCKERFILE CONTEXTDIR`
+build_argv(tag: string, dockerfile_path: string, context_dir: string) -> ptr {
+    av = list_new()
+    list_add(av, "build")
+    list_add(av, "-t")
+    list_add(av, tag)
+    list_add(av, "-f")
+    list_add(av, dockerfile_path)
+    list_add(av, context_dir)
+    return av
+}
+
+// Build an image from inline Dockerfile `text`, tagged for `res_name`. The
+// text is written to a temp Dockerfile (no parent→child stdin primitive is
+// exposed, so a file is the clean path) and built with that as the context
+// dir. Returns "" on success, else an error message. The resulting tag is
+// built_tag(res_name).
+build(res_name: string, text: string, engine_pref: string) -> string {
+    eng = engine_resolve(engine_pref)
+    if eng == "" {
+        return "aeo: no container engine found (need podman or docker)"
+    }
+    dfdir = "/tmp/aeo-build-${res_name}"
+    _ = _mkdir(dfdir)
+    dfpath = "${dfdir}/Dockerfile"
+    werr = write_atomic(dfpath, text, string_length(text))
+    if werr != "" {
+        return "aeo: cannot write Dockerfile for '${res_name}': ${werr}"
+    }
+    tag = built_tag(res_name)
+    av = build_argv(tag, dfpath, dfdir)
+    out, status, err = run_capture(eng, av, null)
+    list_free(av)
+    if err != "" {
+        return "aeo: image build spawn failed for '${res_name}': ${err}"
+    }
+    if status != 0 {
+        return "aeo: image build failed for '${res_name}' (exit ${status}): ${out}"
+    }
+    return ""
+}
+
+_mkdir(path: string) -> int {
+    av = list_new()
+    list_add(av, "-p")
+    list_add(av, path)
+    out, status, err = run_capture("/bin/mkdir", av, null)
+    list_free(av)
+    return status
 }
 
 // Strip a single trailing newline from command output.

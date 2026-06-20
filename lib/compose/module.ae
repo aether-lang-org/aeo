@@ -34,12 +34,12 @@ exports (
     bhyve_vm, kvm_vm,
     resource,
     container, docker, lxc, kvm, jail, bhyve,
-    image, command, health, dataset, ip, depends,
+    image, command, dockerfile, health, dataset, ip, depends,
     cpus, memory, nic,
     health_interval, health_budget,
     count, name_at, get_system, get_host,
     syscount, sysname_at,
-    get_kind, get_image, get_command, get_health, get_dataset, get_ip,
+    get_kind, get_image, get_dockerfile, get_command, get_health, get_dataset, get_ip,
     get_depends, get_interval, get_budget,
     get_cpus, get_memory, get_nic
 )
@@ -139,6 +139,19 @@ bhyve(nm: string)     -> string { return resource(nm, "bhyve") }
 // `${_ctx}` interpolates it back to the name string for the config key.
 image(_ctx: ptr, v: string)   { config.put("aeo.cmp.image.${_ctx}", v) }
 command(_ctx: ptr, v: string) { config.put("aeo.cmp.command.${_ctx}", v) }
+
+// Inline Dockerfile (heredoc). When set, aeo BUILDS the image from this
+// text and runs the result, instead of pulling image(). Pass it a
+// <<DOCKER … DOCKER heredoc so the Dockerfile lives in the composition:
+//   container("app") {
+//       dockerfile(<<DOCKER
+//   FROM docker.io/library/busybox:latest
+//   CMD ["sh","-c","sleep 600"]
+//   DOCKER)
+//   }
+// (Convenience for small self-contained images. For anything nontrivial,
+// build with aeb and reference the resulting image via image().)
+dockerfile(_ctx: ptr, text: string) { config.put("aeo.cmp.dockerfile.${_ctx}", text) }
 health(_ctx: ptr, v: string)  { config.put("aeo.cmp.health.${_ctx}", v) }
 dataset(_ctx: ptr, v: string) { config.put("aeo.cmp.dataset.${_ctx}", v) }
 ip(_ctx: ptr, v: string)      { config.put("aeo.cmp.ip.${_ctx}", v) }
@@ -202,6 +215,7 @@ sysname_at(i: int) -> string {
 
 get_kind(nm: string) -> string    { return config.get("aeo.cmp.kind.${nm}") }
 get_image(nm: string) -> string   { return config.get("aeo.cmp.image.${nm}") }
+get_dockerfile(nm: string) -> string { return config.get("aeo.cmp.dockerfile.${nm}") }
 get_command(nm: string) -> string { return config.get("aeo.cmp.command.${nm}") }
 get_health(nm: string) -> string  { return config.get("aeo.cmp.health.${nm}") }
 get_dataset(nm: string) -> string { return config.get("aeo.cmp.dataset.${nm}") }
