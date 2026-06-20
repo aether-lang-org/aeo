@@ -259,7 +259,11 @@ _bhyve_provision(res_name: string, guest_image: string, ssh_key: string, network
     ud = "/tmp/aeo-ud-${res_name}.yml"
     sh = list_new()
     list_add(sh, "-c")
-    list_add(sh, "set -e; KEY=$(cat ${key}); printf '#cloud-config\\ndatasource_list: [ NoCloud, None ]\\nssh_pwauth: true\\nchpasswd:\\n  expire: false\\n  list: |\\n    ubuntu:aeo\\n    root:aeo\\nssh_authorized_keys:\\n  - %s\\npackage_update: true\\npackages:\\n  - podman\\nruncmd:\\n  - [ sh, -c, \"for i in $(ls /sys/class/net | grep -v lo); do ip link set $i up; done; dhclient || true\" ]\\n' \"$KEY\" > ${ud}; sudo -n vm img 2>/dev/null | grep -q ${file} || sudo -n vm img ${url}; sudo -n vm create -t linux -i ${file} -c ${_itoa(nc)} -m ${mm} -C -u ${ud} ${res_name}")
+    // Use the NAT template (linux-nat) if test/setup-nat.sh created it —
+    // NAT networking is reliable (local dnsmasq, no LAN-switch MAC issue);
+    // else the bridged `linux` template. See test/setup-nat.sh + memory
+    // bhyve-guest-networking.
+    list_add(sh, "set -e; KEY=$(cat ${key}); TPL=linux; [ -f /zroot/vm/.templates/linux-nat.conf ] && TPL=linux-nat; printf '#cloud-config\\ndatasource_list: [ NoCloud, None ]\\nssh_pwauth: true\\nchpasswd:\\n  expire: false\\n  list: |\\n    ubuntu:aeo\\n    root:aeo\\nssh_authorized_keys:\\n  - %s\\npackage_update: true\\npackages:\\n  - podman\\nruncmd:\\n  - [ sh, -c, \"for i in $(ls /sys/class/net | grep -v lo); do ip link set $i up; done; dhclient || true\" ]\\n' \"$KEY\" > ${ud}; sudo -n vm img 2>/dev/null | grep -q ${file} || sudo -n vm img ${url}; sudo -n vm create -t $TPL -i ${file} -c ${_itoa(nc)} -m ${mm} -C -u ${ud} ${res_name}")
     out, status, err = run_capture("/bin/sh", sh, null)
     list_free(sh)
     if err != "" {
