@@ -1,28 +1,27 @@
 // examples/aeo_compose — a sample operator composition (config IS code).
 //
-// This is what an operator writes: a real Aether module that declares a
-// resource tree using the trailing-block compose DSL. It exposes
-// aeo_declare(cap), which the aeo runner calls before bring-up. The `cap`
-// is the injected authority handle (unused in this data-only declaration,
-// but threaded to mirror the design's cap discipline).
+// What an operator writes: a real Aether module that declares a resource
+// tree using the kind-verb trailing-block DSL. Exposes aeo_declare(cap),
+// which the aeo runner calls before bring-up. `cap` is the injected
+// authority handle (unused in this data-only declaration, threaded to
+// mirror the design's cap discipline).
 //
 // Two-tier Linux stack: db ◄ app. Both busybox containers running `sleep`
 // with a trivial `true` health check — enough to exercise dependency-
 // ordered, health-gated bring-up + reverse teardown without real images.
-// Swap image()/command()/health() for real tiers.
 //
-// The block reads like config: `compose.resource(name, kind) { ... }`
-// opens a resource and the bare-name setters inside configure it (the
-// resource name flows in as the block's _ctx — no need to repeat it).
-// Bare-name setters resolve via the receiver fallback (#333) because the
-// opener is written member-access as `compose.resource(...)`.
+// The kind is the verb: `container("db") { ... }`. The bare-name setters
+// inside configure that resource (its name flows in as the block's _ctx).
+// Two import lines: the openers, then the block setters — the standard
+// ecosystem idiom (cf. aeb's `import bash (script, jobs, env)`).
 
-import compose
+import compose (container)
+import compose (image, command, health, depends, health_interval, health_budget)
 
 exports ( aeo_declare )
 
 aeo_declare(cap: ptr) {
-    compose.resource("aeo-db", "container") {
+    container("aeo-db") {
         image("docker.io/library/busybox:latest")
         command("sleep 600")
         health("true")
@@ -30,7 +29,7 @@ aeo_declare(cap: ptr) {
         health_budget(30)
     }
 
-    compose.resource("aeo-app", "container") {
+    container("aeo-app") {
         image("docker.io/library/busybox:latest")
         command("sleep 600")
         health("true")

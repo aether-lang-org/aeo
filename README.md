@@ -48,18 +48,20 @@ runs before bring-up. **config IS code**: the file is real Aether — control
 flow, env lookups, conditionals — around the declarations.
 
 ```aether
-import compose
+import compose (container)
+import compose (image, health, depends)
+
 exports ( aeo_declare )
 
 aeo_declare(cap: ptr) {
     // Tier 1: database
-    compose.resource("db", "container") {
+    container("db") {
         image("docker.io/library/postgres:16")
         health("pg_isready")
     }
 
     // Tier 2: app — depends on db, so db comes up (and is healthy) first
-    compose.resource("app", "container") {
+    container("app") {
         image("docker.io/library/myapp:latest")
         health("curl -fsS http://localhost:8080/healthz")
         depends("db")
@@ -67,24 +69,28 @@ aeo_declare(cap: ptr) {
 }
 ```
 
-Each `compose.resource(name, kind) { ... }` opens a resource; the bare-name
-setters inside configure it (the resource name flows in as the block's context,
-so you don't repeat it). This is Aether's trailing-block builder DSL — the call
-site reads like config, but the body is full Aether (control flow, env lookups,
-conditionals). See
+The **kind is the verb** — `container(name) { ... }`, `jail(name) { ... }` — and
+the bare-name setters inside configure that resource (its name flows in as the
+block's context, so you don't repeat it). This is Aether's trailing-block
+builder DSL: the call site reads like config, but the body is full Aether
+(control flow, env lookups, conditionals). See
 [`docs/closures-and-builder-dsl.md`](https://github.com/aether-lang-org/aether/blob/main/docs/closures-and-builder-dsl.md)
 in the language repo for the mechanism.
+
+Two import lines, the standard ecosystem idiom (cf. aeb's `import bash (script,
+jobs, env)`): the openers (`container`, `jail`, …) and the block setters
+(`image`, `health`, …).
 
 `aeo up` brings `db` up and blocks until its health check passes before
 starting `app`; `aeo down` stops `app` before the `db` it depends on. The
 operator writes the tree once; direction is aeo's job.
 
-Block setters (one arg per call — Aether is fixed-arity): `image`, `command`,
-`health`, `dataset`, `ip`, `depends`, `health_interval`, `health_budget`. The
-opener's `kind` is one of `container`/`docker`/`lxc` (Linux) or `jail`
-(FreeBSD); `bhyve`/`kvm` are planned. See `examples/` for a Linux-container and
-a FreeBSD-jail composition with the same `db ◄ app` shape — substrate
-independence at the DSL layer.
+Kind verbs: `container` / `docker` / `lxc` / `kvm` (Linux), `jail` / `bhyve`
+(FreeBSD). Block setters (one arg per call — Aether is fixed-arity): `image`,
+`command`, `health`, `dataset`, `ip`, `depends`, `health_interval`,
+`health_budget`. (`resource(name, kind) { ... }` remains as a general escape
+hatch.) See `examples/` for a Linux-container and a FreeBSD-jail composition
+with the same `db ◄ app` shape — substrate independence at the DSL layer.
 
 ## Running it
 

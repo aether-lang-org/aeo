@@ -30,7 +30,9 @@ import std.config
 import std.string (string_length, string_char_at, string_from_int)
 
 exports (
-    resource, image, command, health, dataset, ip, depends,
+    resource,
+    container, docker, lxc, kvm, jail, bhyve,
+    image, command, health, dataset, ip, depends,
     health_interval, health_budget,
     count, name_at,
     get_kind, get_image, get_command, get_health, get_dataset, get_ip,
@@ -39,25 +41,32 @@ exports (
 
 // --- the trailing-block builder DSL ----------------------------------
 //
-//     resource("db", "container") {
+//     container("db") {                 // the KIND is the verb
 //         image("docker.io/library/postgres:16")
 //         health("pg_isready")
-//         depends("...")
+//     }
+//     jail("app") {
+//         dataset("zroot/jails/app")
+//         depends("db")
 //     }
 //
-// `resource(name, kind)` declares the resource and RETURNS its name. Per
-// the closure-DSL mechanism (aether docs/closures-and-builder-dsl.md), the
-// return value is pushed onto the builder-context stack for the trailing
-// block, so each inner setter's auto-injected `_ctx` IS that name. The
-// setters interpolate `${_ctx}` to key their config writes — no need to
-// repeat the name on every line. Bare-name calls inside the block resolve
-// to these setters via the receiver fallback (#333) when the operator
-// writes `compose.resource(...) { ... }`.
+// Each kind-verb (container/docker/lxc/jail/bhyve/kvm) opens a resource and
+// RETURNS its name. Per the closure-DSL mechanism (aether
+// docs/closures-and-builder-dsl.md), the return value is pushed onto the
+// builder-context stack for the trailing block, so each inner setter's
+// auto-injected `_ctx` IS that name — no need to repeat it per line. The
+// setters interpolate `${_ctx}` to key their config writes.
+//
+// Bare-name calls inside the block (image/health/…) need the companion
+// selective import in the operator's compose module — the standard
+// two-import idiom (`import compose (container, jail)` +
+// `import compose (image, health, depends, …)`), same shape aeb uses for
+// `import bash (script, jobs, env)`.
 
-// Declare a resource `nm` of kind `k` ("jail"/"bhyve"/"lxc"/"docker"/…).
-// Appends to the ordered list, records its kind, and returns `nm` as the
-// context for the trailing block. Re-declaring the same name overwrites
-// the kind without duplicating the list entry.
+// The general opener: declare a resource `nm` of kind `k`. Appends to the
+// ordered list, records its kind, and returns `nm` as the trailing-block
+// context. Re-declaring the same name overwrites the kind without
+// duplicating the list entry. The kind-verbs below wrap this.
 resource(nm: string, k: string) -> string {
     if config.get("aeo.cmp.kind.${nm}") == "" {
         n = _count()
@@ -67,6 +76,16 @@ resource(nm: string, k: string) -> string {
     config.put("aeo.cmp.kind.${nm}", k)
     return nm
 }
+
+// Kind-verb openers — the call site reads `container("db") { … }`. Each is
+// resource(nm, "<kind>"); the host-gating preflight rejects a kind the
+// host can't run. Linux: container/docker/lxc/kvm. FreeBSD: jail/bhyve.
+container(nm: string) -> string { return resource(nm, "container") }
+docker(nm: string)    -> string { return resource(nm, "docker") }
+lxc(nm: string)       -> string { return resource(nm, "lxc") }
+kvm(nm: string)       -> string { return resource(nm, "kvm") }
+jail(nm: string)      -> string { return resource(nm, "jail") }
+bhyve(nm: string)     -> string { return resource(nm, "bhyve") }
 
 // Inner setters — `_ctx: ptr` is the resource name pushed by resource().
 // `${_ctx}` interpolates it back to the name string for the config key.
