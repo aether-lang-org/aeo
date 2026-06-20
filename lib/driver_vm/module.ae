@@ -156,7 +156,7 @@ bhyve_up(res_name: string, guest_image: string, cpus: int, mem: string, network:
     }
     // Provision if the VM doesn't exist yet.
     if _bhyve_exists(res_name) == 0 {
-        perr = _bhyve_provision(res_name, guest_image, ssh_key, network)
+        perr = _bhyve_provision(res_name, guest_image, ssh_key, network, cpus, mem)
         if perr != "" {
             return perr
         }
@@ -185,7 +185,7 @@ _bhyve_exists(res_name: string) -> int {
 }
 
 // Fetch the base image (idempotent) + create the VM with cloud-init.
-_bhyve_provision(res_name: string, guest_image: string, ssh_key: string, network: string) -> string {
+_bhyve_provision(res_name: string, guest_image: string, ssh_key: string, network: string, cpus: int, mem: string) -> string {
     url = _image_url(guest_image)
     if url == "" {
         return "aeo: vm '${res_name}' unknown guest_image '${guest_image}'"
@@ -194,6 +194,14 @@ _bhyve_provision(res_name: string, guest_image: string, ssh_key: string, network
     key = ssh_key
     if string_length(key) == 0 {
         key = "/home/paul/.ssh/id_rsa.pub"
+    }
+    nc = cpus
+    if nc < 1 {
+        nc = 1
+    }
+    mm = mem
+    if string_length(mm) == 0 {
+        mm = "1G"
     }
     // Generate a cloud-init user-data with the hard-won fixes baked in:
     //  - datasource_list:[NoCloud,None] — don't hang ~2min probing network
@@ -210,7 +218,7 @@ _bhyve_provision(res_name: string, guest_image: string, ssh_key: string, network
     ud = "/tmp/aeo-ud-${res_name}.yml"
     sh = list_new()
     list_add(sh, "-c")
-    list_add(sh, "set -e; KEY=$(cat ${key}); printf '#cloud-config\\ndatasource_list: [ NoCloud, None ]\\nssh_pwauth: true\\nchpasswd:\\n  expire: false\\n  list: |\\n    ubuntu:aeo\\n    root:aeo\\nssh_authorized_keys:\\n  - %s\\npackage_update: true\\npackages:\\n  - podman\\nruncmd:\\n  - [ sh, -c, \"for i in $(ls /sys/class/net | grep -v lo); do ip link set $i up; done; dhclient || true\" ]\\n' \"$KEY\" > ${ud}; sudo -n vm img 2>/dev/null | grep -q ${file} || sudo -n vm img ${url}; sudo -n vm create -t linux -i ${file} -C -u ${ud} ${res_name}")
+    list_add(sh, "set -e; KEY=$(cat ${key}); printf '#cloud-config\\ndatasource_list: [ NoCloud, None ]\\nssh_pwauth: true\\nchpasswd:\\n  expire: false\\n  list: |\\n    ubuntu:aeo\\n    root:aeo\\nssh_authorized_keys:\\n  - %s\\npackage_update: true\\npackages:\\n  - podman\\nruncmd:\\n  - [ sh, -c, \"for i in $(ls /sys/class/net | grep -v lo); do ip link set $i up; done; dhclient || true\" ]\\n' \"$KEY\" > ${ud}; sudo -n vm img 2>/dev/null | grep -q ${file} || sudo -n vm img ${url}; sudo -n vm create -t linux -i ${file} -c ${_itoa(nc)} -m ${mm} -C -u ${ud} ${res_name}")
     out, status, err = run_capture("/bin/sh", sh, null)
     list_free(sh)
     if err != "" {
