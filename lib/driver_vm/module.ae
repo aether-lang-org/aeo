@@ -130,46 +130,91 @@ qemu_argv(res_name: string, image: string, cpus: int, mem: string, tap: string, 
 // disk; `cpus`/`mem` size it; `tap` is the host NIC ("" for none).
 // Returns "" on success else an error message.
 up(kind: string, res_name: string, image: string, cpus: int, mem: string, tap: string) -> string {
-    // Already running? idempotent no-op.
-    if _pid_alive(res_name) == 1 {
-        return ""
-    }
-    if string_length(image) == 0 {
-        return "aeo: vm '${res_name}' has no image() set"
-    }
+    // Per-kind functions handle their own idempotency (bhyve checks
+    // vm-bhyve state; kvm checks the pidfile). bhyve via vm-bhyve doesn't
+    // need image() here — the VM was provisioned by setup-guest.sh.
     if kind == "bhyve" {
         return _up_bhyve(res_name, image, cpus, mem, tap)
     }
     if kind == "kvm" {
+        if string_length(image) == 0 {
+            return "aeo: vm '${res_name}' has no image() set"
+        }
         return _up_kvm(res_name, image, cpus, mem, tap)
     }
     return "aeo: vm '${res_name}' has unknown kind '${kind}'"
 }
 
+// bhyve via vm-bhyve. The VM is provisioned once by test/setup-guest.sh
+// (vm create from a cloud image + cloud-init ssh key); aeo's up() is
+// `vm start <name>`. vm-bhyve owns the tap/disk/boot/networking; aeo
+// orchestrates it like it orchestrates podman. `vm` requires root, so we
+// run it under sudo (the operator pre-authorizes; on a root-run aeo the
+// sudo is a harmless no-op via `sudo -n` falling through). The res_name is
+// the vm-bhyve VM name.
+//
+// (The raw-bhyve path — bhyve_argv/_bg_command — is kept below as an
+// alternative for hosts without vm-bhyve, but the vm-bhyve path is the
+// supported one.)
 _up_bhyve(res_name: string, image: string, cpus: int, mem: string, tap: string) -> string {
-    bin = os_which("bhyve")
-    if bin == "" {
-        bin = "/usr/sbin/bhyve"
+    // Already running? idempotent no-op (probe checks vm-bhyve state).
+    if _bhyve_running(res_name) == 1 {
+        return ""
     }
-    av = bhyve_argv(res_name, image, cpus, mem, tap)
-    // bhyve runs in the foreground; background it via /bin/sh and capture
-    // the child pid into the pidfile. Shell-out is the simplest correct
-    // backgrounding primitive (aeo shells freely).
-    pf = pidfile_for(res_name)
-    cmd = _bg_command(bin, av, pf)
+    if _vm_ok("start", res_name) == 1 {
+        return ""
+    }
+    out = _vm_out("start", res_name)
+    if string_contains(out, "already running") == 1 {
+        return ""
+    }
+    return "aeo: 'vm start ${res_name}' failed: ${out}"
+}
+
+// 1 if vm-bhyve reports the VM in a running state. `vm list` shows a
+// STATE column; "Running" (any case) means up. We grep the line for the
+// VM name + Running via a shell-out (simple + robust across vm versions).
+_bhyve_running(res_name: string) -> int {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "sudo vm list 2>/dev/null | awk -v n=${res_name} '$1==n && $0 ~ /[Rr]unning/ {print \"yes\"}'")
+    out, status, err = run_capture("/bin/sh", av, null)
     list_free(av)
-    sh = list_new()
-    list_add(sh, "-c")
-    list_add(sh, cmd)
-    out, status, err = run_capture("/bin/sh", sh, null)
-    list_free(sh)
+    if string_contains(out, "yes") == 1 {
+        return 1
+    }
+    return 0
+}
+
+// Run `vm <sub> <name>` under sudo, capture (stdout, status, err). The
+// argv must be freed AFTER run_capture returns, and a constructed tuple
+// literal can't be returned (Aether limitation), so this stays inline at
+// each call site via the helper below rather than returning the tuple.
+// _vm_out / _vm_status give the two values callers need without a tuple.
+_vm_out(sub: string, name: string) -> string {
+    av = list_new()
+    list_add(av, "vm")
+    list_add(av, sub)
+    list_add(av, name)
+    out, status, err = run_capture("/usr/bin/sudo", av, null)
+    list_free(av)
+    return out
+}
+// 1 if `vm <sub> <name>` exited 0, else 0. (Spawn failure also → 0.)
+_vm_ok(sub: string, name: string) -> int {
+    av = list_new()
+    list_add(av, "vm")
+    list_add(av, sub)
+    list_add(av, name)
+    out, status, err = run_capture("/usr/bin/sudo", av, null)
+    list_free(av)
     if err != "" {
-        return "aeo: bhyve spawn failed for '${res_name}': ${err}"
+        return 0
     }
-    if status != 0 {
-        return "aeo: bhyve launch failed for '${res_name}' (exit ${status}): ${out}"
+    if status == 0 {
+        return 1
     }
-    return ""
+    return 0
 }
 
 _up_kvm(res_name: string, image: string, cpus: int, mem: string, tap: string) -> string {
@@ -192,33 +237,35 @@ _up_kvm(res_name: string, image: string, cpus: int, mem: string, tap: string) ->
     return ""
 }
 
-// Tear the VM down. Kills the recorded pid; for bhyve also destroys the
-// kernel VM object. Absent == success.
+// Tear the VM down. bhyve → `vm stop` (vm-bhyve). kvm → kill the recorded
+// qemu pid. Absent/already-stopped == success.
 down(kind: string, res_name: string) -> string {
+    if kind == "bhyve" {
+        // vm stop is a graceful ACPI poweroff; ignore failure (already off).
+        _ = _vm_ok("stop", res_name)
+        return ""
+    }
+    // kvm: kill the qemu pid.
     pid = _read_pid(res_name)
     if pid > 0 {
         _kill(pid)
-    }
-    if kind == "bhyve" {
-        bc = os_which("bhyvectl")
-        if bc == "" {
-            bc = "/usr/sbin/bhyvectl"
-        }
-        dav = bhyvectl_destroy_argv(res_name)
-        // Ignore failure — the object may already be gone.
-        _do, _ds, _de = run_capture(bc, dav, null)
-        list_free(dav)
     }
     _rm_pidfile(res_name)
     return ""
 }
 
-// Liveness probe. 1 if the hypervisor process is alive AND (no health, or
-// the host-side health command exits 0). Plain int, like the other
-// drivers' probe.
+// Liveness probe. The VM must be up (bhyve → vm-bhyve "Running"; kvm →
+// qemu pid alive) AND, if a health command is given, the host-side check
+// exits 0 (e.g. `nc -z <ip> 22` / `curl http://<ip>/add/0/0`). Plain int.
 probe(kind: string, res_name: string, health: string) -> int {
-    if _pid_alive(res_name) == 0 {
-        return 0
+    if kind == "bhyve" {
+        if _bhyve_running(res_name) == 0 {
+            return 0
+        }
+    } else {
+        if _pid_alive(res_name) == 0 {
+            return 0
+        }
     }
     if string_length(health) == 0 {
         return 1
