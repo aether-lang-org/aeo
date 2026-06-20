@@ -35,13 +35,13 @@ exports (
     resource,
     container, docker, lxc, kvm, jail, bhyve,
     image, command, dockerfile, health, dataset, ip, depends,
-    cpus, memory, nic,
+    cpus, memory, nic, expose,
     health_interval, health_budget,
     count, name_at, get_system, get_host,
     syscount, sysname_at,
     get_kind, get_image, get_dockerfile, get_command, get_health, get_dataset, get_ip,
     get_depends, get_interval, get_budget,
-    get_cpus, get_memory, get_nic
+    get_cpus, get_memory, get_nic, get_expose
 )
 
 // --- the trailing-block builder DSL ----------------------------------
@@ -160,6 +160,14 @@ health(_ctx: ptr, v: string)  { config.put("aeo.cmp.health.${_ctx}", v) }
 dataset(_ctx: ptr, v: string) { config.put("aeo.cmp.dataset.${_ctx}", v) }
 ip(_ctx: ptr, v: string)      { config.put("aeo.cmp.ip.${_ctx}", v) }
 
+// `expose(port)` — declare a port the resource serves that the host (and
+// the resource's dependents) should be able to reach. Substrate-agnostic
+// declaration; each driver realizes it per kind:
+//   container — `-p <port>:<port>` (podman/docker publish)
+//   bhyve/kvm — a host-side forward to the guest's <ip>:<port>
+// v0 records a single port; repeat-call for more is a follow-up.
+expose(_ctx: ptr, port: int)  { config.put("aeo.cmp.expose.${_ctx}", string_from_int(port)) }
+
 // VM sizing (bhyve/kvm): vCPUs, RAM string (e.g. "2G"), and the host NIC
 // — a tap device name on a host bridge ("" = no NIC).
 cpus(_ctx: ptr, n: int)       { config.put("aeo.cmp.cpus.${_ctx}", string_from_int(n)) }
@@ -226,6 +234,15 @@ get_dataset(nm: string) -> string { return config.get("aeo.cmp.dataset.${nm}") }
 get_ip(nm: string) -> string      { return config.get("aeo.cmp.ip.${nm}") }
 get_depends(nm: string) -> string { return config.get("aeo.cmp.depends.${nm}") }
 get_nic(nm: string) -> string     { return config.get("aeo.cmp.nic.${nm}") }
+
+// Exposed port (0 = none declared).
+get_expose(nm: string) -> int {
+    v = config.get("aeo.cmp.expose.${nm}")
+    if string_length(v) == 0 {
+        return 0
+    }
+    return _to_int(v)
+}
 
 // memory defaults to 512M if unset.
 get_memory(nm: string) -> string {

@@ -19,7 +19,7 @@ main() {
     driver_linux.down(nm, "")
 
     // up with a long-lived command so probe sees it alive.
-    e1 = driver_linux.up(nm, img, "sleep 120", "")
+    e1 = driver_linux.up(nm, img, "sleep 120", 0, "")
     if e1 != "" {
         println("FAIL up: ${e1}")
         return

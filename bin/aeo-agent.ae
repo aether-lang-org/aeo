@@ -122,7 +122,7 @@ _handle(me: string, token: string, outbox: string, line: string) -> int {
 _boot_node(node: string) -> string {
     img = _env_or("AEO_BOOT_IMAGE", "docker.io/library/busybox:latest")
     cmd = _env_or("AEO_BOOT_CMD", "sleep 600")
-    return driver_linux.up(node, img, cmd, "")
+    return driver_linux.up(node, img, cmd, 0, "")
 }
 
 // os.getenv returns NULL (not "") when unset, and null != "" — so guard on

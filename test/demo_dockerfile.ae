@@ -55,7 +55,7 @@ main() {
     passed = passed + 1
 
     // 2. Run the built image and confirm it's alive.
-    uerr = driver_linux.up("myapp", tag, "sleep 600", "")
+    uerr = driver_linux.up("myapp", tag, "sleep 600", 0, "")
     if uerr != "" {
         println("FAIL up: ${uerr}")
         exit(1)

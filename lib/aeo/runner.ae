@@ -132,21 +132,21 @@ driver_up(nm: string, k: string) -> string {
         if string_starts_err(img) == 1 {
             return _strip_err(img)
         }
-        return driver_linux.up(nm, img, compose.get_command(nm), "docker")
+        return driver_linux.up(nm, img, compose.get_command(nm), compose.get_expose(nm), "docker")
     }
     if k == "lxc" {
         img = _container_image(nm, "")
         if string_starts_err(img) == 1 {
             return _strip_err(img)
         }
-        return driver_linux.up(nm, img, compose.get_command(nm), "")
+        return driver_linux.up(nm, img, compose.get_command(nm), compose.get_expose(nm), "")
     }
     if k == "container" {
         img = _container_image(nm, "")
         if string_starts_err(img) == 1 {
             return _strip_err(img)
         }
-        return driver_linux.up(nm, img, compose.get_command(nm), "")
+        return driver_linux.up(nm, img, compose.get_command(nm), compose.get_expose(nm), "")
     }
     if k == "jail" {
         return driver_bsd.up(nm, compose.get_dataset(nm), "", compose.get_ip(nm), compose.get_command(nm))
