@@ -306,9 +306,18 @@ _preflight() -> string {
     while i < n {
         nm = compose.name_at(i)
         k = compose.get_kind(nm)
-        runnable = _kind_runnable(k, fam)
-        if runnable == 0 {
-            return "aeo: resource '${nm}' kind '${k}' cannot run on a ${fam} host"
+        // A resource nested INSIDE a VM (get_host != "") gates against that
+        // VM's GUEST substrate, not the orchestrator host — a Linux
+        // container inside a bhyve Linux VM is fine on a FreeBSD host. aeo
+        // doesn't probe the guest OS yet, so for now a nested resource
+        // skips the orchestrator-host kind gate (its substrate is the
+        // guest's). Top-level (non-nested) resources gate against the host.
+        host = compose.get_host(nm)
+        if host == "" {
+            runnable = _kind_runnable(k, fam)
+            if runnable == 0 {
+                return "aeo: resource '${nm}' kind '${k}' cannot run on a ${fam} host"
+            }
         }
         // A depends() target that was never declared would leave this
         // resource un-ready forever — the bring-up loop would just fail
