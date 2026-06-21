@@ -45,19 +45,19 @@ PORT() -> int { return 8080 }
 // Python (with its "/" and "0.0.0.0" quotes) lands verbatim.
 DF() -> string {
     return <<DOCKER
-FROM docker.io/library/python:3-alpine
-RUN cat <<'PY' > /app.py
-import http.server as h
-class A(h.BaseHTTPRequestHandler):
- def do_GET(self):
-  p=self.path.strip("/").split("/")
-  try: b=str(int(p[1])+int(p[2]))
-  except: b="err"
-  self.send_response(200); self.end_headers(); self.wfile.write(b.encode())
- def log_message(self,*a): pass
-h.HTTPServer(("0.0.0.0",8080),A).serve_forever()
-PY
-CMD ["python", "/app.py"]
+        FROM docker.io/library/python:3-alpine
+        RUN cat <<'PY' > /app.py
+        import http.server as h
+        class A(h.BaseHTTPRequestHandler):
+         def do_GET(self):
+          p=self.path.strip("/").split("/")
+          try: b=str(int(p[1])+int(p[2]))
+          except: b="err"
+          self.send_response(200); self.end_headers(); self.wfile.write(b.encode())
+         def log_message(self,*a): pass
+        h.HTTPServer(("0.0.0.0",8080),A).serve_forever()
+        PY
+        CMD ["python", "/app.py"]
 DOCKER
 }
 

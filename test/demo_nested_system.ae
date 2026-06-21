@@ -18,7 +18,7 @@
 import compose (system, bhyve_vm, container)
 import compose (image, dockerfile, cpus, memory, guest_image, network, ssh_key, health, expose, depends)
 import compose (count, name_at, get_kind, get_system, get_host, get_depends, get_dockerfile, get_image, get_guest_image, syscount, sysname_at)
-import std.string (string_contains)
+import std.string (string_contains, string_length, string_substring)
 
 extern exit(code: int)
 
@@ -40,28 +40,28 @@ declare() {
             }
             app = container("app") {
                 dockerfile(<<DOCKER
-FROM docker.io/library/python:3-alpine
-RUN cat <<'PY' > /app.py
-import http.server as h, socket
-def rcmd(*a):
- s=socket.create_connection(("127.0.0.1",6379),1)
- s.sendall(("*%d\r\n"%len(a)+"".join("$%d\r\n%s\r\n"%(len(x),x) for x in a)).encode())
- r=s.recv(4096); s.close(); return r
-class A(h.BaseHTTPRequestHandler):
- def do_GET(self):
-  p=self.path.strip("/").split("/")
-  try:
-   k="add:%s:%s"%(p[1],p[2])
-   c=rcmd("GET",k)
-   if c[:1]==b"$" and c[1:2]!=b"-": b=c.split(b"\r\n")[1].decode()
-   else:
-    b=str(int(p[1])+int(p[2])); rcmd("SET",k,b)
-  except: b="err"
-  self.send_response(200); self.end_headers(); self.wfile.write(b.encode())
- def log_message(self,*a): pass
-h.HTTPServer(("0.0.0.0",8080),A).serve_forever()
-PY
-CMD ["python", "/app.py"]
+                    FROM docker.io/library/python:3-alpine
+                    RUN cat <<'PY' > /app.py
+                    import http.server as h, socket
+                    def rcmd(*a):
+                     s=socket.create_connection(("127.0.0.1",6379),1)
+                     s.sendall(("*%d\r\n"%len(a)+"".join("$%d\r\n%s\r\n"%(len(x),x) for x in a)).encode())
+                     r=s.recv(4096); s.close(); return r
+                    class A(h.BaseHTTPRequestHandler):
+                     def do_GET(self):
+                      p=self.path.strip("/").split("/")
+                      try:
+                       k="add:%s:%s"%(p[1],p[2])
+                       c=rcmd("GET",k)
+                       if c[:1]==b"$" and c[1:2]!=b"-": b=c.split(b"\r\n")[1].decode()
+                       else:
+                        b=str(int(p[1])+int(p[2])); rcmd("SET",k,b)
+                      except: b="err"
+                      self.send_response(200); self.end_headers(); self.wfile.write(b.encode())
+                     def log_message(self,*a): pass
+                    h.HTTPServer(("0.0.0.0",8080),A).serve_forever()
+                    PY
+                    CMD ["python", "/app.py"]
 DOCKER
                 )
                 expose(8080)
@@ -126,6 +126,12 @@ main() {
     // fictional registry reference.
     passed = passed + check("app has inline Dockerfile", _hasdf("app"), "yes")
 
+    // The heredoc body is indented in source (to nest under dockerfile(...)),
+    // but aether's heredoc dedent (>=0.298) strips the common leading
+    // whitespace — so the resolved Dockerfile starts at column 0 with FROM,
+    // not with leaked indentation (which would break `podman build`).
+    passed = passed + check("dockerfile dedented (starts FROM)", _starts_from("app"), "yes")
+
     // The VM declares its guest in the DSL — aeo provisions it (vm-bhyve).
     passed = passed + check("myapp guest_image", get_guest_image("myapp"), "ubuntu-22.04")
 
@@ -142,6 +148,20 @@ main() {
 _hasdf(nm: string) -> string {
     df = get_dockerfile(nm)
     if string_contains(df, "FROM ") == 1 {
+        return "yes"
+    }
+    return "no"
+}
+
+// "yes" if the resolved dockerfile begins exactly with "FROM " at column 0
+// (proves the heredoc dedent stripped the source indentation cleanly — a
+// leaked leading space would make this "no").
+_starts_from(nm: string) -> string {
+    df = get_dockerfile(nm)
+    if string_length(df) < 5 {
+        return "no"
+    }
+    if string_substring(df, 0, 5) == "FROM " {
         return "yes"
     }
     return "no"
