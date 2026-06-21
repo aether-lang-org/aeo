@@ -1,28 +1,24 @@
-// examples/nested_compose — the nesting demo: a Linux container INSIDE a
-// bhyve VM on a FreeBSD host. The substrate-crossing tree, "Linux inside
-// GhostBSD", and aeo's realization of the Principles of Containment nesting
-// rule: each contained item is further restricted without knowing its
-// depth.
+// examples/nested_compose — the nesting demo: a two-tier Linux app INSIDE a
+// bhyve VM on a FreeBSD host. "Linux inside GhostBSD", and aeo's realization
+// of the Principles of Containment nesting rule: each contained item is
+// further restricted without knowing its depth.
 //
 //   system("red222")  (on a FreeBSD host)
-//     └─ db   (jail — BSD-native, runs on the host directly)
 //     └─ myapp (bhyve VM, a Linux guest)
-//          └─ app (container, INSIDE the VM) ── depends ──► db
+//          ├─ db  (redis container — a TCP cache, INSIDE the VM)
+//          └─ app (python container, INSIDE the VM) ── depends ──► db
 //
-// Why db is a JAIL, not a container: a Linux container can't run directly
-// on a FreeBSD kernel — only inside a Linux VM. So at the system/host
-// level (FreeBSD), the DB tier is a jail; the app tier is a Linux container
-// that lives INSIDE the bhyve Linux VM. aeo's host-gating preflight
-// enforces exactly this: a `container` declared at the BSD host level
-// fast-fails ("cannot run on a bsd host") — the gating catches the
-// substrate error. (A Linux-only variant would make db a container and run
-// the whole thing on a Linux host.)
+// Both tiers are Linux containers, so they live INSIDE the bhyve Linux VM
+// (a Linux container can't run directly on the FreeBSD host kernel — aeo's
+// host-gating fast-fails a `container` declared at the BSD host level). The
+// app speaks the redis wire protocol to db over the guest's localhost:
+// GET the cached sum, compute + SET on a miss — a real two-tier system, a
+// few DSL lines per tier.
 //
 // What's REAL vs. the frontier:
 //   - REAL today: the grammar + data model + gating. `aeo status`/`dry-run`
-//     resolve the full nested tree — db (jail) at host level, myapp as a
-//     bhyve VM, app nested inside myapp with a cross-boundary depends(db).
-//     The jail and the bhyve VM both boot via their proven drivers.
+//     resolve the full nested tree — myapp as a bhyve VM, db + app nested
+//     inside it, app depends(db) ordering db first.
 //   - REAL now too: `aeo up` actually creates `app` INSIDE the running
 //     `myapp` guest. The runner routes a nested container (get_host != "")
 //     to driver_vm.guest_container_up: it ssh's into the guest, writes this
@@ -39,25 +35,14 @@
 // Import the openers (system + the block-host bhyve_vm + jail + container)
 // and the block setters.
 
-import compose (system, bhyve_vm, jail, container)
-import compose (dockerfile, command, dataset, cpus, memory, guest_image, network, ssh_key, health, expose, depends, health_interval, health_budget)
+import compose (system, bhyve_vm, container)
+import compose (dockerfile, image, cpus, memory, guest_image, network, ssh_key, health, expose, depends)
 
 exports ( aeo_orchestration )
 
 aeo_orchestration() {
     system("red222") {
 
-        // Tier 1: database — a jail, BSD-native, on the host directly.
-        db = jail("db") {
-            dataset("zroot/jails/db")
-            command("/rescue/sh -c 'sleep 600'")
-            health("/rescue/test -d /")
-        }
-
-        // Tier 2: app — a Linux container nested INSIDE a bhyve VM named
-        // "myapp". It depends on db (the jail), which lives one level out
-        // at the system level — the dependency edge crosses the VM
-        // boundary.
         bhyve_vm("myapp") {
             cpus(2)
             memory("2G")
@@ -66,21 +51,40 @@ aeo_orchestration() {
             network("dhcp")              // get an IP on the host bridge
             ssh_key("/home/paul/.ssh/id_rsa.pub")   // so aeo can ssh in
 
-            // `app` is THE workload — a real Python (stdlib, no pip) HTTP
-            // arithmetic service, GET /add/2/3 -> "5". Built from this inline
-            // Dockerfile and run by aeo. Identical to test/integration_app.ae
-            // (proven container-in-host); here it's nested inside the VM —
-            // the same service, one level down. expose(8080) makes it
-            // reachable; depends(db) gates it on the database jail.
+            // Tier 1: db — a real TCP store. Stock redis, zero config; the
+            // app caches computed sums in it (crude memoization). Few lines:
+            // an image and the port. Comes up before app (app depends on it).
+            db = container("db") {
+                image("docker.io/library/redis:alpine")
+                expose(6379)
+                health("redis-cli ping")
+            }
+
+            // Tier 2: app — the workload. A Python (stdlib, no pip) HTTP
+            // arithmetic service, GET /add/2/3 -> "5", that uses db
+            // idiomatically: it speaks the redis wire protocol (RESP) over a
+            // raw socket — GET the cached answer, and on a miss compute it +
+            // SET it. Both tiers are containers in this VM, talking over the
+            // guest's localhost. expose(8080) makes app reachable from the
+            // host; depends(db) orders db first.
             app = container("app") {
                 dockerfile(<<DOCKER
 FROM docker.io/library/python:3-alpine
 RUN cat <<'PY' > /app.py
-import http.server as h
+import http.server as h, socket
+def rcmd(*a):
+ s=socket.create_connection(("127.0.0.1",6379),1)
+ s.sendall(("*%d\r\n"%len(a)+"".join("$%d\r\n%s\r\n"%(len(x),x) for x in a)).encode())
+ r=s.recv(4096); s.close(); return r
 class A(h.BaseHTTPRequestHandler):
  def do_GET(self):
   p=self.path.strip("/").split("/")
-  try: b=str(int(p[1])+int(p[2]))
+  try:
+   k="add:%s:%s"%(p[1],p[2])
+   c=rcmd("GET",k)
+   if c[:1]==b"$" and c[1:2]!=b"-": b=c.split(b"\r\n")[1].decode()
+   else:
+    b=str(int(p[1])+int(p[2])); rcmd("SET",k,b)
   except: b="err"
   self.send_response(200); self.end_headers(); self.wfile.write(b.encode())
  def log_message(self,*a): pass

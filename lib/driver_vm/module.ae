@@ -193,20 +193,32 @@ bhyve_up(res_name: string, guest_image: string, cpus: int, mem: string, network:
 //
 //   host_vm    — the VM name (get_host of the container); used to find its IP
 //   name       — the container/app name
-//   dockerfile — the inline Dockerfile text (from the DSL's dockerfile())
+//   dockerfile — the inline Dockerfile text (from dockerfile()); "" = none
+//   image      — a stock image ref (from image()), used when no dockerfile
 //   expose     — the port to publish (from expose()); 0 = none
-guest_container_up(host_vm: string, name: string, dockerfile: string, expose: int) -> string {
+// Either dockerfile (build it) OR image (pull+run a stock image, e.g. the
+// redis db tier) — dockerfile wins if both are set.
+guest_container_up(host_vm: string, name: string, dockerfile: string, image: string, expose: int) -> string {
     ip = _guest_ip(host_vm)
     if ip == "" {
         return "aeo: guest VM '${host_vm}' has no reachable IP (booted+networked?) for container '${name}'"
     }
-    // Stage the Dockerfile into the guest, build + run with the port mapped.
-    // The whole remote script runs over ssh as the guest's ubuntu user.
-    pmap = ""
-    if expose > 0 {
-        pmap = "-p ${_itoa(expose)}:${_itoa(expose)}"
+    // Run with host networking so the tiers share the guest's localhost:
+    // db (redis) publishes 6379 on the guest, and app reaches it at
+    // 127.0.0.1:6379. expose()'d ports land directly on the guest's network,
+    // so the host's curl to <guest-ip>:<port> works without -p mapping.
+    net = "--network host"
+    // Two shapes: build-from-Dockerfile (app), or run-a-stock-image (db).
+    run_part = ""
+    if string_length(dockerfile) > 0 {
+        run_part = "cat > /home/ubuntu/Dockerfile.${name} <<'AEOEOF'\n${dockerfile}\nAEOEOF\ncd /home/ubuntu && podman build -t aeo-${name} -f Dockerfile.${name} . >/dev/null 2>&1 && podman rm -f ${name} >/dev/null 2>&1; podman run -d --name ${name} ${net} aeo-${name} >/dev/null"
+    } else {
+        if string_length(image) == 0 {
+            return "aeo: container '${name}' in guest '${host_vm}' has neither dockerfile() nor image()"
+        }
+        run_part = "podman rm -f ${name} >/dev/null 2>&1; podman run -d --name ${name} ${net} ${image} >/dev/null"
     }
-    remote = "set -e; cat > /home/ubuntu/Dockerfile.${name} <<'AEOEOF'\n${dockerfile}\nAEOEOF\ncd /home/ubuntu && podman build -t aeo-${name} -f Dockerfile.${name} . >/dev/null 2>&1 && podman rm -f ${name} >/dev/null 2>&1; podman run -d --name ${name} ${pmap} aeo-${name} >/dev/null"
+    remote = "set -e; ${run_part}"
     av = list_new()
     list_add(av, "-c")
     list_add(av, "ssh -i ${_guest_key()} -o StrictHostKeyChecking=no -o ConnectTimeout=10 ubuntu@${ip} ${_shquote(remote)}")

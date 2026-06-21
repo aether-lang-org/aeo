@@ -148,7 +148,7 @@ driver_up(nm: string, k: string) -> string {
         // host-reachable service in the guest (not a host-local podman run).
         host = compose.get_host(nm)
         if host != "" {
-            return driver_vm.guest_container_up(host, nm, compose.get_dockerfile(nm), compose.get_expose(nm))
+            return driver_vm.guest_container_up(host, nm, compose.get_dockerfile(nm), compose.get_image(nm), compose.get_expose(nm))
         }
         img = _container_image(nm, "")
         if string_starts_err(img) == 1 {
