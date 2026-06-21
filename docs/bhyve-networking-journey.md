@@ -112,13 +112,51 @@ On the boots that DID progress:
   reachable — but it **can't help a guest that doesn't boot**, and the
   intermittent hang (Phase 3) still bites most boots.
 
-### Where it stands
-The remaining blocker is **the intermittent AMD Ryzen bhyve early-boot
-hang** (Phase 3). The AMD params help but don't fully fix it. Next step is
-hands-on: `vm console` a hung boot and see exactly where it stops (GRUB? a
-specific kernel line? a driver?) — the same console observation that cracked
-the Phase-1 `eth0 DOWN`. Remote `cu`/nmdm console capture doesn't work
-non-interactively, so this needs a person at the console.
+### Phase 5 — SOLVED (console proof corrected Phases 3-4)
+A console capture (by a person — remote cu/nmdm capture doesn't work)
+revealed **the "boot hang" was a MISDIAGNOSIS**. The AMD-patched guest
+*boots fully* to `login:` in ~126s; the low tap-packet count I read as
+"hung" was a HEALTHY guest stuck at `systemd Wait for Network` because it
+had **no IPv4**. The console showed why:
+```
+cloud-config failed schema validation!
+ci-info: | eth0 | True | fe80::5a9c:fcff:fe0f:dbfb/64 | ... |   <- link-local only, no IPv4
+```
+**Root cause of the no-network:** my `sed`-edits to the cloud-init seed's
+network-config produced **schema-INVALID YAML**, so cloud-init rejected it →
+no IPv4 → wait-online hangs. (The MAC matched fine — that was a red herring.)
+
+**THE FIX (test/patch-static-ip.sh):** write a CLEAN, valid netplan
+*directly into the guest disk* (mount disk0.img via fuse-ext2), NOT by
+sed-editing the seed: `/etc/netplan/99-aeo-static.yaml` with a static
+address + `cloud.cfg.d/99-disable-network.cfg: network:{config:disabled}`.
+Boot → `eth0 UP 172.16.0.50/24`, pings + ssh in seconds.
+
+**Convergence re-proven on this reliable path:**
+`host -> curl http://172.16.0.50:8080/add/2/3 = 5` (the /add service in the
+guest, curled from the FreeBSD host, deterministic — no DHCP, no boot
+flakiness).
+
+### Still open (smaller)
+- **NAT egress:** the guest reaches the host (ssh to 192.168.0.57 works) but
+  not the internet — pf NATs outbound (tcpdump re0 shows `192.168.0.57 >
+  8.8.8.8` + replies) but the reverse-NAT'd reply doesn't return to the
+  guest on vm-aeonat. So in-guest apt/pull fails. Workaround: STAGE
+  artifacts from the host (build the image on a machine with podman ->
+  `podman save` tar -> scp into the guest -> `podman load`). Fix the pf
+  reverse path later.
+- **podman in the guest:** the bare patched image has none; the golden base
+  (aeo-base) has podman baked in — clone it + patch-static-ip + load a
+  staged image.
+
+### Removability update (post-solve)
+- #3 AMD GRUB params — KEEP (the boot genuinely needs them; the boot is NOT
+  unreliable once patched, contrary to the earlier scare).
+- #4 static IP — now the PRIMARY networking method (clean netplan in-disk);
+  reliable. Could revert to DHCP only if the bridge-broadcast issue is
+  solved, but static works and is simpler.
+- #2 NAT — outbound translation works; the reverse path needs a fix for full
+  egress, but the convergence doesn't need egress (stage artifacts).
 
 ---
 
