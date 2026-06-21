@@ -1,0 +1,78 @@
+// spec_dockerfile.ae — inline-Dockerfile heredoc built + run for real, as an
+// Aeocha BDD spec. The describe/it form of demo_dockerfile.ae.
+//
+//   ae run test/spec_dockerfile.ae --lib lib --lib ../aeocha
+//
+// Proves dockerfile(<<DOCKER…DOCKER) works end to end: aeo BUILDS the image
+// from the inline Dockerfile and runs it, then reads back something the
+// Dockerfile baked in — so the image is a real, buildable thing, not a
+// fictional registry reference. Needs podman/docker; no root.
+
+import aeocha
+import driver_linux
+import std.string
+
+// The inline Dockerfile — what an operator would put in a
+// container("app"){ dockerfile(<<DOCKER…DOCKER) } block. Bakes a marker file.
+DF() -> string {
+    return <<DOCKER
+        FROM docker.io/library/busybox:latest
+        RUN echo aeo-built-this > /etc/aeo-marker
+        CMD ["sh","-c","sleep 600"]
+DOCKER
+}
+
+main() {
+    fw = aeocha.init()
+
+    aeocha.describe(fw, "inline Dockerfile (built + run via aeo's driver)") {
+
+        aeocha.before_each() callback {
+            driver_linux.down("myapp", "")
+        }
+        aeocha.after_each() callback {
+            driver_linux.down("myapp", "")
+        }
+
+        aeocha.it("builds the image from the inline Dockerfile, runs it, reads the baked-in marker") callback {
+            if _no_engine() == 1 {
+                aeocha.assert_true(fw, 1, "skipped — no container engine on PATH")
+            } else {
+                // build
+                berr = driver_linux.build("myapp", DF(), "")
+                aeocha.assert_str_eq(fw, berr, "", "build succeeds")
+                tag = driver_linux.built_tag("myapp")
+                // run + alive
+                uerr = driver_linux.up("myapp", tag, "sleep 600", 0, "")
+                aeocha.assert_str_eq(fw, uerr, "", "run succeeds")
+                aeocha.assert_eq(fw, driver_linux.probe("myapp", "", ""), 1, "myapp alive")
+                // the baked-in marker proves the image is OURS (built from the
+                // heredoc), not a pulled stock image.
+                marker = driver_linux.exec_capture("myapp", "cat /etc/aeo-marker", "")
+                aeocha.assert_str_eq(fw, marker, "aeo-built-this", "baked-in marker")
+                // and it still computes
+                aeocha.assert_str_eq(fw, driver_linux.exec_capture("myapp", "echo $((2+2))", ""), "4", "2+2=4")
+            }
+        }
+
+        aeocha.it("is gone after driver down") callback {
+            if _no_engine() == 1 {
+                aeocha.assert_true(fw, 1, "skipped — no container engine")
+            } else {
+                driver_linux.build("myapp", DF(), "")
+                driver_linux.up("myapp", driver_linux.built_tag("myapp"), "sleep 600", 0, "")
+                driver_linux.down("myapp", "")
+                aeocha.assert_eq(fw, driver_linux.probe("myapp", "", ""), 0, "myapp gone")
+            }
+        }
+    }
+
+    aeocha.run_summary(fw)
+}
+
+_no_engine() -> int {
+    if string.length(driver_linux.engine_resolve("")) == 0 {
+        return 1
+    }
+    return 0
+}
