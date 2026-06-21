@@ -31,9 +31,8 @@ import std.list
 // app is built from an inline heredoc Dockerfile and uses db as a cache.
 declare() {
     system("red222") {
-        // PHASE 1: provision + first boot UNCONSTRAINED; db (redis) + app
-        // (python /add, talks to redis on 127.0.0.1 — same guest) come up.
-        myapp = bhyve_vm("myapp") {
+        // PHASE 1: provision + first boot myapp1 (the redis VM) UNCONSTRAINED.
+        myapp1 = bhyve_vm("myapp1") {
             cpus(2)
             memory("2G")
             guest_image("ubuntu-22.04")
@@ -44,6 +43,32 @@ declare() {
                 expose(6379)
                 health("redis-cli ping")
             }
+        }
+
+        // PHASE 2: confine myapp1's hypervisor — its OWN constraint set
+        // ("lock1": the redis VM's disk/tap/console). suspend -> constrain ->
+        // start, as a verb sequence on the myapp1 handle.
+        suspend(myapp1)
+        constrain("lock1") {
+            constraint("disk",    "/zroot/vm/myapp1/disk0.img", "rd,wr")
+            constraint("net",     "tap0", "rd,wr")
+            constraint("console", "nmdm-myapp1", "rd,wr")
+        }
+        start(myapp1)
+
+        // PHASE 3: provision myapp2 (the app VM) — UNCONSTRAINED first — then
+        // confine it with its OWN, DIFFERENT constraint set ("lock2": myapp2's
+        // disk/tap/console).
+        //
+        // NOTE (your two-VM split): app reaches redis at 127.0.0.1:6379, which
+        // is same-guest only — across myapp1/myapp2 it would need myapp1's IP.
+        // depends(db) is a cross-VM edge here. Flagging, not silently changing.
+        myapp2 = bhyve_vm("myapp2") {
+            cpus(2)
+            memory("2G")
+            guest_image("ubuntu-22.04")
+            network("dhcp")
+            ssh_key("/home/paul/.ssh/id_rsa.pub")
             app = container("app") {
                 dockerfile(<<DOCKER
                     FROM docker.io/library/python:3-alpine
@@ -53,19 +78,19 @@ DOCKER
                 )
                 expose(8080)
                 health("curl -fsS http://localhost:8080/add/0/0")
-                depends(db)
+                depends("db")    // cross-VM edge: 'db' lives in myapp1, so it's
+                                 // referenced by NAME (its handle is out of
+                                 // scope here — different VM block).
             }
         }
 
-        // PHASE 2 — the lifecycle as a SEQUENCE of verbs on the handle.
-        // (Aether has no myapp.suspend() method syntax; it's suspend(myapp).)
-        suspend(myapp)                  // freeze guest to disk (db keeps cache)
-        constrain("lock") {             // declare the confined fd-set
-            constraint("disk",    "/zroot/vm/myapp/disk0.img", "rd,wr")
-            constraint("net",     "tap0", "rd,wr")
-            constraint("console", "nmdm-myapp", "rd,wr")
+        suspend(myapp2)
+        constrain("lock2") {
+            constraint("disk",    "/zroot/vm/myapp2/disk0.img", "rd,wr")
+            constraint("net",     "tap1", "rd,wr")
+            constraint("console", "nmdm-myapp2", "rd,wr")
         }
-        start(myapp)                    // resume confined under cap_enter()
+        start(myapp2)
     }
 }
 
@@ -82,24 +107,30 @@ main() {
             // and the app->db dependency, all in one line. Beats eight
             // field-by-field it-blocks: if the resolution changes, the diff
             // shows exactly what moved.
-            aeocha.it("resolves to the expected system tree (incl. capsicum confinement)") callback {
+            aeocha.it("resolves to two top-level VMs, each with its OWN confinement") callback {
                 want = <<TREE
                     system red222:
-                      bhyve myapp [guest=ubuntu-22.04, cpus=2, mem=2G, confined[lock]: disk(/zroot/vm/myapp/disk0.img)=rd,wr, net(tap0)=rd,wr, console(nmdm-myapp)=rd,wr]
+                      bhyve myapp1 [guest=ubuntu-22.04, cpus=2, mem=2G, confined[lock1]: disk(/zroot/vm/myapp1/disk0.img)=rd,wr, net(tap0)=rd,wr, console(nmdm-myapp1)=rd,wr]
                         container db [image=docker.io/library/redis:alpine, expose=6379]
+                      bhyve myapp2 [guest=ubuntu-22.04, cpus=2, mem=2G, confined[lock2]: disk(/zroot/vm/myapp2/disk0.img)=rd,wr, net(tap1)=rd,wr, console(nmdm-myapp2)=rd,wr]
                         container app [dockerfile, expose=8080] -> db
 TREE
                 aeocha.assert_str_eq(fw, describe_tree(), want, "resolved tree snapshot")
             }
 
-            aeocha.it("the lifecycle sequence: suspend -> constrain -> start(confined)") callback {
-                // suspend(myapp) recorded the freeze; start(myapp) bound it to
-                // the 'lock' constrain block (resume confined).
-                aeocha.assert_str_eq(fw, get_suspended("myapp"), "1", "myapp was suspended (frozen, not shut down)")
-                aeocha.assert_str_eq(fw, get_confined_by("myapp"), "lock", "resumed confined by 'lock'")
-                aeocha.assert_str_eq(fw, get_constraints("lock"),
-                    "disk(/zroot/vm/myapp/disk0.img)=rd,wr, net(tap0)=rd,wr, console(nmdm-myapp)=rd,wr",
-                    "the three bound fd grants")
+            aeocha.it("each VM has its OWN suspend->constrain->start with separate fd grants") callback {
+                // PHASE 2: myapp1 confined by lock1 (its own disk/tap0/console).
+                aeocha.assert_str_eq(fw, get_suspended("myapp1"), "1", "myapp1 suspended")
+                aeocha.assert_str_eq(fw, get_confined_by("myapp1"), "lock1", "myapp1 confined by lock1")
+                aeocha.assert_str_eq(fw, get_constraints("lock1"),
+                    "disk(/zroot/vm/myapp1/disk0.img)=rd,wr, net(tap0)=rd,wr, console(nmdm-myapp1)=rd,wr",
+                    "lock1 = myapp1's fd grants")
+                // PHASE 3: myapp2 confined by lock2 (its own disk/tap1/console).
+                aeocha.assert_str_eq(fw, get_suspended("myapp2"), "1", "myapp2 suspended")
+                aeocha.assert_str_eq(fw, get_confined_by("myapp2"), "lock2", "myapp2 confined by lock2")
+                aeocha.assert_str_eq(fw, get_constraints("lock2"),
+                    "disk(/zroot/vm/myapp2/disk0.img)=rd,wr, net(tap1)=rd,wr, console(nmdm-myapp2)=rd,wr",
+                    "lock2 = myapp2's fd grants (DIFFERENT from lock1)")
             }
         }
 

@@ -103,11 +103,13 @@ system(nm: string) -> string {
 // declared as a direct sibling AFTER a host-block should open its own
 // system or host block rather than rely on reset.
 bhyve_vm(nm: string) -> string {
-    resource(nm, "bhyve")
-    config.put("aeo.cmp.curhost", nm)        // inner resources are inside this VM
-    return nm
-}
+    config.put("aeo.cmp.curhost", "")        // a VM is top-level (host scope);
+    resource(nm, "bhyve")                    //   record it with host="" BEFORE
+    config.put("aeo.cmp.curhost", nm)        //   nesting its inner resources.
+    return nm                                // (fixes sibling VMs inheriting the
+}                                            //  previous VM as their host.)
 kvm_vm(nm: string) -> string {
+    config.put("aeo.cmp.curhost", "")
     resource(nm, "kvm")
     config.put("aeo.cmp.curhost", nm)
     return nm
