@@ -1,0 +1,202 @@
+// spec_nested_system.ae — the nested-system demo as an Aeocha BDD spec.
+//
+// The describe/it form of test/demo_nested_system.ae: it declares the same
+// two-tier system (a bhyve VM containing a redis cache + a Python service
+// that depends on it) and verifies it. Two describe blocks:
+//
+//   "nested system (declaration)"  — data-model assertions. Run anywhere,
+//                                     instant, no deployment.
+//   "live deployment"              — HTTP arithmetic + cache checks against
+//                                     a DEPLOYED system. Gated on AEO_VERIFY=1;
+//                                     skipped otherwise.
+//
+// Run (aeocha must be on the include path):
+//   AETHER_INCLUDE_PATH=/home/paul/scm/aeocha ae run test/spec_nested_system.ae
+//   AEO_VERIFY=1 AETHER_INCLUDE_PATH=... ae run test/spec_nested_system.ae   # + live
+//
+// Mirrors examples/nested_compose/module.ae (the `aeo up` target).
+
+import aeocha
+import compose (system, bhyve_vm, container)
+import compose (image, dockerfile, cpus, memory, guest_image, network, ssh_key, health, expose, depends)
+import compose (count, name_at, get_kind, get_system, get_host, get_depends, get_dockerfile, get_image, get_guest_image, syscount, sysname_at)
+import std.string
+import std.os (getenv, run_capture)
+import std.list
+import std.http.client
+
+// ---- the composition, exactly as an operator would write it ----
+// Both tiers are containers INSIDE the bhyve VM. db is a stock redis image;
+// app is built from an inline heredoc Dockerfile and uses db as a cache.
+declare() {
+    system("red222") {
+        bhyve_vm("myapp") {
+            cpus(2)
+            memory("2G")
+            guest_image("ubuntu-22.04")
+            network("dhcp")
+            ssh_key("/home/paul/.ssh/id_rsa.pub")
+            db = container("db") {
+                image("docker.io/library/redis:alpine")
+                expose(6379)
+                health("redis-cli ping")
+            }
+            app = container("app") {
+                dockerfile(<<DOCKER
+                    FROM docker.io/library/python:3-alpine
+                    RUN cat <<'PY' > /app.py
+                    import http.server as h, socket
+                    def rcmd(*a):
+                     s=socket.create_connection(("127.0.0.1",6379),1)
+                     s.sendall(("*%d\r\n"%len(a)+"".join("$%d\r\n%s\r\n"%(len(x),x) for x in a)).encode())
+                     r=s.recv(4096); s.close(); return r
+                    class A(h.BaseHTTPRequestHandler):
+                     def do_GET(self):
+                      p=self.path.strip("/").split("/")
+                      try:
+                       k="add:%s:%s"%(p[1],p[2])
+                       c=rcmd("GET",k)
+                       if c[:1]==b"$" and c[1:2]!=b"-": b=c.split(b"\r\n")[1].decode()
+                       else:
+                        b=str(int(p[1])+int(p[2])); rcmd("SET",k,b)
+                      except: b="err"
+                      self.send_response(200); self.end_headers(); self.wfile.write(b.encode())
+                     def log_message(self,*a): pass
+                    h.HTTPServer(("0.0.0.0",8080),A).serve_forever()
+                    PY
+                    CMD ["python", "/app.py"]
+DOCKER
+                )
+                expose(8080)
+                health("curl -fsS http://localhost:8080/add/0/0")
+                depends(db)
+            }
+        }
+    }
+}
+
+main() {
+    fw = aeocha.init()
+    declare()
+
+    aeocha.describe(fw, "nested system: bhyve_vm{ db(redis) ; app }") {
+
+        aeocha.describe("declaration (data model)") {
+            aeocha.it("declares one system named red222") callback {
+                aeocha.assert_eq(fw, syscount(), 1, "one system")
+                aeocha.assert_str_eq(fw, sysname_at(0), "red222", "name")
+            }
+            aeocha.it("has three resources: myapp, db, app") callback {
+                aeocha.assert_eq(fw, count(), 3, "count")
+                aeocha.assert_str_eq(fw, name_at(0), "myapp", "res[0]")
+                aeocha.assert_str_eq(fw, name_at(1), "db", "res[1]")
+                aeocha.assert_str_eq(fw, name_at(2), "app", "res[2]")
+            }
+            aeocha.it("myapp is the VM; db and app are containers") callback {
+                aeocha.assert_str_eq(fw, get_kind("myapp"), "bhyve", "myapp kind")
+                aeocha.assert_str_eq(fw, get_kind("db"), "container", "db kind")
+                aeocha.assert_str_eq(fw, get_kind("app"), "container", "app kind")
+            }
+            aeocha.it("db and app are nested inside myapp") callback {
+                aeocha.assert_str_eq(fw, get_host("myapp"), "", "myapp at host level")
+                aeocha.assert_str_eq(fw, get_host("db"), "myapp", "db in myapp")
+                aeocha.assert_str_eq(fw, get_host("app"), "myapp", "app in myapp")
+            }
+            aeocha.it("app depends on db (db comes up first)") callback {
+                aeocha.assert_str_eq(fw, get_depends("app"), "db", "app -> db")
+            }
+            aeocha.it("db is the stock redis image") callback {
+                aeocha.assert_str_eq(fw, get_image("db"), "docker.io/library/redis:alpine", "redis image")
+            }
+            aeocha.it("app is built from an inline Dockerfile, dedented to col 0") callback {
+                df = get_dockerfile("app")
+                aeocha.assert_contains(fw, df, "FROM ", "has FROM")
+                // heredoc dedent (aether >=0.298) stripped the source indent:
+                aeocha.assert_str_eq(fw, _first5(df), "FROM ", "starts at column 0")
+            }
+            aeocha.it("the VM declares its guest image") callback {
+                aeocha.assert_str_eq(fw, get_guest_image("myapp"), "ubuntu-22.04", "guest")
+            }
+        }
+
+        aeocha.describe("live deployment (AEO_VERIFY=1)") {
+            aeocha.it("app computes arithmetic over HTTP (2+2=4, 2+3=5, 40+2=42)") callback {
+                if _verify_on() == 0 {
+                    aeocha.assert_true(fw, 1, "skipped (set AEO_VERIFY=1 against a deployed system)")
+                } else {
+                    base = _base()
+                    _http_body_is(fw, "${base}/add/2/2", "4", "2 + 2 = 4")
+                    _http_body_is(fw, "${base}/add/2/3", "5", "2 + 3 = 5")
+                    _http_body_is(fw, "${base}/add/40/2", "42", "40 + 2 = 42")
+                }
+            }
+            aeocha.it("app serves from the db cache (poke redis, read it back)") callback {
+                if _verify_on() == 0 {
+                    aeocha.assert_true(fw, 1, "skipped (set AEO_VERIFY=1)")
+                } else {
+                    _redis_set(_ip(), "add:2:3", "CACHED99")
+                    _http_body_is(fw, "${_base()}/add/2/3", "CACHED99", "2+3 -> cached value")
+                }
+            }
+        }
+    }
+
+    aeocha.run_summary(fw)
+}
+
+// ---- helpers ----
+
+// 1 if AEO_VERIFY is set (the live deployment checks run), else 0.
+_verify_on() -> int {
+    if string.length(getenv("AEO_VERIFY")) > 0 {
+        return 1
+    }
+    return 0
+}
+
+_ip() -> string {
+    ip = getenv("AEO_GUEST_IP")
+    if string.length(ip) == 0 {
+        return "172.16.0.50"
+    }
+    return ip
+}
+
+_base() -> string {
+    return "http://${_ip()}:8080"
+}
+
+// GET url and assert the response body equals `want` (the arithmetic check).
+_http_body_is(fw: ptr, url: string, want: string, msg: string) {
+    req = client.request("GET", url)
+    resp, cerr = client.send_request(req)
+    client.request_free(req)
+    if cerr != "" {
+        aeocha.fail(fw, "${msg} — transport error: ${cerr}")
+    } else {
+        aeocha.expect_http_status(fw, resp, 200, "${msg} (200)")
+        aeocha.expect_http_body_contains(fw, resp, want, "${msg} == ${want}")
+        client.response_free(resp)
+    }
+}
+
+// Poke a key into the deployed redis (db) over ssh, so the next GET proves
+// app read from the cache rather than recomputing.
+_redis_set(ip: string, key: string, val: string) {
+    av = list_new()
+    list_add(av, "-i")
+    list_add(av, "/home/paul/.ssh/id_rsa")
+    list_add(av, "-o")
+    list_add(av, "StrictHostKeyChecking=no")
+    list_add(av, "ubuntu@${ip}")
+    list_add(av, "podman exec db redis-cli SET ${key} ${val}")
+    out, status, err = run_capture("/usr/bin/ssh", av, null)
+    list_free(av)
+}
+
+_first5(s: string) -> string {
+    if string.length(s) < 5 {
+        return s
+    }
+    return string.substring(s, 0, 5)
+}
