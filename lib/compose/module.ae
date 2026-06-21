@@ -44,8 +44,8 @@ exports (
     get_depends, get_interval, get_budget,
     get_cpus, get_memory, get_nic, get_expose,
     get_guest_image, get_network, get_ssh_key,
-    constrain, constraint, start,
-    get_confined_by, get_constraints,
+    suspend, constrain, constraint, start,
+    get_suspended, get_confined_by, get_constraints,
     describe_tree
 )
 
@@ -181,16 +181,30 @@ ip(_ctx: ptr, v: string)      { config.put("aeo.cmp.ip.${_ctx}", v) }
 //       start(db)                       // re-exec bhyve under cap_enter()
 //   }                                   //   holding ONLY the granted fds
 //
+// Lifecycle verbs read as a SEQUENCE of operations on the VM handle (Aether
+// has no `vm.method()` syntax, so they're free functions taking the handle):
+//
+//   myapp = bhyve_vm("myapp") { ... }       // phase 1: provision + first boot
+//   suspend(myapp)                          // freeze guest RAM+state to disk
+//   constrain("lock") {                     // declare the confined fd-set
+//       constraint("disk", ".../disk0.img", "rd,wr")
+//       constraint("net",  "tap0", "rd,wr")
+//   }
+//   start(myapp)                            // resume confined (cap_enter())
+//
+// `suspend(vm)` — marks the VM suspended (phase-1 end; guest frozen, not shut
+//   down — db/app keep their state).
+suspend(vm: string) {
+    config.put("aeo.cmp.suspended.${vm}", "1")
+}
 // `constrain(name)` opens a confinement block (its name is the _ctx pushed to
-// the trailing block, like the other openers). Inside it:
+// the trailing block, like the other openers); also remembered as the
+// most-recent block so a following start(vm) can bind to it. Inside it:
 //   constraint(name, target, rights) — a bound capability: WHAT (a path/tap/
 //       socket), and the rights on it. rights_limit(fd_of(target), mask).
-//   start(vm) — relaunch the named (already-provisioned) VM confined to the
-//       constraints declared above in this block.
 // Anything not granted is DENIED once bhyve cap_enter()s.
 constrain(name: string) -> string {
     config.put("aeo.cmp.curconstrain", name)
-    config.put("aeo.cmp.constraint_count", "0")
     return name
 }
 constraint(_ctx: ptr, name: string, target: string, rights: string) {
@@ -202,10 +216,11 @@ constraint(_ctx: ptr, name: string, target: string, rights: string) {
         config.put("aeo.cmp.constraints.${_ctx}", "${prev}, ${entry}")
     }
 }
-// start(vm) inside a constrain block: records that `vm` is relaunched under
-// this block's constraints (phase 2). Tags the VM with its constrain block.
-start(_ctx: ptr, vm: string) {
-    config.put("aeo.cmp.confinedby.${vm}", _ctx)
+// `start(vm)` — resume the (suspended) VM CONFINED by the most recently
+// declared constrain block. Records confinedby so the snapshot + the driver
+// know to relaunch it through the cap_enter() wrapper (phase 2).
+start(vm: string) {
+    config.put("aeo.cmp.confinedby.${vm}", config.get("aeo.cmp.curconstrain"))
 }
 
 // `expose(port)` — declare a port the resource serves that the host (and
@@ -302,6 +317,7 @@ get_ip(nm: string) -> string      { return config.get("aeo.cmp.ip.${nm}") }
 get_depends(nm: string) -> string { return config.get("aeo.cmp.depends.${nm}") }
 // Capsicum (proposal): which constrain-block confines a VM, and that block's
 // bound constraints.
+get_suspended(vm: string) -> string { return config.get("aeo.cmp.suspended.${vm}") }
 get_confined_by(vm: string) -> string { return config.get("aeo.cmp.confinedby.${vm}") }
 get_constraints(blk: string) -> string { return config.get("aeo.cmp.constraints.${blk}") }
 get_nic(nm: string) -> string     { return config.get("aeo.cmp.nic.${nm}") }
