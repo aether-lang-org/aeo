@@ -11,10 +11,12 @@
 //   default            — data-model assertions only (runs anywhere, instant,
 //                         no deployment). Exits 0 (ALL PASS) or non-zero.
 //   AEO_VERIFY=1 /tmp/demo
-//                      — ALSO curls the LIVE deployed service and asserts the
-//                        cache behaviour. Needs the system actually up (aeo up
-//                        examples/nested_compose on the BSD box). Point at the
-//                        guest with AEO_GUEST_IP (default 172.16.0.50).
+//                      — ALSO runs the LIVE curl smoke test against the
+//                        deployed service: curl /add/2/2 == 4, /add/2/3 == 5,
+//                        /add/40/2 == 42, then a cache-hit check. Needs the
+//                        system actually up (aeo up examples/nested_compose on
+//                        the BSD box). Point at the guest with AEO_GUEST_IP
+//                        (default 172.16.0.50). See verify() below.
 //
 // Mirrors examples/nested_compose/module.ae (the `aeo up` target).
 //
@@ -187,16 +189,17 @@ verify() {
     println("")
     println("=== LIVE VERIFY — host -> app(${ip}:8080) -> db(redis) ===")
 
-    // compute on a miss
-    a = _curl("${base}/add/2/3")
-    vcheck("GET /add/2/3 (compute)", a, "5")
-    b = _curl("${base}/add/40/2")
-    vcheck("GET /add/40/2 (compute)", b, "42")
+    // ---- the arithmetic curl checks (the "2+2=4" smoke test) ----
+    // Each does: curl http://<guest>:8080/add/X/Y  and asserts the body == X+Y.
+    vcheck("2 + 2 = 4   (curl /add/2/2)",   _curl("${base}/add/2/2"),   "4")
+    vcheck("2 + 3 = 5   (curl /add/2/3)",   _curl("${base}/add/2/3"),   "5")
+    vcheck("40 + 2 = 42 (curl /add/40/2)",  _curl("${base}/add/40/2"),  "42")
 
-    // prove app reads from db: poke the cached value via redis, expect it back
+    // ---- prove app READS FROM db (the cache), not just recomputes ----
+    // poke a wrong answer into redis for 2+3, then curl again: if app served
+    // from the cache we get the poked value back, not a fresh "5".
     _redis_set(ip, "add:2:3", "CACHED99")
-    c = _curl("${base}/add/2/3")
-    vcheck("GET /add/2/3 after cache poke (reads db)", c, "CACHED99")
+    vcheck("2 + 3 -> cache hit (poked db, curl /add/2/3)", _curl("${base}/add/2/3"), "CACHED99")
 
     println("=== LIVE VERIFY PASS — deployed + serving from cache ===")
 }
