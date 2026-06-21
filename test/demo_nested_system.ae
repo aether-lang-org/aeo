@@ -7,8 +7,16 @@
 //
 //   ae build test/demo_nested_system.ae -o /tmp/demo --lib lib && /tmp/demo
 //
-// Exits 0 (ALL PASS) or non-zero on the first failed assertion. Mirrors
-// examples/nested_compose/module.ae (the `aeo up` target).
+// Two modes, like an IaC script that declares AND verifies:
+//   default            — data-model assertions only (runs anywhere, instant,
+//                         no deployment). Exits 0 (ALL PASS) or non-zero.
+//   AEO_VERIFY=1 /tmp/demo
+//                      — ALSO curls the LIVE deployed service and asserts the
+//                        cache behaviour. Needs the system actually up (aeo up
+//                        examples/nested_compose on the BSD box). Point at the
+//                        guest with AEO_GUEST_IP (default 172.16.0.50).
+//
+// Mirrors examples/nested_compose/module.ae (the `aeo up` target).
 //
 //   system("red222")
 //     └─ myapp (bhyve VM)
@@ -19,6 +27,8 @@ import compose (system, bhyve_vm, container)
 import compose (image, dockerfile, cpus, memory, guest_image, network, ssh_key, health, expose, depends)
 import compose (count, name_at, get_kind, get_system, get_host, get_depends, get_dockerfile, get_image, get_guest_image, syscount, sysname_at)
 import std.string (string_contains, string_length, string_substring)
+import std.os (run_capture, getenv)
+import std.list
 
 extern exit(code: int)
 
@@ -148,6 +158,100 @@ main() {
     println("    myapp [bhyve]       (host level)")
     println("      db  [container]   (redis, inside myapp)")
     println("      app [container]   (inside myapp) -> depends db")
+
+    // Live verification — the way an IaC script proves the thing it declared
+    // is actually up. The data-model assertions above run anywhere, instantly,
+    // with no deployment. The curl checks below need the system ACTUALLY
+    // DEPLOYED (aeo up examples/nested_compose on the BSD box; the guest
+    // booted + db/app running), so they're OFF by default and gated on
+    // AEO_VERIFY=1. Point them at the guest with AEO_GUEST_IP (default the
+    // static 172.16.0.50). This mirrors `terraform apply` then a smoke test.
+    if string_length(getenv("AEO_VERIFY")) > 0 {
+        verify()
+    } else {
+        println("")
+        println("(set AEO_VERIFY=1 to also run the live curl check against a")
+        println(" deployed system — e.g. after: aeo up examples/nested_compose)")
+    }
+}
+
+// Live smoke test against a DEPLOYED system: curl app's /add from outside,
+// asserting both the compute and that it reads from the redis cache (db).
+// Exits non-zero on any failure (so it's CI-gateable).
+verify() {
+    ip = getenv("AEO_GUEST_IP")
+    if string_length(ip) == 0 {
+        ip = "172.16.0.50"
+    }
+    base = "http://${ip}:8080"
+    println("")
+    println("=== LIVE VERIFY — host -> app(${ip}:8080) -> db(redis) ===")
+
+    // compute on a miss
+    a = _curl("${base}/add/2/3")
+    vcheck("GET /add/2/3 (compute)", a, "5")
+    b = _curl("${base}/add/40/2")
+    vcheck("GET /add/40/2 (compute)", b, "42")
+
+    // prove app reads from db: poke the cached value via redis, expect it back
+    _redis_set(ip, "add:2:3", "CACHED99")
+    c = _curl("${base}/add/2/3")
+    vcheck("GET /add/2/3 after cache poke (reads db)", c, "CACHED99")
+
+    println("=== LIVE VERIFY PASS — deployed + serving from cache ===")
+}
+
+// Assert a live value; print + exit non-zero on mismatch.
+vcheck(label: string, got: string, want: string) {
+    if got == want {
+        println("  PASS ${label}: ${got}")
+    } else {
+        println("  FAIL ${label}: got '${got}', want '${want}'")
+        exit(1)
+    }
+}
+
+// curl a URL, return the trimmed body ("" on failure).
+_curl(url: string) -> string {
+    av = list_new()
+    list_add(av, "-fsS")
+    list_add(av, "-m")
+    list_add(av, "8")
+    list_add(av, url)
+    out, status, err = run_capture("/usr/bin/curl", av, null)
+    list_free(av)
+    if err != "" {
+        return ""
+    }
+    if status != 0 {
+        return ""
+    }
+    return _chomp(out)
+}
+
+// Set a key in the deployed redis (db) via ssh + podman exec, so the next
+// curl proves app served from the cache rather than recomputing.
+_redis_set(ip: string, key: string, val: string) {
+    av = list_new()
+    list_add(av, "-i")
+    list_add(av, "/home/paul/.ssh/id_rsa")
+    list_add(av, "-o")
+    list_add(av, "StrictHostKeyChecking=no")
+    list_add(av, "ubuntu@${ip}")
+    list_add(av, "podman exec db redis-cli SET ${key} ${val}")
+    out, status, err = run_capture("/usr/bin/ssh", av, null)
+    list_free(av)
+}
+
+// Trim one trailing newline from a captured string.
+_chomp(s: string) -> string {
+    n = string_length(s)
+    if n > 0 {
+        if string_substring(s, n - 1, n) == "\n" {
+            return string_substring(s, 0, n - 1)
+        }
+    }
+    return s
 }
 
 // "yes" if app's dockerfile resolved and looks like a real Dockerfile.
