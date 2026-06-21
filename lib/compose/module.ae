@@ -44,8 +44,8 @@ exports (
     get_depends, get_interval, get_budget,
     get_cpus, get_memory, get_nic, get_expose,
     get_guest_image, get_network, get_ssh_key,
-    suspend, constrain, constraint, start,
-    get_suspended, get_started, get_constraints,
+    suspend, constrain, constraint, egress, ingress, start,
+    get_suspended, get_started, get_constraints, get_netpolicy,
     describe_tree
 )
 
@@ -219,6 +219,27 @@ constraint(_ctx: ptr, name: string, target: string, rights: string) {
         config.put("aeo.cmp.constraints.${_ctx}", "${prev}, ${entry}")
     }
 }
+// Network policy inside a constrain(vm){} block — a WHITELIST. In workload
+// mode (after provision), the VM may only do what's listed; everything else
+// is DENIED. Enforced by pf (a different mechanism than the Capsicum fd
+// constraints above — direction/peer filtering, not fd rights).
+//   egress(target, port)  — may CONNECT OUT to `target` (a resource name aeo
+//       resolves to an IP at deploy time) on `port`. Nothing else outbound.
+//   ingress(port)         — may ACCEPT IN on `port`. Nothing else inbound.
+egress(_ctx: ptr, target: string, port: int) {
+    _net_add(_ctx, "egress->${target}:${string_from_int(port)}")
+}
+ingress(_ctx: ptr, port: int) {
+    _net_add(_ctx, "ingress:${string_from_int(port)}")
+}
+_net_add(vm: string, entry: string) {
+    prev = config.get("aeo.cmp.netpolicy.${vm}")
+    if string_length(prev) == 0 {
+        config.put("aeo.cmp.netpolicy.${vm}", entry)
+    } else {
+        config.put("aeo.cmp.netpolicy.${vm}", "${prev}, ${entry}")
+    }
+}
 // `start(vm)` — resume the (suspended, now-constrained) VM. The grants already
 // live on the VM (from its constrain(vm){} block); the driver relaunches it
 // through the cap_enter() wrapper holding exactly those fds (phase 2).
@@ -324,6 +345,9 @@ get_suspended(vm: string) -> string { return config.get("aeo.cmp.suspended.${vm}
 get_started(vm: string) -> string { return config.get("aeo.cmp.started.${vm}") }
 // A VM's bound constraints (its own constrain(vm){} block). "" = unconfined.
 get_constraints(vm: string) -> string { return config.get("aeo.cmp.constraints.${vm}") }
+// A VM's network whitelist (egress/ingress in its constrain block). "" = no
+// rules declared; once any rule exists, all other traffic is denied.
+get_netpolicy(vm: string) -> string { return config.get("aeo.cmp.netpolicy.${vm}") }
 get_nic(nm: string) -> string     { return config.get("aeo.cmp.nic.${nm}") }
 
 // Guest provisioning getters (defaults make a bhyve_vm work with no
@@ -509,6 +533,11 @@ _details(nm: string) -> string {
     cs = get_constraints(nm)
     if string_length(cs) > 0 {
         det = _join(det, "confined: ${cs}")
+    }
+    // Network whitelist (egress/ingress) — pf policy; absence of a rule = deny.
+    np = get_netpolicy(nm)
+    if string_length(np) > 0 {
+        det = _join(det, "net{${np}; deny rest}")
     }
     return det
 }
