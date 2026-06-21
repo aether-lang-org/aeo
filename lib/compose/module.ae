@@ -44,6 +44,8 @@ exports (
     get_depends, get_interval, get_budget,
     get_cpus, get_memory, get_nic, get_expose,
     get_guest_image, get_network, get_ssh_key,
+    constrain, constraint, start,
+    get_confined_by, get_constraints,
     describe_tree
 )
 
@@ -163,6 +165,49 @@ health(_ctx: ptr, v: string)  { config.put("aeo.cmp.health.${_ctx}", v) }
 dataset(_ctx: ptr, v: string) { config.put("aeo.cmp.dataset.${_ctx}", v) }
 ip(_ctx: ptr, v: string)      { config.put("aeo.cmp.ip.${_ctx}", v) }
 
+// --- Capsicum (BSD-only) — two-phase confinement of the bhyve HYPERVISOR ---
+// Capsicum is a FreeBSD-kernel facility; it can only confine FreeBSD-native
+// processes — here, the BHYVE hypervisor process (NOT a Linux container, which
+// has no Capsicum at all). And cap_enter() is enter-once/irreversible, so a
+// running bhyve can't be confined after the fact — it must be RELAUNCHED under
+// confinement. bhyve also needs broad access during provision + first boot
+// (open the image, tap, seed ISO, cloud-init). So the lifecycle is TWO phases:
+//
+//   db = bhyve_vm("myapp") { ... }     // phase 1: provision + first boot +
+//                                      //          shut down — UNCONSTRAINED
+//   constrain("lock") {                // phase 2: relaunch confined
+//       constraint("disk", "/zroot/vm/myapp/disk0.img", "rd,wr")
+//       constraint("net",  "tap0", "rd,wr")
+//       start(db)                       // re-exec bhyve under cap_enter()
+//   }                                   //   holding ONLY the granted fds
+//
+// `constrain(name)` opens a confinement block (its name is the _ctx pushed to
+// the trailing block, like the other openers). Inside it:
+//   constraint(name, target, rights) — a bound capability: WHAT (a path/tap/
+//       socket), and the rights on it. rights_limit(fd_of(target), mask).
+//   start(vm) — relaunch the named (already-provisioned) VM confined to the
+//       constraints declared above in this block.
+// Anything not granted is DENIED once bhyve cap_enter()s.
+constrain(name: string) -> string {
+    config.put("aeo.cmp.curconstrain", name)
+    config.put("aeo.cmp.constraint_count", "0")
+    return name
+}
+constraint(_ctx: ptr, name: string, target: string, rights: string) {
+    prev = config.get("aeo.cmp.constraints.${_ctx}")
+    entry = "${name}(${target})=${rights}"
+    if string_length(prev) == 0 {
+        config.put("aeo.cmp.constraints.${_ctx}", entry)
+    } else {
+        config.put("aeo.cmp.constraints.${_ctx}", "${prev}, ${entry}")
+    }
+}
+// start(vm) inside a constrain block: records that `vm` is relaunched under
+// this block's constraints (phase 2). Tags the VM with its constrain block.
+start(_ctx: ptr, vm: string) {
+    config.put("aeo.cmp.confinedby.${vm}", _ctx)
+}
+
 // `expose(port)` — declare a port the resource serves that the host (and
 // the resource's dependents) should be able to reach. Substrate-agnostic
 // declaration; each driver realizes it per kind:
@@ -255,6 +300,10 @@ get_health(nm: string) -> string  { return config.get("aeo.cmp.health.${nm}") }
 get_dataset(nm: string) -> string { return config.get("aeo.cmp.dataset.${nm}") }
 get_ip(nm: string) -> string      { return config.get("aeo.cmp.ip.${nm}") }
 get_depends(nm: string) -> string { return config.get("aeo.cmp.depends.${nm}") }
+// Capsicum (proposal): which constrain-block confines a VM, and that block's
+// bound constraints.
+get_confined_by(vm: string) -> string { return config.get("aeo.cmp.confinedby.${vm}") }
+get_constraints(blk: string) -> string { return config.get("aeo.cmp.constraints.${blk}") }
 get_nic(nm: string) -> string     { return config.get("aeo.cmp.nic.${nm}") }
 
 // Guest provisioning getters (defaults make a bhyve_vm work with no
@@ -434,6 +483,17 @@ _details(nm: string) -> string {
     ex = get_expose(nm)
     if ex > 0 {
         det = _join(det, "expose=${string_from_int(ex)}")
+    }
+    // Capsicum (proposal): if this VM is relaunched confined (phase 2), show
+    // the constrain-block name + its bound constraints.
+    blk = get_confined_by(nm)
+    if string_length(blk) > 0 {
+        cs = get_constraints(blk)
+        if string_length(cs) > 0 {
+            det = _join(det, "confined[${blk}]: ${cs}")
+        } else {
+            det = _join(det, "confined[${blk}]")
+        }
     }
     return det
 }

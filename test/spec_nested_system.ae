@@ -1,8 +1,10 @@
-// spec_nested_system.ae — the nested-system demo as an Aeocha BDD spec.
+// spec_nested_system.ae — THE apex case: a Python service + redis cache in a
+// bhyve VM, with the hypervisor confined under Capsicum. The one spec we're
+// evolving; everything else is in test/_parked/.
 //
-// The describe/it form of test/demo_nested_system.ae: it declares the same
-// two-tier system (a bhyve VM containing a redis cache + a Python service
-// that depends on it) and verifies it. Two describe blocks:
+// It declares the two-tier system (a bhyve VM containing a redis cache + a
+// Python /add service that uses it), confines the bhyve hypervisor in a second
+// phase (constrain{}), and verifies it. describe blocks:
 //
 //   "nested system (declaration)"  — data-model assertions. Run anywhere,
 //                                     instant, no deployment.
@@ -19,7 +21,7 @@
 import aeocha
 import compose (system, bhyve_vm, container)
 import compose (image, dockerfile, cpus, memory, guest_image, network, ssh_key, health, expose, depends)
-import compose (describe_tree)
+import compose (constrain, constraint, start, get_confined_by, get_constraints, describe_tree)
 import std.string
 import std.os (getenv, run_capture)
 import std.list
@@ -29,7 +31,9 @@ import std.list
 // app is built from an inline heredoc Dockerfile and uses db as a cache.
 declare() {
     system("red222") {
-        bhyve_vm("myapp") {
+        // PHASE 1: provision + first boot + shut down — UNCONSTRAINED (so
+        // cloud-init can open the image/tap/seed it needs).
+        myapp = bhyve_vm("myapp") {
             cpus(2)
             memory("2G")
             guest_image("ubuntu-22.04")
@@ -52,6 +56,17 @@ DOCKER
                 depends(db)
             }
         }
+
+        // PHASE 2: relaunch the (now provisioned) bhyve hypervisor CONFINED.
+        // Capsicum confines the FreeBSD-native bhyve PROCESS — not the Linux
+        // redis/app containers inside it (they're a guest-kernel concern). Once
+        // up + settled, bhyve is re-exec'd under cap_enter() holding ONLY:
+        constrain("lock") {
+            constraint("disk",    "/zroot/vm/myapp/disk0.img", "rd,wr")
+            constraint("net",     "tap0", "rd,wr")
+            constraint("console", "nmdm-myapp", "rd,wr")
+            start(myapp)        // re-exec confined; any other fd open -> DENIED
+        }
     }
 }
 
@@ -68,14 +83,21 @@ main() {
             // and the app->db dependency, all in one line. Beats eight
             // field-by-field it-blocks: if the resolution changes, the diff
             // shows exactly what moved.
-            aeocha.it("resolves to the expected system tree") callback {
+            aeocha.it("resolves to the expected system tree (incl. capsicum confinement)") callback {
                 want = <<TREE
                     system red222:
-                      bhyve myapp [guest=ubuntu-22.04, cpus=2, mem=2G]
+                      bhyve myapp [guest=ubuntu-22.04, cpus=2, mem=2G, confined[lock]: disk(/zroot/vm/myapp/disk0.img)=rd,wr, net(tap0)=rd,wr, console(nmdm-myapp)=rd,wr]
                         container db [image=docker.io/library/redis:alpine, expose=6379]
                         container app [dockerfile, expose=8080] -> db
 TREE
                 aeocha.assert_str_eq(fw, describe_tree(), want, "resolved tree snapshot")
+            }
+
+            aeocha.it("myapp's hypervisor is confined (phase 2) to disk/tap/console") callback {
+                aeocha.assert_str_eq(fw, get_confined_by("myapp"), "lock", "confined by 'lock'")
+                aeocha.assert_str_eq(fw, get_constraints("lock"),
+                    "disk(/zroot/vm/myapp/disk0.img)=rd,wr, net(tap0)=rd,wr, console(nmdm-myapp)=rd,wr",
+                    "the three bound fd grants")
             }
         }
 
