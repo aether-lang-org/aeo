@@ -109,6 +109,31 @@ sync; umount /tmp/jammy; mdconfig -d -u $MD
 qemu-img convert -f raw -O qcow2 jammy-patched.raw jammy-amd.img
 ```
 
+## 5b. Static guest IP (bypass DHCP-broadcast issue)
+
+Even with the AMD-patched image (guest boots, sends DHCP), dnsmasq on the
+NAT bridge does NOT receive the guest's DHCP broadcasts — they're visible
+on `vm-aeonat` via tcpdump but never reach dnsmasq's socket (a FreeBSD
+if_bridge broadcast-to-host-stack quirk; tried `bind-interfaces` off,
+`bind-dynamic`, `dhcp-authoritative` — none worked). So the guest never
+gets a lease.
+
+Workaround: give the guest a **static IP** via cloud-init network-config,
+skipping DHCP entirely. vm-bhyve's `vm create -n <netconfig>` is supposed to
+take it but writes its own DHCP block instead — so set it on the seed AFTER
+create:
+```sh
+NC=/zroot/vm/<name>/.cloud-init/network-config
+sudo sed -i '' -e 's|dhcp4: true|addresses: [172.16.0.50/24]\n    gateway4: 172.16.0.1\n    nameservers: {addresses: [172.16.0.1]}|' \
+               -e '/dhcp6: true/d' -e '/accept-ra: true/d' "$NC"
+# rebuild the cloud-init seed (vm-bhyve uses makefs cd9660 label=CIDATA):
+sudo makefs -t cd9660 -o rockridge -o label=CIDATA /zroot/vm/<name>/seed.iso /zroot/vm/<name>/.cloud-init
+sudo vm start <name>
+# guest comes up at 172.16.0.50; host reaches it directly (ssh/curl).
+```
+Each guest gets a distinct static IP (.50, .51, …). The host NATs them out
+via the pf rule.
+
 ## 6. Verify
 
 ```sh
