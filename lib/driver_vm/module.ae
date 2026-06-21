@@ -28,7 +28,7 @@
 //   untested here (no qemu installed on the dev box); exercised on a host
 //   with the full Linux VM landscape.
 
-import std.os (run_capture, os_which)
+import std.os (run_capture, os_which, getenv)
 import std.list
 import std.string (string_length, string_char_at, string_substring, string_contains, string_from_char)
 
@@ -173,14 +173,75 @@ bhyve_up(res_name: string, guest_image: string, cpus: int, mem: string, network:
             }
         }
     }
-    if _vm_ok("start", res_name) == 1 {
-        return ""
+    // Before first boot, give the guest a clean STATIC IP (172.16.0.50) by
+    // writing a valid netplan directly into its disk. This is the reliable
+    // path: it sidesteps the bridge DHCP-broadcast issue, and avoids the
+    // cloud-init-schema trap that bit the seed-edit approach. Idempotent —
+    // patch-static-ip.sh skips if already applied. (Best-effort: if the
+    // helper isn't present we still try to boot + wait.)
+    _apply_static_ip(res_name)
+    started = _vm_ok("start", res_name)
+    if started == 0 {
+        out = _vm_out("start", res_name)
+        if string_contains(out, "already running") == 0 {
+            return "aeo: 'vm start ${res_name}' failed: ${out}"
+        }
     }
-    out = _vm_out("start", res_name)
-    if string_contains(out, "already running") == 1 {
-        return ""
+    // Only report success once the guest is actually reachable (ssh on the
+    // static IP) — so the runner doesn't try to bring up nested containers
+    // before the VM is up. AMD guests boot ~130s; wait generously.
+    if _wait_guest_ready() == 0 {
+        return "aeo: vm '${res_name}' started but never became ssh-reachable at 172.16.0.50 (boot/network?)"
     }
-    return "aeo: 'vm start ${res_name}' failed: ${out}"
+    return ""
+}
+
+// 1 if the AMD-patched image exists in the vm-bhyve image store.
+_amd_image_present() -> int {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "[ -f /zroot/vm/.img/jammy-amd.img ] && echo yes")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    if string_contains(out, "yes") == 1 {
+        return 1
+    }
+    return 0
+}
+
+// Apply the clean static-IP netplan to the VM's disk (proven reliable path).
+// Best-effort via test/patch-static-ip.sh; the script stops the VM, writes
+// /etc/netplan/99-aeo-static.yaml, and is a no-op if already patched.
+_apply_static_ip(res_name: string) -> int {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "S=$(ls ${_aeo_home()}/test/patch-static-ip.sh 2>/dev/null); [ -n \"$S\" ] && ! grep -q 99-aeo-static /zroot/vm/${res_name}/disk0.img 2>/dev/null && sudo -n sh $S ${res_name} 172.16.0.50 >/dev/null 2>&1; true")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    return 1
+}
+
+// Wait until the guest answers ssh at its static IP. ~5min budget (AMD boot
+// ~130s + sshd). Returns 1 if reachable, 0 on timeout.
+_wait_guest_ready() -> int {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "for i in $(seq 1 40); do nc -z -w2 172.16.0.50 22 2>/dev/null && { echo ready; break; }; sleep 8; done")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    if string_contains(out, "ready") == 1 {
+        return 1
+    }
+    return 0
+}
+
+// aeo's home (where test/ scripts live) — AEO_HOME, else the repo default.
+_aeo_home() -> string {
+    h = getenv("AEO_HOME")
+    if string_length(h) > 0 {
+        return h
+    }
+    return "/home/paul/aeo"
 }
 
 // Bring a container UP INSIDE a guest VM (the nested-execution wire). The
@@ -333,7 +394,13 @@ _bhyve_provision(res_name: string, guest_image: string, ssh_key: string, network
     if url == "" {
         return "aeo: vm '${res_name}' unknown guest_image '${guest_image}'"
     }
+    // Prefer the AMD-safe image (jammy-amd.img, made by patch-amd-image.sh):
+    // its GRUB carries clocksource=hpet tsc=unstable ... so the guest boots
+    // reliably on AMD Ryzen. Falls back to the stock cloud image.
     file = _image_file(url)
+    if _amd_image_present() == 1 {
+        file = "jammy-amd.img"
+    }
     key = ssh_key
     if string_length(key) == 0 {
         key = "/home/paul/.ssh/id_rsa.pub"
