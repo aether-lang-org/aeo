@@ -40,7 +40,8 @@ exports (
     health_interval, health_budget,
     count, name_at, get_system, get_host,
     syscount, sysname_at,
-    get_kind, get_image, get_dockerfile, get_command, get_health, get_dataset, get_ip,
+    entrypoint, base,
+    get_kind, get_image, get_dockerfile, get_entrypoint, get_base, get_command, get_health, get_dataset, get_ip,
     get_depends, get_interval, get_budget,
     get_cpus, get_memory, get_nic, get_expose,
     get_guest_image, get_network, get_ssh_key,
@@ -163,6 +164,20 @@ command(_ctx: ptr, v: string) { config.put("aeo.cmp.command.${_ctx}", v) }
 // (Convenience for small self-contained images. For anything nontrivial,
 // build with aeb and reference the resulting image via image().)
 dockerfile(_ctx: ptr, text: string) { config.put("aeo.cmp.dockerfile.${_ctx}", text) }
+
+// `entrypoint(<<PY ... PY)` — the readable, high-level alternative to a hand
+// written dockerfile() for the common "one script entrypoint" case. Give the
+// program source as a CLEAN heredoc (real indentation, no printf/escaping);
+// aeo writes it to /app.py in the build context and SYNTHESIZES the Dockerfile:
+//     FROM <base()>            (default python:3-alpine)
+//     COPY app.py /app.py
+//     CMD ["python", "/app.py"]
+// COPY (not a Dockerfile RUN heredoc) so it builds on every podman — the RUN
+// heredoc form fails on podman 3.4/4.3 (it reads the heredoc body as
+// Dockerfile instructions). `base(image)` overrides the FROM image.
+entrypoint(_ctx: ptr, src: string) { config.put("aeo.cmp.entrypoint.${_ctx}", src) }
+base(_ctx: ptr, image: string)      { config.put("aeo.cmp.base.${_ctx}", image) }
+
 health(_ctx: ptr, v: string)  { config.put("aeo.cmp.health.${_ctx}", v) }
 dataset(_ctx: ptr, v: string) { config.put("aeo.cmp.dataset.${_ctx}", v) }
 ip(_ctx: ptr, v: string)      { config.put("aeo.cmp.ip.${_ctx}", v) }
@@ -334,6 +349,15 @@ sysname_at(i: int) -> string {
 get_kind(nm: string) -> string    { return config.get("aeo.cmp.kind.${nm}") }
 get_image(nm: string) -> string   { return config.get("aeo.cmp.image.${nm}") }
 get_dockerfile(nm: string) -> string { return config.get("aeo.cmp.dockerfile.${nm}") }
+get_entrypoint(nm: string) -> string { return config.get("aeo.cmp.entrypoint.${nm}") }
+// The base image for an entrypoint() container; defaults to python:3-alpine.
+get_base(nm: string) -> string {
+    b = config.get("aeo.cmp.base.${nm}")
+    if string_length(b) == 0 {
+        return "docker.io/library/python:3-alpine"
+    }
+    return b
+}
 get_command(nm: string) -> string { return config.get("aeo.cmp.command.${nm}") }
 get_health(nm: string) -> string  { return config.get("aeo.cmp.health.${nm}") }
 get_dataset(nm: string) -> string { return config.get("aeo.cmp.dataset.${nm}") }
@@ -519,6 +543,9 @@ _details(nm: string) -> string {
     }
     if string_length(get_dockerfile(nm)) > 0 {
         det = _join(det, "dockerfile")
+    }
+    if string_length(get_entrypoint(nm)) > 0 {
+        det = _join(det, "entrypoint(${get_base(nm)})")
     }
     ds = get_dataset(nm)
     if string_length(ds) > 0 {

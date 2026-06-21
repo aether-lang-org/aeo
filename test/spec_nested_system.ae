@@ -20,7 +20,7 @@
 
 import aeocha
 import compose (system, bhyve_vm, container)
-import compose (image, dockerfile, cpus, memory, guest_image, network, ssh_key, health, expose, depends)
+import compose (image, dockerfile, entrypoint, base, cpus, memory, guest_image, network, ssh_key, health, expose, depends)
 import compose (suspend, constrain, constraint, egress, ingress, start, get_suspended, get_started, get_constraints, get_netpolicy, describe_tree)
 import std.string
 import std.os (getenv, run_capture)
@@ -70,11 +70,28 @@ declare() {
             network("dhcp")
             ssh_key("/home/paul/.ssh/id_rsa.pub")
             app = container("app") {
-                dockerfile(<<DOCKER
-                    FROM docker.io/library/python:3-alpine
-                    RUN printf 'import http.server as h, socket\ndef rcmd(*a):\n s=socket.create_connection(("127.0.0.1",6379),1)\n s.sendall(("*%%d\\r\\n"%%len(a)+"".join("$%%d\\r\\n%%s\\r\\n"%%(len(x),x) for x in a)).encode())\n r=s.recv(4096); s.close(); return r\nclass A(h.BaseHTTPRequestHandler):\n def do_GET(self):\n  p=self.path.strip("/").split("/")\n  try:\n   k="add:%%s:%%s"%%(p[1],p[2]); c=rcmd("GET",k)\n   if c[:1]==b"$" and c[1:2]!=b"-": b=c.split(b"\\r\\n")[1].decode()\n   else: b=str(int(p[1])+int(p[2])); rcmd("SET",k,b)\n  except: b="err"\n  self.send_response(200); self.end_headers(); self.wfile.write(b.encode())\n def log_message(self,*a): pass\nh.HTTPServer(("0.0.0.0",8080),A).serve_forever()\n' > /app.py
-                    CMD ["python", "/app.py"]
-DOCKER
+                // The workload as a READABLE heredoc — aeo writes it to
+                // /app.py + synthesizes a COPY-based Dockerfile (no printf, no
+                // escaping; COPY builds on every podman where a RUN heredoc
+                // doesn't). base() defaults to python:3-alpine.
+                entrypoint(<<PY
+                    import http.server as h, socket
+                    def rcmd(*a):
+                        s = socket.create_connection(("127.0.0.1", 6379), 1)
+                        s.sendall(("*%d\r\n" % len(a) + "".join("$%d\r\n%s\r\n" % (len(x), x) for x in a)).encode())
+                        r = s.recv(4096); s.close(); return r
+                    class A(h.BaseHTTPRequestHandler):
+                        def do_GET(self):
+                            p = self.path.strip("/").split("/")
+                            try:
+                                k = "add:%s:%s" % (p[1], p[2]); c = rcmd("GET", k)
+                                if c[:1] == b"$" and c[1:2] != b"-": b = c.split(b"\r\n")[1].decode()
+                                else: b = str(int(p[1]) + int(p[2])); rcmd("SET", k, b)
+                            except: b = "err"
+                            self.send_response(200); self.end_headers(); self.wfile.write(b.encode())
+                        def log_message(self, *a): pass
+                    h.HTTPServer(("0.0.0.0", 8080), A).serve_forever()
+PY
                 )
                 expose(8080)
                 health("curl -fsS http://localhost:8080/add/0/0")
@@ -117,7 +134,7 @@ main() {
                       bhyve db_vm [guest=ubuntu-22.04, cpus=2, mem=2G, confined: disk(/zroot/vm/db_vm/disk0.img)=rd,wr, net(tap0)=rd,wr, console(nmdm-db_vm)=rd,wr]
                         container db [image=docker.io/library/redis:alpine, expose=6379]
                       bhyve python_vm [guest=ubuntu-22.04, cpus=2, mem=2G, confined: disk(/zroot/vm/python_vm/disk0.img)=rd,wr, net(tap1)=rd,wr, console(nmdm-python_vm)=rd,wr, net{egress->db_vm:6379, ingress:8080; deny rest}]
-                        container app [dockerfile, expose=8080] -> db
+                        container app [entrypoint(docker.io/library/python:3-alpine), expose=8080] -> db
 TREE
                 aeocha.assert_str_eq(fw, describe_tree(), want, "resolved tree snapshot")
             }

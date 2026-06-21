@@ -262,7 +262,7 @@ _aeo_home() -> string {
 //   expose     — the port to publish (from expose()); 0 = none
 // Either dockerfile (build it) OR image (pull+run a stock image, e.g. the
 // redis db tier) — dockerfile wins if both are set.
-guest_container_up(host_vm: string, name: string, dockerfile: string, image: string, expose: int) -> string {
+guest_container_up(host_vm: string, name: string, dockerfile: string, entrypoint: string, base: string, image: string, expose: int) -> string {
     ip = _guest_ip(host_vm)
     if ip == "" {
         return "aeo: guest VM '${host_vm}' has no reachable IP (booted+networked?) for container '${name}'"
@@ -272,15 +272,27 @@ guest_container_up(host_vm: string, name: string, dockerfile: string, image: str
     // 127.0.0.1:6379. expose()'d ports land directly on the guest's network,
     // so the host's curl to <guest-ip>:<port> works without -p mapping.
     net = "--network host"
-    // Two shapes: build-from-Dockerfile (app), or run-a-stock-image (db).
+    // Three shapes:
+    //   entrypoint — write the program to app.py in the build context + a
+    //                synthesized COPY-based Dockerfile (readable; builds on any
+    //                podman, unlike a RUN heredoc). PREFERRED for one-script svcs.
+    //   dockerfile — the operator's full inline Dockerfile.
+    //   image      — pull + run a stock image (e.g. redis).
     run_part = ""
-    if string_length(dockerfile) > 0 {
-        run_part = "cat > /home/ubuntu/Dockerfile.${name} <<'AEOEOF'\n${dockerfile}\nAEOEOF\ncd /home/ubuntu && podman build -t aeo-${name} -f Dockerfile.${name} . >/dev/null 2>&1 && podman rm -f ${name} >/dev/null 2>&1; podman run -d --name ${name} ${net} aeo-${name} >/dev/null"
+    if string_length(entrypoint) > 0 {
+        // app.py written verbatim from the clean heredoc; the Dockerfile just
+        // COPYs it — no printf, no escaping, no RUN heredoc.
+        df = "FROM ${base}\nCOPY app.py /app.py\nCMD [\"python\", \"/app.py\"]"
+        run_part = "mkdir -p /home/ubuntu/ctx-${name} && cat > /home/ubuntu/ctx-${name}/app.py <<'AEOPY'\n${entrypoint}\nAEOPY\ncat > /home/ubuntu/ctx-${name}/Dockerfile <<'AEODF'\n${df}\nAEODF\ncd /home/ubuntu/ctx-${name} && podman build -t aeo-${name} . >/dev/null 2>&1 && podman rm -f ${name} >/dev/null 2>&1; podman run -d --name ${name} ${net} aeo-${name} >/dev/null"
     } else {
-        if string_length(image) == 0 {
-            return "aeo: container '${name}' in guest '${host_vm}' has neither dockerfile() nor image()"
+        if string_length(dockerfile) > 0 {
+            run_part = "cat > /home/ubuntu/Dockerfile.${name} <<'AEOEOF'\n${dockerfile}\nAEOEOF\ncd /home/ubuntu && podman build -t aeo-${name} -f Dockerfile.${name} . >/dev/null 2>&1 && podman rm -f ${name} >/dev/null 2>&1; podman run -d --name ${name} ${net} aeo-${name} >/dev/null"
+        } else {
+            if string_length(image) == 0 {
+                return "aeo: container '${name}' in guest '${host_vm}' has no entrypoint(), dockerfile(), or image()"
+            }
+            run_part = "podman rm -f ${name} >/dev/null 2>&1; podman run -d --name ${name} ${net} ${image} >/dev/null"
         }
-        run_part = "podman rm -f ${name} >/dev/null 2>&1; podman run -d --name ${name} ${net} ${image} >/dev/null"
     }
     remote = "set -e; ${run_part}"
     av = list_new()
