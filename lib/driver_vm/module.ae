@@ -215,7 +215,10 @@ _amd_image_present() -> int {
 _apply_static_ip(res_name: string) -> int {
     av = list_new()
     list_add(av, "-c")
-    list_add(av, "S=$(ls ${_aeo_home()}/test/patch-static-ip.sh 2>/dev/null); [ -n \"$S\" ] && ! grep -q 99-aeo-static /zroot/vm/${res_name}/disk0.img 2>/dev/null && sudo -n sh $S ${res_name} 172.16.0.50 >/dev/null 2>&1; true")
+    // The script self-sudoes each privileged op (no /bin/sh NOPASSWD), so we
+    // invoke it as the normal user. A marker file makes it idempotent
+    // (skip if already patched this VM). Best-effort.
+    list_add(av, "S=${_aeo_home()}/test/patch-static-ip.sh; M=/tmp/aeo-staticip-${res_name}.done; if [ -f \"$S\" ] && [ ! -f \"$M\" ]; then sh \"$S\" ${res_name} 172.16.0.50 >/dev/null 2>&1 && touch \"$M\"; fi; true")
     out, status, err = run_capture("/bin/sh", av, null)
     list_free(av)
     return 1
