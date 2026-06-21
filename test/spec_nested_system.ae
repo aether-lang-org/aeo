@@ -44,26 +44,7 @@ declare() {
             app = container("app") {
                 dockerfile(<<DOCKER
                     FROM docker.io/library/python:3-alpine
-                    RUN cat <<'PY' > /app.py
-                    import http.server as h, socket
-                    def rcmd(*a):
-                     s=socket.create_connection(("127.0.0.1",6379),1)
-                     s.sendall(("*%d\r\n"%len(a)+"".join("$%d\r\n%s\r\n"%(len(x),x) for x in a)).encode())
-                     r=s.recv(4096); s.close(); return r
-                    class A(h.BaseHTTPRequestHandler):
-                     def do_GET(self):
-                      p=self.path.strip("/").split("/")
-                      try:
-                       k="add:%s:%s"%(p[1],p[2])
-                       c=rcmd("GET",k)
-                       if c[:1]==b"$" and c[1:2]!=b"-": b=c.split(b"\r\n")[1].decode()
-                       else:
-                        b=str(int(p[1])+int(p[2])); rcmd("SET",k,b)
-                      except: b="err"
-                      self.send_response(200); self.end_headers(); self.wfile.write(b.encode())
-                     def log_message(self,*a): pass
-                    h.HTTPServer(("0.0.0.0",8080),A).serve_forever()
-                    PY
+                    RUN printf 'import http.server as h, socket\ndef rcmd(*a):\n s=socket.create_connection(("127.0.0.1",6379),1)\n s.sendall(("*%%d\\r\\n"%%len(a)+"".join("$%%d\\r\\n%%s\\r\\n"%%(len(x),x) for x in a)).encode())\n r=s.recv(4096); s.close(); return r\nclass A(h.BaseHTTPRequestHandler):\n def do_GET(self):\n  p=self.path.strip("/").split("/")\n  try:\n   k="add:%%s:%%s"%%(p[1],p[2]); c=rcmd("GET",k)\n   if c[:1]==b"$" and c[1:2]!=b"-": b=c.split(b"\\r\\n")[1].decode()\n   else: b=str(int(p[1])+int(p[2])); rcmd("SET",k,b)\n  except: b="err"\n  self.send_response(200); self.end_headers(); self.wfile.write(b.encode())\n def log_message(self,*a): pass\nh.HTTPServer(("0.0.0.0",8080),A).serve_forever()\n' > /app.py
                     CMD ["python", "/app.py"]
 DOCKER
                 )
