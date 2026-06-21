@@ -56,8 +56,8 @@ main() {
                 // wait for the http.server to bind, then curl FROM THE HOST
                 base = "http://localhost:8080"
                 aeocha.assert_str_eq(fw, _wait_http("${base}/add/0/0", 40), "yes", "service reachable")
-                _http_body_is(fw, "${base}/add/2/3", "5", "GET /add/2/3 = 5")
-                _http_body_is(fw, "${base}/add/40/2", "42", "GET /add/40/2 = 42")
+                aeocha.expect_http_get_body_eq(fw, "${base}/add/2/3", "5", "GET /add/2/3 = 5")
+                aeocha.expect_http_get_body_eq(fw, "${base}/add/40/2", "42", "GET /add/40/2 = 42")
             }
         }
     }
@@ -74,21 +74,10 @@ _no_engine() -> int {
     return 0
 }
 
-// GET url, assert HTTP 200 and the body contains `want`.
-_http_body_is(fw: ptr, url: string, want: string, msg: string) {
-    req = client.request("GET", url)
-    resp, cerr = client.send_request(req)
-    client.request_free(req)
-    if cerr != "" {
-        aeocha.fail(fw, "${msg} — transport error: ${cerr}")
-    } else {
-        aeocha.expect_http_status(fw, resp, 200, "${msg} (200)")
-        aeocha.expect_http_body_contains(fw, resp, want, "${msg}")
-        client.response_free(resp)
-    }
-}
-
 // Poll a URL until it answers (any status) or `secs` elapse. "yes"/"no".
+// (aeocha has no readiness-poll matcher; this stays local. Per aeocha's note,
+// send_request frees resp + returns null on transport error, so only the
+// success branch frees.)
 _wait_http(url: string, secs: int) -> string {
     waited = 0
     while waited < secs {
