@@ -31,8 +31,10 @@ import std.list
 // app is built from an inline heredoc Dockerfile and uses db as a cache.
 declare() {
     system("red222") {
-        // PHASE 1: provision + first boot + shut down — UNCONSTRAINED (so
-        // cloud-init can open the image/tap/seed it needs).
+        // PHASE 1: provision + first boot UNCONSTRAINED (cloud-init needs to
+        // open the image/tap/seed), let db+app come up, then SUSPEND — the
+        // guest's RAM+state is frozen to disk (`vm suspend`), NOT shut down.
+        // db keeps its cache, app its state.
         myapp = bhyve_vm("myapp") {
             cpus(2)
             memory("2G")
@@ -57,15 +59,19 @@ DOCKER
             }
         }
 
-        // PHASE 2: relaunch the (now provisioned) bhyve hypervisor CONFINED.
+        // PHASE 2: RESUME the suspended guest under a CONFINED hypervisor.
         // Capsicum confines the FreeBSD-native bhyve PROCESS — not the Linux
-        // redis/app containers inside it (they're a guest-kernel concern). Once
-        // up + settled, bhyve is re-exec'd under cap_enter() holding ONLY:
+        // redis/app containers inside it (a guest-kernel concern Capsicum can't
+        // reach). Because cap_enter() is irreversible, we can't confine a
+        // running bhyve — but we don't reboot either: `vm suspend` froze the
+        // guest, and `start(myapp)` RESUMES it through a cap_enter() wrapper
+        // holding ONLY the fds below. db/app thaw exactly as they were (cache
+        // intact); the hypervisor around them is now sandboxed.
         constrain("lock") {
             constraint("disk",    "/zroot/vm/myapp/disk0.img", "rd,wr")
             constraint("net",     "tap0", "rd,wr")
             constraint("console", "nmdm-myapp", "rd,wr")
-            start(myapp)        // re-exec confined; any other fd open -> DENIED
+            start(myapp)        // resume confined; any other fd open -> DENIED
         }
     }
 }
