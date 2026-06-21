@@ -1,0 +1,106 @@
+// spec_integration_app.ae — the container-in-host integration test as an
+// Aeocha BDD spec. The describe/it form of integration_app.ae.
+//
+//   ae run test/spec_integration_app.ae --lib lib --lib ../aeocha
+//
+// aeo builds a Python (stdlib, no pip) arithmetic service from an inline
+// Dockerfile, runs it with the port exposed, and we curl it FROM THE HOST to
+// prove the orchestrated service computes over HTTP. This is the app tier of
+// the nested system, one level out (container-in-host vs container-in-VM).
+// Needs podman/docker; no root.
+
+import aeocha
+import driver_linux
+import std.string
+import std.http.client
+
+NAME() -> string { return "aeo-calc-svc" }
+PORT() -> int { return 8080 }
+
+// The Python /add service, built from this inline Dockerfile. NOTE: the
+// app is written via a single `RUN printf '...\n...'` line, NOT a Dockerfile
+// `RUN cat <<'PY'` heredoc — this build runs on the HOST podman (4.3.1),
+// whose Dockerfile parser does NOT support RUN heredocs (it reads the heredoc
+// body lines as Dockerfile instructions: "Unknown instruction: IMPORT"). The
+// nested_compose app uses the heredoc form because that build runs in the
+// guest; here, printf keeps it host-podman-portable.
+DF() -> string {
+    return <<DOCKER
+        FROM docker.io/library/python:3-alpine
+        RUN printf 'import http.server as h\nclass A(h.BaseHTTPRequestHandler):\n def do_GET(self):\n  p=self.path.strip("/").split("/")\n  try: b=str(int(p[1])+int(p[2]))\n  except: b="err"\n  self.send_response(200); self.end_headers(); self.wfile.write(b.encode())\n def log_message(self,*a): pass\nh.HTTPServer(("0.0.0.0",8080),A).serve_forever()\n' > /app.py
+        CMD ["python", "/app.py"]
+DOCKER
+}
+
+main() {
+    fw = aeocha.init()
+
+    aeocha.describe(fw, "orchestrated Python service (build, expose, curl)") {
+
+        aeocha.after_each() callback {
+            driver_linux.down(NAME(), "")
+        }
+
+        aeocha.it("builds + runs the service and computes 2+3=5, 40+2=42 over HTTP") callback {
+            if _no_engine() == 1 {
+                aeocha.assert_true(fw, 1, "skipped — no container engine on PATH")
+            } else {
+                driver_linux.down(NAME(), "")
+                // build the service image from the inline Dockerfile
+                berr = driver_linux.build(NAME(), DF(), "")
+                aeocha.assert_str_eq(fw, berr, "", "build (Python stdlib image)")
+                // run it with the port exposed to the host
+                tag = driver_linux.built_tag(NAME())
+                uerr = driver_linux.up(NAME(), tag, "", PORT(), "")
+                aeocha.assert_str_eq(fw, uerr, "", "up (expose 8080)")
+                // wait for the http.server to bind, then curl FROM THE HOST
+                base = "http://localhost:8080"
+                aeocha.assert_str_eq(fw, _wait_http("${base}/add/0/0", 40), "yes", "service reachable")
+                _http_body_is(fw, "${base}/add/2/3", "5", "GET /add/2/3 = 5")
+                _http_body_is(fw, "${base}/add/40/2", "42", "GET /add/40/2 = 42")
+            }
+        }
+    }
+
+    aeocha.run_summary(fw)
+}
+
+// ---- helpers ----
+
+_no_engine() -> int {
+    if string.length(driver_linux.engine_resolve("")) == 0 {
+        return 1
+    }
+    return 0
+}
+
+// GET url, assert HTTP 200 and the body contains `want`.
+_http_body_is(fw: ptr, url: string, want: string, msg: string) {
+    req = client.request("GET", url)
+    resp, cerr = client.send_request(req)
+    client.request_free(req)
+    if cerr != "" {
+        aeocha.fail(fw, "${msg} — transport error: ${cerr}")
+    } else {
+        aeocha.expect_http_status(fw, resp, 200, "${msg} (200)")
+        aeocha.expect_http_body_contains(fw, resp, want, "${msg}")
+        client.response_free(resp)
+    }
+}
+
+// Poll a URL until it answers (any status) or `secs` elapse. "yes"/"no".
+_wait_http(url: string, secs: int) -> string {
+    waited = 0
+    while waited < secs {
+        req = client.request("GET", url)
+        resp, cerr = client.send_request(req)
+        client.request_free(req)
+        if cerr == "" {
+            client.response_free(resp)
+            return "yes"
+        }
+        sleep(1000)
+        waited = waited + 1
+    }
+    return "no"
+}
