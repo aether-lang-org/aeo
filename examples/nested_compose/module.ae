@@ -54,6 +54,17 @@ aeo_orchestration() {
             // Tier 1: db — a real TCP store. Stock redis, zero config; the
             // app caches computed sums in it (crude memoization). Few lines:
             // an image and the port. Comes up before app (app depends on it).
+            //
+            // SCOPE of expose(p) today: the driver runs containers with
+            // `--network host`, so the port binds the GUEST VM's network
+            // stack. That means port p is reachable (a) by sibling containers
+            // in this VM (app -> 127.0.0.1:6379), (b) anywhere in the guest
+            // OS, and (c) from the GhostBSD host at <guest-ip>:p. It is NOT
+            // reachable from the wider LAN — the guest sits on the host's NAT
+            // net (172.16.0.0/24), which only forwards outbound. So 6379 here
+            // is slightly over-exposed (host-reachable though only app needs
+            // it); a future model could keep db on a private podman net and
+            // only -p publish expose()'d ports. See driver_vm guest_container_up.
             db = container("db") {
                 image("docker.io/library/redis:alpine")
                 expose(6379)

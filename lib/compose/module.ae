@@ -165,7 +165,13 @@ ip(_ctx: ptr, v: string)      { config.put("aeo.cmp.ip.${_ctx}", v) }
 // `expose(port)` — declare a port the resource serves that the host (and
 // the resource's dependents) should be able to reach. Substrate-agnostic
 // declaration; each driver realizes it per kind:
-//   container — `-p <port>:<port>` (podman/docker publish)
+//   container (host-level) — `-p <port>:<port>` (podman/docker publish)
+//   container (nested in a VM) — TODAY: the driver runs it `--network host`,
+//     so the port binds the GUEST VM's stack: reachable by sibling
+//     containers (localhost), anywhere in the guest, AND from the host at
+//     <guest-ip>:<port>. NOT the LAN (the guest is NAT'd). So `expose` does
+//     not (yet) scope a nested port to "VM-internal only" — it's effectively
+//     host-reachable. (Follow-up: private podman net + selective -p publish.)
 //   bhyve/kvm — a host-side forward to the guest's <ip>:<port>
 // v0 records a single port; repeat-call for more is a follow-up.
 expose(_ctx: ptr, port: int)  { config.put("aeo.cmp.expose.${_ctx}", string_from_int(port)) }
