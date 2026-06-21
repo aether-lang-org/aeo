@@ -1,53 +1,61 @@
 // demo_nested_system.ae — a single self-contained, runnable demonstration
-// of the headline feature: a SYSTEM containing a jail and a bhyve VM, with
-// a Linux container NESTED INSIDE that VM, depending across the VM
-// boundary on the jail. No container engine, no root, no network — it
-// declares the tree via the real compose DSL and asserts the resolved
-// data model + bring-up order. Build & run anywhere:
+// of the headline feature: a SYSTEM with a bhyve VM containing a TWO-TIER
+// app — a redis cache (db) and a Python service (app) that depends on it.
+// No container engine, no root, no network — it declares the tree via the
+// real compose DSL and asserts the resolved data model + bring-up order.
+// Build & run anywhere:
 //
 //   ae build test/demo_nested_system.ae -o /tmp/demo --lib lib && /tmp/demo
 //
-// Exits 0 (ALL PASS) or non-zero on the first failed assertion.
+// Exits 0 (ALL PASS) or non-zero on the first failed assertion. Mirrors
+// examples/nested_compose/module.ae (the `aeo up` target).
 //
 //   system("red222")
-//     ├─ db    (jail — BSD-native, host level)
 //     └─ myapp (bhyve VM)
-//          └─ app (container, INSIDE myapp) ── depends ──► db
+//          ├─ db  (redis container, INSIDE myapp)
+//          └─ app (python container, INSIDE myapp) ── depends ──► db
 
-import compose (system, bhyve_vm, jail, container)
-import compose (dataset, command, dockerfile, cpus, memory, guest_image, network, ssh_key, health, expose, depends)
-import compose (count, name_at, get_kind, get_system, get_host, get_depends, get_dockerfile, get_guest_image, syscount, sysname_at)
+import compose (system, bhyve_vm, container)
+import compose (image, dockerfile, cpus, memory, guest_image, network, ssh_key, health, expose, depends)
+import compose (count, name_at, get_kind, get_system, get_host, get_depends, get_dockerfile, get_image, get_guest_image, syscount, sysname_at)
 import std.string (string_contains)
 
 extern exit(code: int)
 
 // ---- the composition, exactly as an operator would write it ----
-// `app` is a REAL, buildable image — an inline heredoc Dockerfile, not a
-// fictional registry reference. On the GhostBSD box this is built and run
-// INSIDE the bhyve Linux guest by the aeo-agent that lives there; the
-// Dockerfile is also where the agent gets baked in.
+// Both tiers are containers INSIDE the bhyve VM. db is a stock redis image;
+// app is built from an inline heredoc Dockerfile and uses db as a cache.
 declare() {
     system("red222") {
-        db = jail("db") {
-            dataset("zroot/jails/db")
-            command("/rescue/sh -c 'sleep 600'")
-            health("/rescue/test -d /")
-        }
         bhyve_vm("myapp") {
             cpus(2)
             memory("2G")
             guest_image("ubuntu-22.04")
             network("dhcp")
             ssh_key("/home/paul/.ssh/id_rsa.pub")
+            db = container("db") {
+                image("docker.io/library/redis:alpine")
+                expose(6379)
+                health("redis-cli ping")
+            }
             app = container("app") {
                 dockerfile(<<DOCKER
 FROM docker.io/library/python:3-alpine
 RUN cat <<'PY' > /app.py
-import http.server as h
+import http.server as h, socket
+def rcmd(*a):
+ s=socket.create_connection(("127.0.0.1",6379),1)
+ s.sendall(("*%d\r\n"%len(a)+"".join("$%d\r\n%s\r\n"%(len(x),x) for x in a)).encode())
+ r=s.recv(4096); s.close(); return r
 class A(h.BaseHTTPRequestHandler):
  def do_GET(self):
   p=self.path.strip("/").split("/")
-  try: b=str(int(p[1])+int(p[2]))
+  try:
+   k="add:%s:%s"%(p[1],p[2])
+   c=rcmd("GET",k)
+   if c[:1]==b"$" and c[1:2]!=b"-": b=c.split(b"\r\n")[1].decode()
+   else:
+    b=str(int(p[1])+int(p[2])); rcmd("SET",k,b)
   except: b="err"
   self.send_response(200); self.end_headers(); self.wfile.write(b.encode())
  def log_message(self,*a): pass
@@ -77,7 +85,7 @@ check(label: string, got: string, want: string) -> int {
 }
 
 main() {
-    println("=== aeo nested-system demo: system{ jail ; bhyve_vm{ container } } ===")
+    println("=== aeo nested-system demo: system{ bhyve_vm{ db(redis) ; app } } ===")
     declare()
     passed = 0
 
@@ -86,29 +94,33 @@ main() {
     passed = passed + check("system count", _itoa(sc), "1")
     passed = passed + check("system name", sysname_at(0), "red222")
 
-    // Three resources, in declaration order.
+    // Three resources. myapp (the block-host VM) opens first, then its
+    // contained db + app.
     n = count()
     passed = passed + check("resource count", _itoa(n), "3")
-    passed = passed + check("res[0] name", name_at(0), "db")
-    passed = passed + check("res[1] name", name_at(1), "myapp")
+    passed = passed + check("res[0] name", name_at(0), "myapp")
+    passed = passed + check("res[1] name", name_at(1), "db")
     passed = passed + check("res[2] name", name_at(2), "app")
 
-    // Kinds.
-    passed = passed + check("db kind", get_kind("db"), "jail")
+    // Kinds: myapp is the VM; db + app are both containers in it.
     passed = passed + check("myapp kind", get_kind("myapp"), "bhyve")
+    passed = passed + check("db kind", get_kind("db"), "container")
     passed = passed + check("app kind", get_kind("app"), "container")
 
     // All belong to the system.
     passed = passed + check("db system", get_system("db"), "red222")
     passed = passed + check("app system", get_system("app"), "red222")
 
-    // Nesting: db is at host level (no host), app is INSIDE myapp.
-    passed = passed + check("db host (top level)", _orempty(get_host("db")), "<none>")
+    // Nesting: myapp is at host level; db AND app are INSIDE myapp.
     passed = passed + check("myapp host (top level)", _orempty(get_host("myapp")), "<none>")
+    passed = passed + check("db host (nested)", get_host("db"), "myapp")
     passed = passed + check("app host (nested)", get_host("app"), "myapp")
 
-    // The dependency crosses the VM boundary: app depends on db.
+    // app depends on db (db comes up first).
     passed = passed + check("app depends", get_depends("app"), "db")
+
+    // db is a stock image (redis); app is built from an inline Dockerfile.
+    passed = passed + check("db image", get_image("db"), "docker.io/library/redis:alpine")
 
     // app is a real, buildable image: an inline heredoc Dockerfile, not a
     // fictional registry reference.
@@ -121,9 +133,9 @@ main() {
     println("")
     println("Tree:")
     println("  system(red222)")
-    println("    db    [jail]      (host level)")
-    println("    myapp [bhyve]     (host level)")
-    println("      app [container] (inside myapp) -> depends db")
+    println("    myapp [bhyve]       (host level)")
+    println("      db  [container]   (redis, inside myapp)")
+    println("      app [container]   (inside myapp) -> depends db")
 }
 
 // "yes" if app's dockerfile resolved and looks like a real Dockerfile.
