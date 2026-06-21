@@ -35,6 +35,12 @@ declare() {
             ssh_key("/home/paul/.ssh/id_rsa.pub")
             db = container("db") {
                 image("docker.io/library/redis:alpine")
+                // expose(6379) scope: with the driver's --network host, this
+                // port binds the GUEST VM's stack — reachable by sibling
+                // containers (app -> 127.0.0.1:6379), anywhere in the guest,
+                // and from the GhostBSD host at <guest-ip>:6379. NOT the LAN
+                // (the guest is NAT'd). Only app needs it, so it's slightly
+                // over-exposed; see lib/compose expose() + examples/nested_compose.
                 expose(6379)
                 health("redis-cli ping")
             }
