@@ -23,12 +23,18 @@
 //     resolve the full nested tree — db (jail) at host level, myapp as a
 //     bhyve VM, app nested inside myapp with a cross-boundary depends(db).
 //     The jail and the bhyve VM both boot via their proven drivers.
-//   - FRONTIER: actually creating `app` INSIDE the running `myapp` guest is
-//     done by AEO-AGENT, not by aeo reaching in. The parent hands `myapp`'s
-//     resident agent the instructions for `app` (and anything below it); the
-//     agent brings it up locally and reports back out. Containment-respecting
-//     and depth-agnostic — see docs/aeo-agent.md. The nesting is declared and
-//     gated correctly now; the agent dispatch is the next build.
+//   - REAL now too: `aeo up` actually creates `app` INSIDE the running
+//     `myapp` guest. The runner routes a nested container (get_host != "")
+//     to driver_vm.guest_container_up: it ssh's into the guest, writes this
+//     inline Dockerfile, podman-builds + runs it with expose(8080)
+//     published — so `app` runs in the VM, reachable from the host at
+//     <guest-ip>:8080. Driven entirely by this DSL (no shell script).
+//   - FRONTIER: today aeo reaches into the guest over ssh. The cleaner
+//     end-state hands `myapp`'s resident AEO-AGENT the instructions for
+//     `app` (and anything below it); the agent brings it up locally and
+//     reports back out — containment-respecting + depth-agnostic. See
+//     docs/aeo-agent.md. (Gated in practice by the intermittent AMD Ryzen
+//     guest-boot hang — see docs/bhyve-networking-journey.md.)
 //
 // Import the openers (system + the block-host bhyve_vm + jail + container)
 // and the block setters.
