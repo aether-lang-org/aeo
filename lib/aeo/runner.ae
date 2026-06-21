@@ -142,6 +142,14 @@ driver_up(nm: string, k: string) -> string {
         return driver_linux.up(nm, img, compose.get_command(nm), compose.get_expose(nm), "")
     }
     if k == "container" {
+        // NESTED container: if it lives INSIDE a VM (get_host != ""), aeo
+        // reaches into that guest over ssh and builds+runs it THERE — the
+        // real nested-execution path that makes `aeo up <dsl>` converge to a
+        // host-reachable service in the guest (not a host-local podman run).
+        host = compose.get_host(nm)
+        if host != "" {
+            return driver_vm.guest_container_up(host, nm, compose.get_dockerfile(nm), compose.get_expose(nm))
+        }
         img = _container_image(nm, "")
         if string_starts_err(img) == 1 {
             return _strip_err(img)

@@ -30,11 +30,11 @@
 
 import std.os (run_capture, os_which)
 import std.list
-import std.string (string_length, string_char_at, string_substring, string_contains)
+import std.string (string_length, string_char_at, string_substring, string_contains, string_from_char)
 
 exports (
     name,
-    up, bhyve_up, down, probe,
+    up, bhyve_up, guest_container_up, down, probe,
     bhyve_argv, qemu_argv, bhyvectl_destroy_argv,
     pidfile_for, bootrom_path
 )
@@ -181,6 +181,96 @@ bhyve_up(res_name: string, guest_image: string, cpus: int, mem: string, network:
         return ""
     }
     return "aeo: 'vm start ${res_name}' failed: ${out}"
+}
+
+// Bring a container UP INSIDE a guest VM (the nested-execution wire). The
+// runner calls this for a `container` whose get_host() is a bhyve VM: aeo
+// reaches into the running guest over ssh, writes the inline Dockerfile,
+// builds it with podman, and runs it with the port published — so the
+// service runs in the guest and is reachable from the host at <guest-ip>:<port>.
+// This is what makes `aeo up <dsl>` do the real convergence (vs a shell
+// script): the DSL's nested container actually executes in the VM.
+//
+//   host_vm    — the VM name (get_host of the container); used to find its IP
+//   name       — the container/app name
+//   dockerfile — the inline Dockerfile text (from the DSL's dockerfile())
+//   expose     — the port to publish (from expose()); 0 = none
+guest_container_up(host_vm: string, name: string, dockerfile: string, expose: int) -> string {
+    ip = _guest_ip(host_vm)
+    if ip == "" {
+        return "aeo: guest VM '${host_vm}' has no reachable IP (booted+networked?) for container '${name}'"
+    }
+    // Stage the Dockerfile into the guest, build + run with the port mapped.
+    // The whole remote script runs over ssh as the guest's ubuntu user.
+    pmap = ""
+    if expose > 0 {
+        pmap = "-p ${_itoa(expose)}:${_itoa(expose)}"
+    }
+    remote = "set -e; cat > /home/ubuntu/Dockerfile.${name} <<'AEOEOF'\n${dockerfile}\nAEOEOF\ncd /home/ubuntu && podman build -t aeo-${name} -f Dockerfile.${name} . >/dev/null 2>&1 && podman rm -f ${name} >/dev/null 2>&1; podman run -d --name ${name} ${pmap} aeo-${name} >/dev/null"
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "ssh -i ${_guest_key()} -o StrictHostKeyChecking=no -o ConnectTimeout=10 ubuntu@${ip} ${_shquote(remote)}")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    if status != 0 {
+        return "aeo: building/running container '${name}' inside guest '${host_vm}' (${ip}) failed: ${out}"
+    }
+    return ""
+}
+
+// The guest VM's IP. Prefers the cloud-init static IP convention
+// (172.16.0.50 on the NAT net); falls back to an ARP/lease lookup by the
+// VM's MAC. Returns "" if not found.
+_guest_ip(host_vm: string) -> string {
+    av = list_new()
+    list_add(av, "-c")
+    // 1) if 172.16.0.50:22 answers, use it (static-IP convention).
+    // 2) else resolve the VM's MAC -> a 172.16.0.x lease/arp entry.
+    list_add(av, "if nc -z -w2 172.16.0.50 22 2>/dev/null; then echo 172.16.0.50; else MAC=$(grep -o 'network0_mac=\"[^\"]*\"' /zroot/vm/${host_vm}/${host_vm}.conf 2>/dev/null | cut -d'\"' -f2); ping -c1 -W1 172.16.0.255 >/dev/null 2>&1; arp -an 2>/dev/null | grep -i \"$MAC\" | grep -oE '172.16.0.[0-9]+' | head -1; fi")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    return _first_line(out)
+}
+
+_guest_key() -> string {
+    return "/home/paul/.ssh/id_rsa"
+}
+
+// First non-empty line of s, trimmed of a trailing newline.
+_first_line(s: string) -> string {
+    out = ""
+    i = 0
+    n = string_length(s)
+    while i < n {
+        c = string_char_at(s, i)
+        if c == 10 {
+            if string_length(out) > 0 {
+                return out
+            }
+        } else {
+            out = "${out}${string_from_char(c)}"
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// Minimal single-quote shell-quoting: wrap in single quotes, escaping any
+// embedded single quote as '\''.
+_shquote(s: string) -> string {
+    out = "'"
+    i = 0
+    n = string_length(s)
+    while i < n {
+        c = string_char_at(s, i)
+        if c == 39 {
+            out = "${out}'\\''"
+        } else {
+            out = "${out}${string_from_char(c)}"
+        }
+        i = i + 1
+    }
+    return "${out}'"
 }
 
 // 1 if vm-bhyve knows this VM (it's in `vm list`), else 0.
