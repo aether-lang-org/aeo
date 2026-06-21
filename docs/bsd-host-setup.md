@@ -144,5 +144,7 @@ sudo sh test/setup-nat.sh --check                    # NAT up
 #   ssh ubuntu@<lease> 'cat /proc/cmdline'  -> shows clocksource=hpet ...
 ```
 
-See also memory `bhyve-guest-networking` (the full diagnosis trail) and
-`docs/aeo-agent.md`.
+See also `docs/bhyve-networking-journey.md` (the full journey — every
+approach tried, why each helped/failed, and which workarounds become
+removable once the AMD boot hang is fixed), memory `bhyve-guest-networking`
+(the running diagnosis trail), and `docs/aeo-agent.md`.
