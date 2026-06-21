@@ -19,7 +19,7 @@
 import aeocha
 import compose (system, bhyve_vm, container)
 import compose (image, dockerfile, cpus, memory, guest_image, network, ssh_key, health, expose, depends)
-import compose (count, name_at, get_kind, get_system, get_host, get_depends, get_dockerfile, get_image, get_guest_image, syscount, sysname_at)
+import compose (describe_tree)
 import std.string
 import std.os (getenv, run_capture)
 import std.list
@@ -63,40 +63,20 @@ main() {
     aeocha.describe(fw, "nested system: bhyve_vm{ db(redis) ; app }") {
 
         aeocha.describe("declaration (data model)") {
-            aeocha.it("declares one system named red222") callback {
-                aeocha.assert_eq(fw, syscount(), 1, "one system")
-                aeocha.assert_str_eq(fw, sysname_at(0), "red222", "name")
-            }
-            aeocha.it("has three resources: myapp, db, app") callback {
-                aeocha.assert_eq(fw, count(), 3, "count")
-                aeocha.assert_str_eq(fw, name_at(0), "myapp", "res[0]")
-                aeocha.assert_str_eq(fw, name_at(1), "db", "res[1]")
-                aeocha.assert_str_eq(fw, name_at(2), "app", "res[2]")
-            }
-            aeocha.it("myapp is the VM; db and app are containers") callback {
-                aeocha.assert_str_eq(fw, get_kind("myapp"), "bhyve", "myapp kind")
-                aeocha.assert_str_eq(fw, get_kind("db"), "container", "db kind")
-                aeocha.assert_str_eq(fw, get_kind("app"), "container", "app kind")
-            }
-            aeocha.it("db and app are nested inside myapp") callback {
-                aeocha.assert_str_eq(fw, get_host("myapp"), "", "myapp at host level")
-                aeocha.assert_str_eq(fw, get_host("db"), "myapp", "db in myapp")
-                aeocha.assert_str_eq(fw, get_host("app"), "myapp", "app in myapp")
-            }
-            aeocha.it("app depends on db (db comes up first)") callback {
-                aeocha.assert_str_eq(fw, get_depends("app"), "db", "app -> db")
-            }
-            aeocha.it("db is the stock redis image") callback {
-                aeocha.assert_str_eq(fw, get_image("db"), "docker.io/library/redis:alpine", "redis image")
-            }
-            aeocha.it("app is built from an inline Dockerfile, dedented to col 0") callback {
-                df = get_dockerfile("app")
-                aeocha.assert_contains(fw, df, "FROM ", "has FROM")
-                // heredoc dedent (aether >=0.298) stripped the source indent:
-                aeocha.assert_str_eq(fw, _first5(df), "FROM ", "starts at column 0")
-            }
-            aeocha.it("the VM declares its guest image") callback {
-                aeocha.assert_str_eq(fw, get_guest_image("myapp"), "ubuntu-22.04", "guest")
+            // One snapshot assertion of the WHOLE resolved tree. aeo emits the
+            // canonical model (compose.describe_tree()); we assert it equals
+            // the expected shape — system, nesting, kinds, images, expose,
+            // and the app->db dependency, all in one line. Beats eight
+            // field-by-field it-blocks: if the resolution changes, the diff
+            // shows exactly what moved.
+            aeocha.it("resolves to the expected system tree") callback {
+                want = <<TREE
+                    system red222:
+                      bhyve myapp [guest=ubuntu-22.04, cpus=2, mem=2G]
+                        container db [image=docker.io/library/redis:alpine, expose=6379]
+                        container app [dockerfile, expose=8080] -> db
+TREE
+                aeocha.assert_str_eq(fw, describe_tree(), want, "resolved tree snapshot")
             }
         }
 

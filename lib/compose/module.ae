@@ -27,7 +27,7 @@
 // The runner reads the count + per-name fields back via the get_* helpers.
 
 import std.config
-import std.string (string_length, string_char_at, string_from_int)
+import std.string (string_length, string_char_at, string_from_int, string_substring)
 
 exports (
     system,
@@ -43,7 +43,8 @@ exports (
     get_kind, get_image, get_dockerfile, get_command, get_health, get_dataset, get_ip,
     get_depends, get_interval, get_budget,
     get_cpus, get_memory, get_nic, get_expose,
-    get_guest_image, get_network, get_ssh_key
+    get_guest_image, get_network, get_ssh_key,
+    describe_tree
 )
 
 // --- the trailing-block builder DSL ----------------------------------
@@ -333,4 +334,113 @@ _to_int(s: string) -> int {
         i = i + 1
     }
     return acc
+}
+
+// describe_tree() — the whole resolved composition as ONE canonical,
+// deterministic, human-diffable string (an indented YAML-ish tree). Built
+// straight from the already-resolved data; a test can snapshot-assert the
+// entire model in a single line instead of field-by-field. Order is
+// declaration order (stable). Example:
+//
+//   system red222:
+//     bhyve myapp [guest=ubuntu-22.04, cpus=2, mem=2G]:
+//       container db [image=docker.io/library/redis:alpine, expose=6379]
+//       container app [dockerfile, expose=8080] -> db
+describe_tree() -> string {
+    out = ""
+    sc = syscount()
+    si = 0
+    while si < sc {
+        sys = sysname_at(si)
+        out = "${out}system ${sys}:\n"
+        // top-level resources of this system (host == ""), declaration order
+        n = count()
+        ri = 0
+        while ri < n {
+            nm = name_at(ri)
+            if get_system(nm) == sys {
+                if get_host(nm) == "" {
+                    out = "${out}${_node_line(nm, 1)}"
+                    // nested children of this host (get_host == nm)
+                    cj = 0
+                    while cj < n {
+                        cnm = name_at(cj)
+                        if get_host(cnm) == nm {
+                            out = "${out}${_node_line(cnm, 2)}"
+                        }
+                        cj = cj + 1
+                    }
+                }
+            }
+            ri = ri + 1
+        }
+        si = si + 1
+    }
+    // drop the trailing newline so the snapshot is a clean block (no blank
+    // last line) — easier to match against a heredoc expectation.
+    ln = string_length(out)
+    if ln > 0 {
+        if string_char_at(out, ln - 1) == 10 {
+            return string_substring(out, 0, ln - 1)
+        }
+    }
+    return out
+}
+
+// One indented line for a resource: "<indent><kind> <name> [<details>]<dep>".
+_node_line(nm: string, depth: int) -> string {
+    pad = ""
+    d = 0
+    while d < depth {
+        pad = "${pad}  "
+        d = d + 1
+    }
+    line = "${pad}${get_kind(nm)} ${nm}"
+    det = _details(nm)
+    if string_length(det) > 0 {
+        line = "${line} [${det}]"
+    }
+    dep = get_depends(nm)
+    if string_length(dep) > 0 {
+        line = "${line} -> ${dep}"
+    }
+    return "${line}\n"
+}
+
+// The kind-relevant detail fields for a resource, comma-joined, in a fixed
+// order (so the snapshot is deterministic). Only non-default fields appear.
+_details(nm: string) -> string {
+    det = ""
+    // guest_image/cpus/mem only appear on VM kinds (they're declared there).
+    if get_kind(nm) == "bhyve" {
+        det = _join(det, "guest=${get_guest_image(nm)}")
+        det = _join(det, "cpus=${string_from_int(get_cpus(nm))}")
+        mm = config.get("aeo.cmp.memory.${nm}")
+        if string_length(mm) > 0 {
+            det = _join(det, "mem=${mm}")
+        }
+    }
+    img = get_image(nm)
+    if string_length(img) > 0 {
+        det = _join(det, "image=${img}")
+    }
+    if string_length(get_dockerfile(nm)) > 0 {
+        det = _join(det, "dockerfile")
+    }
+    ds = get_dataset(nm)
+    if string_length(ds) > 0 {
+        det = _join(det, "dataset=${ds}")
+    }
+    ex = get_expose(nm)
+    if ex > 0 {
+        det = _join(det, "expose=${string_from_int(ex)}")
+    }
+    return det
+}
+
+_join(acc: string, item: string) -> string {
+    if string_length(acc) == 0 {
+        return item
+    }
+    return "${acc}, ${item}"
 }

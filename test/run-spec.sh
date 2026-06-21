@@ -22,7 +22,12 @@ fi
 
 run_one() {
     echo "### $1"
-    ae run "$1" --lib "$ROOT/lib" --lib "$AEOCHA"
+    # build-then-run, not `ae run`: `ae run` caches by content and can serve a
+    # stale compiled dependency (e.g. an edited lib/compose) — build to a fresh
+    # binary each time so edits always take.
+    bin="/tmp/aeo-spec-$(basename "$1" .ae)"
+    ae build "$1" -o "$bin" --lib "$ROOT/lib" --lib "$AEOCHA" || return 1
+    "$bin"
 }
 
 if [ "$#" -gt 0 ]; then
