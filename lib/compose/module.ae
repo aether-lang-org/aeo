@@ -45,7 +45,7 @@ exports (
     get_cpus, get_memory, get_nic, get_expose,
     get_guest_image, get_network, get_ssh_key,
     suspend, constrain, constraint, start,
-    get_suspended, get_confined_by, get_constraints,
+    get_suspended, get_started, get_constraints,
     describe_tree
 )
 
@@ -199,15 +199,16 @@ ip(_ctx: ptr, v: string)      { config.put("aeo.cmp.ip.${_ctx}", v) }
 suspend(vm: string) {
     config.put("aeo.cmp.suspended.${vm}", "1")
 }
-// `constrain(name)` opens a confinement block (its name is the _ctx pushed to
-// the trailing block, like the other openers); also remembered as the
-// most-recent block so a following start(vm) can bind to it. Inside it:
+// `constrain(vm)` — opens THE VM'S OWN confinement block. The vm name is the
+// _ctx pushed to the trailing block (like the other openers), so each inner
+// `constraint(...)` records its grant directly onto that VM. No floating block,
+// no hidden binding: the block literally refers to the VM it confines. Inside:
 //   constraint(name, target, rights) — a bound capability: WHAT (a path/tap/
 //       socket), and the rights on it. rights_limit(fd_of(target), mask).
-// Anything not granted is DENIED once bhyve cap_enter()s.
-constrain(name: string) -> string {
-    config.put("aeo.cmp.curconstrain", name)
-    return name
+// Anything not granted is DENIED once bhyve cap_enter()s. A VM with any
+// constraint is "confined".
+constrain(vm: string) -> string {
+    return vm
 }
 constraint(_ctx: ptr, name: string, target: string, rights: string) {
     prev = config.get("aeo.cmp.constraints.${_ctx}")
@@ -218,11 +219,11 @@ constraint(_ctx: ptr, name: string, target: string, rights: string) {
         config.put("aeo.cmp.constraints.${_ctx}", "${prev}, ${entry}")
     }
 }
-// `start(vm)` — resume the (suspended) VM CONFINED by the most recently
-// declared constrain block. Records confinedby so the snapshot + the driver
-// know to relaunch it through the cap_enter() wrapper (phase 2).
+// `start(vm)` — resume the (suspended, now-constrained) VM. The grants already
+// live on the VM (from its constrain(vm){} block); the driver relaunches it
+// through the cap_enter() wrapper holding exactly those fds (phase 2).
 start(vm: string) {
-    config.put("aeo.cmp.confinedby.${vm}", config.get("aeo.cmp.curconstrain"))
+    config.put("aeo.cmp.started.${vm}", "1")
 }
 
 // `expose(port)` — declare a port the resource serves that the host (and
@@ -320,8 +321,9 @@ get_depends(nm: string) -> string { return config.get("aeo.cmp.depends.${nm}") }
 // Capsicum (proposal): which constrain-block confines a VM, and that block's
 // bound constraints.
 get_suspended(vm: string) -> string { return config.get("aeo.cmp.suspended.${vm}") }
-get_confined_by(vm: string) -> string { return config.get("aeo.cmp.confinedby.${vm}") }
-get_constraints(blk: string) -> string { return config.get("aeo.cmp.constraints.${blk}") }
+get_started(vm: string) -> string { return config.get("aeo.cmp.started.${vm}") }
+// A VM's bound constraints (its own constrain(vm){} block). "" = unconfined.
+get_constraints(vm: string) -> string { return config.get("aeo.cmp.constraints.${vm}") }
 get_nic(nm: string) -> string     { return config.get("aeo.cmp.nic.${nm}") }
 
 // Guest provisioning getters (defaults make a bhyve_vm work with no
@@ -502,16 +504,11 @@ _details(nm: string) -> string {
     if ex > 0 {
         det = _join(det, "expose=${string_from_int(ex)}")
     }
-    // Capsicum (proposal): if this VM is relaunched confined (phase 2), show
-    // the constrain-block name + its bound constraints.
-    blk = get_confined_by(nm)
-    if string_length(blk) > 0 {
-        cs = get_constraints(blk)
-        if string_length(cs) > 0 {
-            det = _join(det, "confined[${blk}]: ${cs}")
-        } else {
-            det = _join(det, "confined[${blk}]")
-        }
+    // Capsicum (proposal): a VM with its own constrain(vm){} block is confined
+    // (phase 2). The constraints live directly on the VM — no separate block.
+    cs = get_constraints(nm)
+    if string_length(cs) > 0 {
+        det = _join(det, "confined: ${cs}")
     }
     return det
 }

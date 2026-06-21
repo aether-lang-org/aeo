@@ -21,7 +21,7 @@
 import aeocha
 import compose (system, bhyve_vm, container)
 import compose (image, dockerfile, cpus, memory, guest_image, network, ssh_key, health, expose, depends)
-import compose (suspend, constrain, constraint, start, get_suspended, get_confined_by, get_constraints, describe_tree)
+import compose (suspend, constrain, constraint, start, get_suspended, get_started, get_constraints, describe_tree)
 import std.string
 import std.os (getenv, run_capture)
 import std.list
@@ -49,7 +49,7 @@ declare() {
         // ("lock1": the redis VM's disk/tap/console). suspend -> constrain ->
         // start, as a verb sequence on the myapp1 handle.
         suspend(myapp1)
-        constrain("lock1") {
+        constrain(myapp1) {           // the block IS myapp1's — names its target
             constraint("disk",    "/zroot/vm/myapp1/disk0.img", "rd,wr")
             constraint("net",     "tap0", "rd,wr")
             constraint("console", "nmdm-myapp1", "rd,wr")
@@ -85,7 +85,7 @@ DOCKER
         }
 
         suspend(myapp2)
-        constrain("lock2") {
+        constrain(myapp2) {           // the block IS myapp2's — its own grants
             constraint("disk",    "/zroot/vm/myapp2/disk0.img", "rd,wr")
             constraint("net",     "tap1", "rd,wr")
             constraint("console", "nmdm-myapp2", "rd,wr")
@@ -110,27 +110,26 @@ main() {
             aeocha.it("resolves to two top-level VMs, each with its OWN confinement") callback {
                 want = <<TREE
                     system red222:
-                      bhyve myapp1 [guest=ubuntu-22.04, cpus=2, mem=2G, confined[lock1]: disk(/zroot/vm/myapp1/disk0.img)=rd,wr, net(tap0)=rd,wr, console(nmdm-myapp1)=rd,wr]
+                      bhyve myapp1 [guest=ubuntu-22.04, cpus=2, mem=2G, confined: disk(/zroot/vm/myapp1/disk0.img)=rd,wr, net(tap0)=rd,wr, console(nmdm-myapp1)=rd,wr]
                         container db [image=docker.io/library/redis:alpine, expose=6379]
-                      bhyve myapp2 [guest=ubuntu-22.04, cpus=2, mem=2G, confined[lock2]: disk(/zroot/vm/myapp2/disk0.img)=rd,wr, net(tap1)=rd,wr, console(nmdm-myapp2)=rd,wr]
+                      bhyve myapp2 [guest=ubuntu-22.04, cpus=2, mem=2G, confined: disk(/zroot/vm/myapp2/disk0.img)=rd,wr, net(tap1)=rd,wr, console(nmdm-myapp2)=rd,wr]
                         container app [dockerfile, expose=8080] -> db
 TREE
                 aeocha.assert_str_eq(fw, describe_tree(), want, "resolved tree snapshot")
             }
 
-            aeocha.it("each VM has its OWN suspend->constrain->start with separate fd grants") callback {
-                // PHASE 2: myapp1 confined by lock1 (its own disk/tap0/console).
+            aeocha.it("each VM's constrain block names ITS OWN VM (no floating block)") callback {
+                // The constraints live directly on the VM the constrain(vm){}
+                // block named — myapp1's grants on myapp1, myapp2's on myapp2.
                 aeocha.assert_str_eq(fw, get_suspended("myapp1"), "1", "myapp1 suspended")
-                aeocha.assert_str_eq(fw, get_confined_by("myapp1"), "lock1", "myapp1 confined by lock1")
-                aeocha.assert_str_eq(fw, get_constraints("lock1"),
+                aeocha.assert_str_eq(fw, get_started("myapp1"), "1", "myapp1 resumed")
+                aeocha.assert_str_eq(fw, get_constraints("myapp1"),
                     "disk(/zroot/vm/myapp1/disk0.img)=rd,wr, net(tap0)=rd,wr, console(nmdm-myapp1)=rd,wr",
-                    "lock1 = myapp1's fd grants")
-                // PHASE 3: myapp2 confined by lock2 (its own disk/tap1/console).
+                    "myapp1's own fd grants")
                 aeocha.assert_str_eq(fw, get_suspended("myapp2"), "1", "myapp2 suspended")
-                aeocha.assert_str_eq(fw, get_confined_by("myapp2"), "lock2", "myapp2 confined by lock2")
-                aeocha.assert_str_eq(fw, get_constraints("lock2"),
+                aeocha.assert_str_eq(fw, get_constraints("myapp2"),
                     "disk(/zroot/vm/myapp2/disk0.img)=rd,wr, net(tap1)=rd,wr, console(nmdm-myapp2)=rd,wr",
-                    "lock2 = myapp2's fd grants (DIFFERENT from lock1)")
+                    "myapp2's own fd grants (DIFFERENT from myapp1's)")
             }
         }
 
