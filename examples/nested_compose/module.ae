@@ -75,7 +75,17 @@ aeo_orchestration() {
             app = container("app") {
                 dockerfile(<<DOCKER
 FROM docker.io/library/python:3-alpine
-RUN printf 'import http.server as h\nclass A(h.BaseHTTPRequestHandler):\n def do_GET(self):\n  p=self.path.strip("/").split("/")\n  try: b=str(int(p[1])+int(p[2]))\n  except: b="err"\n  self.send_response(200); self.end_headers(); self.wfile.write(b.encode())\n def log_message(self,*a): pass\nh.HTTPServer(("0.0.0.0",8080),A).serve_forever()\n' > /app.py
+RUN cat <<'PY' > /app.py
+import http.server as h
+class A(h.BaseHTTPRequestHandler):
+ def do_GET(self):
+  p=self.path.strip("/").split("/")
+  try: b=str(int(p[1])+int(p[2]))
+  except: b="err"
+  self.send_response(200); self.end_headers(); self.wfile.write(b.encode())
+ def log_message(self,*a): pass
+h.HTTPServer(("0.0.0.0",8080),A).serve_forever()
+PY
 CMD ["python", "/app.py"]
 DOCKER
                 )
