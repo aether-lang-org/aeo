@@ -31,7 +31,7 @@ import std.string (string_length, string_char_at, string_from_int, string_substr
 
 exports (
     system,
-    bhyve_vm, kvm_vm,
+    bhyve_vm, freebsd_vm, get_flavor, kvm_vm,
     resource,
     container, docker, lxc, kvm, jail, bhyve,
     image, command, dockerfile, health, dataset, ip, depends,
@@ -112,6 +112,27 @@ bhyve_vm(nm: string) -> string {
     config.put("aeo.cmp.curhost", nm)        //   nesting its inner resources.
     return nm                                // (fixes sibling VMs inheriting the
 }                                            //  previous VM as their host.)
+
+// freebsd_vm — a bhyve VM whose guest is FREEBSD (not Linux). Same kind
+// ("bhyve") so it nests + confines identically, but flavored "freebsd" so the
+// driver provisions the FreeBSD VM image (the NATIVE bhyve guest path), and so
+// in-guest workloads can use FreeBSD facilities — notably Capsicum, which a
+// FreeBSD guest process can cap_enter() on ITSELF (a Linux guest can't). This
+// is the real target for the in-VM Capsicum self-report test.
+freebsd_vm(nm: string) -> string {
+    config.put("aeo.cmp.curhost", "")
+    resource(nm, "bhyve")
+    config.put("aeo.cmp.flavor.${nm}", "freebsd")
+    config.put("aeo.cmp.curhost", nm)
+    return nm
+}
+get_flavor(nm: string) -> string {
+    v = config.get("aeo.cmp.flavor.${nm}")
+    if string_length(v) == 0 {
+        return "linux"
+    }
+    return v
+}
 kvm_vm(nm: string) -> string {
     config.put("aeo.cmp.curhost", "")
     resource(nm, "kvm")
