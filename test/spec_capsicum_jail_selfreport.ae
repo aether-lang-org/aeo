@@ -1,0 +1,110 @@
+// spec_capsicum_jail_selfreport.ae — Capsicum confinement proven by SELF-REPORT
+// from INSIDE the confined context. No procstat, no root observation.
+//
+// Paul's design: a test process inside a FreeBSD jail opens its ONE allowed
+// channel (a socket back to the aeocha-side listener) BEFORE confining itself,
+// calls cap_enter(), then attempts the to-be-blocked operations in try/except
+// and reports each result back over the allowed channel. The confined process
+// proves its OWN confinement — the blocked ops are caught and reported, and the
+// fact that the report channel still works after cap_enter() proves the policy
+// is "deny everything EXCEPT this one held fd".
+//
+// Why this is stronger than the stand-in/model specs: the confinement is
+// exercised BY THE TEST ITSELF inside a real FreeBSD context (jail), and the
+// evidence comes FROM inside via the allowed channel — exactly what a confined
+// bhyve/jailed workload would look like. (Jail chosen over a full FreeBSD
+// bhyve-VM for speed; same Capsicum syscall, same self-report pattern.)
+//
+// Mechanics: test/capharness.py opens the listener, spawns test/capprobe.py
+// inside a fresh jail (jail -c ... ip4=inherit), collects the reports, prints
+// them as "REPORT <line>". This spec runs the harness, parses the lines, and
+// asserts on them.
+//
+//   AETHER_INCLUDE_PATH=~/aeocha ae run test/spec_capsicum_jail_selfreport.ae
+//   (Run on a FreeBSD host; needs jail/jexec sudo + python3.)
+
+import aeocha
+import std.string
+import std.os (run_capture)
+import std.list
+import std.config
+
+main() {
+    fw = aeocha.init()
+
+    aeocha.describe(fw, "Capsicum self-report from inside a FreeBSD jail (no procstat)") {
+
+        // Run the harness ONCE: listener + jailed self-confining probe. Stash
+        // the captured reports in config so each it-block closure can read them
+        // (Aether closures don't capture main's locals; config is the bridge).
+        config.put("jail.reports", _run_harness())
+
+        aeocha.describe("the confined process reported back over its allowed channel") {
+
+            aeocha.it("got reports at all (the ALLOWED channel delivered from inside confinement)") callback {
+                aeocha.assert_true(fw, _r("REPORT "), "received self-report over the one permitted socket")
+            }
+
+            aeocha.it("the probe actually entered Capsicum capability mode") callback {
+                aeocha.assert_true(fw, _r("CAP_ENTER rc=0"), "cap_enter() succeeded inside the jail")
+                aeocha.assert_true(fw, _r("IN_CAPMODE 1"), "kernel confirms capability mode")
+            }
+        }
+
+        aeocha.describe("every escape class was BLOCKED (caught + self-reported)") {
+            aeocha.it("fs-read-breakout BLOCKED") callback {
+                aeocha.assert_true(fw, _r("fs-read BLOCKED"), "open a global path -> caught")
+            }
+            aeocha.it("fs-write-breakout BLOCKED") callback {
+                aeocha.assert_true(fw, _r("fs-write BLOCKED"), "create a new file -> caught")
+            }
+            aeocha.it("tcpip-egress-breakout BLOCKED") callback {
+                aeocha.assert_true(fw, _r("egress-newconn BLOCKED"), "new outbound connect -> caught")
+            }
+            aeocha.it("tcpip-ingress-breakout BLOCKED") callback {
+                aeocha.assert_true(fw, _r("ingress-bind BLOCKED"), "bind a listener -> caught")
+            }
+            aeocha.it("NO escape reported ESCAPED (nothing slipped through)") callback {
+                aeocha.assert_true(fw, _absent_r("ESCAPED"), "not a single op escaped confinement")
+            }
+        }
+
+        aeocha.describe("the allowed channel is the controlled exception") {
+            aeocha.it("the report socket still worked AFTER cap_enter (deny-except-this)") callback {
+                aeocha.assert_true(fw, _r("ALLOWED-CHANNEL still-open OK"),
+                    "the one held fd kept working — confinement is least-privilege, not total")
+            }
+        }
+    }
+
+    aeocha.run_summary(fw)
+}
+
+// ---- helpers ----
+
+// Run the host-side harness (listener + jailed probe), capture its stdout.
+// Returns "HARNESS_UNAVAILABLE" if it can't run (e.g. not on FreeBSD / no jail).
+_run_harness() -> string {
+    av = list_new()
+    list_add(av, "/tmp/capharness.py")
+    out, status, err = run_capture("/usr/local/bin/python3", av, null)
+    list_free(av)
+    if string.length(out) == 0 {
+        return "HARNESS_UNAVAILABLE ${err}"
+    }
+    return out
+}
+
+// read the stashed reports + test for a substring (closures call these).
+_r(needle: string) -> int {
+    if string.contains(config.get("jail.reports"), needle) == 1 {
+        return 1
+    }
+    return 0
+}
+_absent_r(needle: string) -> int {
+    if string.contains(config.get("jail.reports"), needle) == 1 {
+        return 0
+    }
+    return 1
+}
