@@ -27,7 +27,7 @@
 // The runner reads the count + per-name fields back via the get_* helpers.
 
 import std.config
-import std.string (string_length, string_char_at, string_from_int, string_substring)
+import std.string (string_length, string_char_at, string_from_int, string_substring, string_index_of)
 
 exports (
     system,
@@ -44,7 +44,10 @@ exports (
     get_kind, get_image, get_dockerfile, get_entrypoint, get_base, get_command, get_health, get_dataset, get_ip,
     get_depends, get_interval, get_budget,
     get_cpus, get_memory, get_nic, get_expose,
-    get_guest_image, get_network, get_ssh_key,
+    get_guest_image, image_base, image_has_layer, get_network, get_ssh_key,
+    image_recipe, from, install, netplan_static, systemd_unit, realize_as,
+    imgcount, imgname_at, get_img_from, get_img_install, get_img_netplan,
+    get_img_units, get_img_unit_body, get_img_realize,
     suspend, constrain, constraint, egress, ingress, start,
     get_suspended, get_started, get_constraints, get_netpolicy,
     describe_tree
@@ -286,12 +289,67 @@ nic(_ctx: ptr, v: string)     { config.put("aeo.cmp.nic.${_ctx}", v) }
 // the VM. Declared on the bhyve_vm block; the driver realizes them as a
 // `vm create -i <image> -C -k <key> -n <netconfig>` if the VM doesn't yet
 // exist, so the operator declares the guest and aeo provisions it.
-//   guest_image  — a known image id ("debian-12") or a full URL; the
-//                  driver maps an id to its fetch URL.
-//   network      — "dhcp" (default) or a static spec
-//                  "ip=10.0.0.5/24;gateway4=10.0.0.1".
+//   guest_image  — a logical, COMPOSABLE image name: an OS base optionally
+//                  with `+layer` capabilities, e.g. "ubuntu-22.04" or
+//                  "ubuntu-22.04+podman" (OS + a baked-in capability). The
+//                  name says WHAT the guest contains (OS + workload-relevant
+//                  layers) — NOT where it runs (no "+kvm"/"+bhyve"; substrate
+//                  is the driver's host-adaptive choice) and NOT host-plumbing
+//                  (netplan/systemd/firmware patches — the per-host image
+//                  recipe adds those). Portable: the same name realizes as a
+//                  bhyve golden-clone on BSD or a kvm image on Linux. A full
+//                  URL is also accepted verbatim.
+//   network      — "dhcp" (default) or a static spec.
 //   ssh_key      — path to the pubkey cloud-init installs so aeo can ssh in.
 guest_image(_ctx: ptr, v: string) { config.put("aeo.cmp.guestimage.${_ctx}", v) }
+
+// --- image recipe (per-box, "how to realize a logical guest_image name") ---
+// `image("ubuntu-22.04+podman") { from(...); install(...); netplan_static(...);
+//  systemd_unit(...); realize_as("clone:aeo-base@golden") }` declares what a
+// logical image NAME means ON THIS HOST. It is the DECLARATIVE replacement for
+// the hand-run scripts: from()=vm img, install()=apt, netplan_static()=
+// patch-static-ip.sh, systemd_unit()=the link-up fix, realize_as("clone:...")=
+// setup-base.sh + the golden clone. The recipe is BOTH the fast-path hint AND
+// the from-scratch build instructions: aeo clones the realize_as target if it
+// exists, else builds the image from the from/install/netplan/systemd steps —
+// which is what keeps the system DSL portable (clone where warm, build where
+// cold). `image_recipe(name)` opens the recipe; its name is the _ctx for the
+// setters. (Named image_recipe, not image — image() is the container setter.)
+image_recipe(nm: string) -> string {
+    if config.get("aeo.cmp.imgknown.${nm}") == "" {
+        n = _imgcount()
+        config.put("aeo.cmp.imgname.${n}", nm)
+        config.put("aeo.cmp.imgcount", string_from_int(n + 1))
+        config.put("aeo.cmp.imgknown.${nm}", "1")
+    }
+    return nm
+}
+from(_ctx: ptr, url: string)            { config.put("aeo.cmp.img.from.${_ctx}", url) }
+install(_ctx: ptr, pkg: string)         { _img_append(_ctx, "install", pkg) }
+netplan_static(_ctx: ptr, addr: string, gw: string) {
+    config.put("aeo.cmp.img.netplan.${_ctx}", "addr=${addr};gw=${gw}")
+}
+systemd_unit(_ctx: ptr, name: string, body: string) {
+    _img_append(_ctx, "units", name)
+    config.put("aeo.cmp.img.unit.${_ctx}.${name}", body)
+}
+realize_as(_ctx: ptr, spec: string)     { config.put("aeo.cmp.img.realize.${_ctx}", spec) }
+
+_img_append(ctx: string, field: string, item: string) {
+    prev = config.get("aeo.cmp.img.${field}.${ctx}")
+    if string_length(prev) == 0 {
+        config.put("aeo.cmp.img.${field}.${ctx}", item)
+    } else {
+        config.put("aeo.cmp.img.${field}.${ctx}", "${prev}, ${item}")
+    }
+}
+_imgcount() -> int {
+    v = config.get("aeo.cmp.imgcount")
+    if string_length(v) == 0 {
+        return 0
+    }
+    return _to_int(v)
+}
 network(_ctx: ptr, v: string)     { config.put("aeo.cmp.network.${_ctx}", v) }
 ssh_key(_ctx: ptr, v: string)     { config.put("aeo.cmp.sshkey.${_ctx}", v) }
 
@@ -383,6 +441,38 @@ get_guest_image(nm: string) -> string {
     }
     return v
 }
+
+// The OS base of a composable image name: "ubuntu-22.04+podman" -> "ubuntu-22.04".
+// (Everything before the first '+'. A full URL is returned unchanged.)
+image_base(img: string) -> string {
+    if string_contains(img, "://") == 1 {
+        return img
+    }
+    p = string_index_of(img, "+")
+    if p < 0 {
+        return img
+    }
+    return string_substring(img, 0, p)
+}
+
+// 1 if a composable image name declares `+layer`, e.g.
+// image_has_layer("ubuntu-22.04+podman", "podman") == 1.
+image_has_layer(img: string, layer: string) -> int {
+    if string_contains(img, "+${layer}") == 1 {
+        return 1
+    }
+    return 0
+}
+
+// --- image recipe getters (the driver/realizer reads these) ---
+imgcount() -> int { return _imgcount() }
+imgname_at(i: int) -> string { return config.get("aeo.cmp.imgname.${i}") }
+get_img_from(nm: string) -> string    { return config.get("aeo.cmp.img.from.${nm}") }
+get_img_install(nm: string) -> string { return config.get("aeo.cmp.img.install.${nm}") }
+get_img_netplan(nm: string) -> string { return config.get("aeo.cmp.img.netplan.${nm}") }
+get_img_units(nm: string) -> string   { return config.get("aeo.cmp.img.units.${nm}") }
+get_img_unit_body(nm: string, unit: string) -> string { return config.get("aeo.cmp.img.unit.${nm}.${unit}") }
+get_img_realize(nm: string) -> string { return config.get("aeo.cmp.img.realize.${nm}") }
 get_network(nm: string) -> string {
     v = config.get("aeo.cmp.network.${nm}")
     if string_length(v) == 0 {
