@@ -622,6 +622,13 @@ _image_url(idin: string) -> string {
     if id == "ubuntu-22.04" {
         return "https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img"
     }
+    if id == "ubuntu-22.04-minimal" {
+        // Canonical's minimized cloud image: ~309MB vs ~695MB standard (56%
+        // smaller) but SAME systemd + netplan, so all our plumbing (static-IP
+        // netplan, link-up unit, cold-path) is a drop-in. Lighter guest, zero
+        // rewrite — vs Alpine (OpenRC/ifupdown) which would need a new realizer.
+        return "https://cloud-images.ubuntu.com/minimal/releases/jammy/release/ubuntu-22.04-minimal-cloudimg-amd64.img"
+    }
     if id == "ubuntu-24.04" {
         return "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
     }

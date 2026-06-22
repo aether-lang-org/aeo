@@ -1,0 +1,55 @@
+// lib/images/ubuntu_22_04_minimal_podman.ae — a LIGHTER guest than full
+// ubuntu-22.04, using Canonical's MINIMAL cloud image (~309MB vs ~695MB, 56%
+// smaller). Crucially it keeps systemd + netplan, so EVERY bit of our plumbing
+// (static-IP netplan, the link-up unit, the cold-path realizer) is a drop-in —
+// no rewrite. (vs Alpine, which is ~50MB but OpenRC/ifupdown and would need a
+// whole new realizer path + re-solving the static-IP/link-up we already nailed.)
+//
+//   import images.ubuntu_22_04_minimal_podman (ubuntu_22_04_minimal_podman)
+//   aeo_orchestration() {
+//       ubuntu_22_04_minimal_podman()
+//       system("x") {
+//           bhyve_vm("vm") { guest_image("ubuntu-22.04-minimal+podman") ... }
+//       }
+//   }
+//
+// Same WHAT/HOW/where split as the standard recipe: the logical name is
+// host-agnostic; the bhyve-only fields are realized on BSD, ignored by the
+// (future) Linux realizer.
+
+import compose (image_recipe, from, install, netplan_static, systemd_unit, realize_as)
+
+exports ( ubuntu_22_04_minimal_podman )
+
+// ---- bhyve-host bindings (override per BSD host) ---------------------------
+// Distinct golden from the standard recipe so the two bases don't collide.
+_BHYVE_STATIC_IP() -> string  { return "172.16.0.50/24" }
+_BHYVE_GATEWAY() -> string    { return "172.16.0.1" }
+_BHYVE_GOLDEN() -> string     { return "clone:aeo-base-min@golden" }
+
+// ---- the recipe: Ubuntu 22.04 MINIMAL + podman -----------------------------
+ubuntu_22_04_minimal_podman() {
+    image_recipe("ubuntu-22.04-minimal+podman") {
+        // portable on every host — the only line that differs from the
+        // standard recipe is this lighter base image.
+        from("https://cloud-images.ubuntu.com/minimal/releases/jammy/release/ubuntu-22.04-minimal-cloudimg-amd64.img")
+        install("podman")
+
+        // BHYVE-ONLY (the Linux/KVM realizer ignores these)
+        netplan_static(_BHYVE_STATIC_IP(), _BHYVE_GATEWAY())
+        systemd_unit("aeo-linkup", <<UNIT
+[Unit]
+Description=aeo: force the guest NIC up (netplan can leave it down under vm-bhyve)
+After=network-pre.target
+Before=network.target
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'for i in $(ls /sys/class/net | grep -v lo); do ip link set $i up; done'
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target
+UNIT
+        )
+        realize_as(_BHYVE_GOLDEN())
+    }
+}
