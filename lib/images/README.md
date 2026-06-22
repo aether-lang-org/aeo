@@ -16,16 +16,27 @@ aeo_orchestration() {
 Cold-provisioned each from its image; checked boot, network (static IP on the
 aeonat switch), and ssh reachability. Honest results — not guesses:
 
-| Recipe | Image | Boot | Network | SSH | Verdict |
-|---|---:|:---:|:---:|:---:|---|
-| **ubuntu_24_04_minimal_podman** | **251MB** | ✅ ~6s | ✅ netplan | ✅ | **BEST — full drop-in, reachable end-to-end. Recommended slim default.** |
-| ubuntu_22_04_minimal_podman | 294MB | ✅ ~6s | ✅ netplan | ❌ | works; cloud-init didn't seed ssh key (needs offline key injection) |
-| debian_12_podman | 333MB | ✅ ~18s | ✅ netplan* | ❌ | boots+nets (genericcloud ships netplan!); same ssh-seed gap; heavier |
-| alpine_3_20_podman | **194MB** | ✅ | ❌ | ❌ | smallest, but OpenRC/ifupdown — no netplan, never gets static IP. Needs a new realizer branch. Deferred. |
-| ubuntu_22_04_podman (standard) | 695MB | ✅ | ✅ | ✅ | the original full base; works fully (has a repaired golden) |
+```
+The slim guest recipe set (all in lib/images/, with measured status)
 
-\* debian-12 genericcloud unexpectedly ships `/etc/netplan`, so our static-IP
-netplan applied — the feared networkd gap didn't bite for networking.
+┌────────────────────────────────┬───────┬──────┬─────┬─────┬─────────────────────────────────────────────────────────┐
+│             Recipe             │ Image │ Boot │ Net │ SSH │                         Verdict                         │
+├────────────────────────────────┼───────┼──────┼─────┼─────┼─────────────────────────────────────────────────────────┤
+│ ubuntu_24_04_minimal_podman    │ 251MB │  ✅  │ ✅  │ ✅  │ BEST — full drop-in, reachable end-to-end               │
+├────────────────────────────────┼───────┼──────┼─────┼─────┼─────────────────────────────────────────────────────────┤
+│ ubuntu_22_04_minimal_podman    │ 294MB │  ✅  │ ✅  │ ❌  │ works; ssh-key seed gap                                 │
+├────────────────────────────────┼───────┼──────┼─────┼─────┼─────────────────────────────────────────────────────────┤
+│ debian_12_podman               │ 333MB │  ✅  │ ✅  │ ❌  │ boots+nets (ships netplan!); ssh gap                    │
+├────────────────────────────────┼───────┼──────┼─────┼─────┼─────────────────────────────────────────────────────────┤
+│ alpine_3_20_podman             │ 194MB │  ✅  │ ❌  │ ❌  │ smallest, but OpenRC → no static IP; needs new realizer │
+├────────────────────────────────┼───────┼──────┼─────┼─────┼─────────────────────────────────────────────────────────┤
+│ ubuntu_22_04_podman (standard) │ 695MB │  ✅  │ ✅  │ ✅  │ the original, fully working                             │
+└────────────────────────────────┴───────┴──────┴─────┴─────┴─────────────────────────────────────────────────────────┘
+```
+
+Notes: 24.04-minimal boots in ~6s, debian ~18s. debian-12 genericcloud
+unexpectedly ships `/etc/netplan`, so our static-IP netplan applied — the
+feared networkd gap didn't bite for networking.
 
 ### Takeaways
 - **ubuntu-24.04-minimal is the winner**: 64% smaller than standard jammy
