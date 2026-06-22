@@ -150,19 +150,25 @@ up(kind: string, res_name: string, image: string, cpus: int, mem: string, tap: s
 // vm-bhyve owns tap/disk/boot/networking; aeo orchestrates it like podman.
 // `vm` needs root, so it runs under sudo (operator pre-authorizes; see the
 // NOPASSWD sudoers note). Idempotent: existing+running VM is a no-op.
-bhyve_up(res_name: string, guest_image: string, cpus: int, mem: string, network: string, ssh_key: string) -> string {
+bhyve_up(res_name: string, guest_image: string, realize_target: string, cpus: int, mem: string, network: string, ssh_key: string) -> string {
     if _bhyve_running(res_name) == 1 {
         return ""
     }
-    // Provision if the VM doesn't exist yet. FAST PATH: if a prepared
-    // golden base (aeo-base@golden — podman + base images + agent already
-    // installed; made once by test/setup-base.sh) exists, CLONE it (ZFS
-    // copy-on-write, ~seconds, boots an already-warm guest — no cloud-init
-    // first-boot stall, no apt, no image pull). Else full-provision from
-    // the raw cloud image (the slow first-time path).
+    // Provision if the VM doesn't exist yet. FAST PATH: the image recipe's
+    // realize_as("clone:<snap>") names a prepared golden snapshot (the runner
+    // resolves it + passes it as realize_target). If that snapshot exists,
+    // CLONE it (ZFS copy-on-write, ~seconds, boots an already-warm guest — no
+    // cloud-init stall, no apt, no image pull). Else full-provision from the
+    // raw cloud image (the slow cold-cache path; the recipe's build steps are
+    // the declarative ancestor of that). realize_target "" falls back to the
+    // legacy aeo-base@golden default for back-compat.
     if _bhyve_exists(res_name) == 0 {
-        if _golden_exists() == 1 {
-            cerr = _bhyve_clone(res_name)
+        tgt = realize_target
+        if string_length(tgt) == 0 {
+            tgt = "aeo-base@golden"
+        }
+        if _snapshot_exists(tgt) == 1 {
+            cerr = _bhyve_clone_from(res_name, tgt)
             if cerr != "" {
                 return cerr
             }
@@ -376,15 +382,34 @@ _bhyve_exists(res_name: string) -> int {
 
 // 1 if a prepared golden base snapshot (aeo-base@golden) exists.
 _golden_exists() -> int {
+    return _snapshot_exists("aeo-base@golden")
+}
+
+// 1 if a given ZFS snapshot (e.g. "aeo-base@golden") exists. The recipe's
+// realize_as("clone:<snap>") target is checked here.
+_snapshot_exists(snap: string) -> int {
     av = list_new()
     list_add(av, "-c")
-    list_add(av, "sudo -n vm snapshot 2>/dev/null | grep -q 'aeo-base@golden' && echo yes || (sudo -n zfs list -t snapshot 2>/dev/null | grep -q 'aeo-base@golden' && echo yes)")
+    list_add(av, "sudo -n zfs list -t snapshot 2>/dev/null | grep -q ' ${snap}\\|/${snap}\\|^${snap}' && echo yes || (sudo -n vm snapshot 2>/dev/null | grep -q '${snap}' && echo yes)")
     out, status, err = run_capture("/bin/sh", av, null)
     list_free(av)
     if string_contains(out, "yes") == 1 {
         return 1
     }
     return 0
+}
+
+// Clone an arbitrary snapshot into res_name (the recipe-driven fast path).
+_bhyve_clone_from(res_name: string, snap: string) -> string {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "sudo -n vm clone ${snap} ${res_name}")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    if status != 0 {
+        return "aeo: 'vm clone ${snap} ${res_name}' failed: ${out}"
+    }
+    return ""
 }
 
 // Clone the golden base into res_name (fast copy-on-write) + start.

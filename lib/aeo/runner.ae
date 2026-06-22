@@ -18,7 +18,7 @@
 // AEO_CMD env (the front-door sets it): up (default) / down / status.
 
 import std.config
-import std.string (string_length, string_substring)
+import std.string (string_length, string_substring, string_index_of)
 import driver_linux
 import driver_bsd
 import driver_vm
@@ -125,6 +125,49 @@ _container_image(nm: string, engine_pref: string) -> string {
     return driver_linux.built_tag(nm)
 }
 
+// --- image realization (the recipe executor) -------------------------------
+// Given a VM's logical guest_image (e.g. "ubuntu-22.04+podman"), resolve its
+// image_recipe and return the FAST-PATH realize target — the snapshot to clone
+// if it exists, parsed from realize_as("clone:<snap>"). "" if no recipe / no
+// clone hint (then the driver full-provisions). The runner is the bridge: it
+// imports both compose (recipe getters) and driver_vm (realization).
+_realize_target(img: string) -> string {
+    spec = compose.get_img_realize(img)
+    // spec looks like "clone:aeo-base@golden"
+    if string_index_of(spec, "clone:") == 0 {
+        return string_substring(spec, 6, string_length(spec))
+    }
+    return ""
+}
+
+// The shell that BUILDS the image from its recipe when the realize target is
+// absent (fresh host / cold cache): fetch from(), provision, then install
+// packages + write the static netplan + install the systemd units inside the
+// guest, and finally snapshot it as the realize target so future clones are
+// fast. Returns "" if there's no recipe (driver falls back to plain provision).
+// NOTE: this returns the DECLARATIVE build plan as a newline-joined script the
+// driver runs; aeo's existing setup scripts are the imperative ancestor.
+_realize_build_steps(img: string) -> string {
+    frm = compose.get_img_from(img)
+    if string_length(frm) == 0 {
+        return ""
+    }
+    steps = "from=${frm}"
+    ins = compose.get_img_install(img)
+    if string_length(ins) > 0 {
+        steps = "${steps}\ninstall=${ins}"
+    }
+    np = compose.get_img_netplan(img)
+    if string_length(np) > 0 {
+        steps = "${steps}\nnetplan=${np}"
+    }
+    units = compose.get_img_units(img)
+    if string_length(units) > 0 {
+        steps = "${steps}\nunits=${units}"
+    }
+    return steps
+}
+
 // ---- driver dispatch by kind (exported; pure routing) ----
 driver_up(nm: string, k: string) -> string {
     if k == "docker" {
@@ -160,9 +203,13 @@ driver_up(nm: string, k: string) -> string {
         return driver_bsd.up(nm, compose.get_dataset(nm), "", compose.get_ip(nm), compose.get_command(nm))
     }
     if k == "bhyve" {
-        // bhyve provisions-if-absent then starts via vm-bhyve, from the
-        // guest declaration (image/network/ssh_key + sizing).
-        return driver_vm.bhyve_up(nm, compose.get_guest_image(nm), compose.get_cpus(nm), compose.get_memory(nm), compose.get_network(nm), compose.get_ssh_key(nm))
+        // bhyve provisions-if-absent then starts via vm-bhyve. The image is a
+        // logical name (e.g. "ubuntu-22.04+podman") realized per-host: if its
+        // image_recipe's realize_as("clone:<snap>") target exists, clone it
+        // (fast); else full-provision. The runner resolves the recipe (it
+        // bridges compose<->driver) and passes the clone target down.
+        gi = compose.get_guest_image(nm)
+        return driver_vm.bhyve_up(nm, gi, _realize_target(gi), compose.get_cpus(nm), compose.get_memory(nm), compose.get_network(nm), compose.get_ssh_key(nm))
     }
     if k == "kvm" {
         return driver_vm.up("kvm", nm, compose.get_image(nm), compose.get_cpus(nm), compose.get_memory(nm), compose.get_nic(nm))

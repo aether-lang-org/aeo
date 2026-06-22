@@ -1,0 +1,52 @@
+// recipe_realize — proves the image_recipe REALIZER end-to-end via `aeo up`.
+//
+// The system DSL uses the composable logical name guest_image(
+// "ubuntu-22.04+podman"); the image_recipe maps it (on this box) to the
+// prepared golden snapshot via realize_as("clone:aeo-base@golden"). On
+// `aeo up`, aeo: parses the name -> resolves the recipe -> finds the realize
+// target exists -> CLONES it (fast) -> boots. (On a cold host with no
+// snapshot, it would build from from/install/netplan_static/systemd_unit.)
+//
+//   AEO_HOME=$PWD aeo up examples/recipe_realize/module.ae
+
+import compose (system, bhyve_vm, container, image, cpus, memory, guest_image, network, ssh_key, expose)
+import compose (image_recipe, from, install, netplan_static, systemd_unit, realize_as)
+
+exports ( aeo_orchestration )
+
+aeo_orchestration() {
+    // The per-box recipe: what "ubuntu-22.04+podman" MEANS here. The fast path
+    // (realize_as clone) matches the golden we built on this box; the
+    // from/install/netplan/systemd are the from-scratch build (cold host).
+    image_recipe("ubuntu-22.04+podman") {
+        from("https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img")
+        install("podman")
+        netplan_static("172.16.0.50/24", "172.16.0.1")
+        systemd_unit("aeo-linkup", <<UNIT
+[Unit]
+After=network-pre.target
+[Service]
+Type=oneshot
+ExecStart=/sbin/ip link set enp0s6 up
+[Install]
+WantedBy=multi-user.target
+UNIT
+        )
+        realize_as("clone:aeo-base@golden")
+    }
+
+    system("recipe1") {
+        // The PORTABLE system declaration: just the logical image name.
+        vm = bhyve_vm("vm") {
+            cpus(2)
+            memory("2G")
+            guest_image("ubuntu-22.04+podman")
+            network("dhcp")
+            ssh_key("/home/paul/.ssh/id_rsa.pub")
+            app = container("app") {
+                image("docker.io/library/redis:alpine")
+                expose(6379)
+            }
+        }
+    }
+}
