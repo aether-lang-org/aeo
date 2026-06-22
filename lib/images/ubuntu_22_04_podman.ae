@@ -1,8 +1,9 @@
-// lib/images — REUSABLE image recipes, defined once and shared across
-// compositions and hosts. A composition imports a recipe and calls it to
-// register the image_recipe; then its VM just names the logical image:
+// lib/images/ubuntu_22_04_podman.ae — ONE reusable image recipe per file, the
+// filename naming the image it builds (add lib/images/<other_image>.ae for
+// more). Shared across compositions + hosts. A composition imports the recipe
+// and calls it to register the image_recipe; then its VM names the image:
 //
-//   import images (ubuntu_22_04_podman)
+//   import images.ubuntu_22_04_podman (ubuntu_22_04_podman)
 //   aeo_orchestration() {
 //       ubuntu_22_04_podman()                 // register the recipe (once)
 //       system("x") {

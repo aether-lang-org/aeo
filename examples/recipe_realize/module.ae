@@ -10,7 +10,7 @@
 //   AEO_HOME=$PWD aeo up examples/recipe_realize/module.ae
 
 import compose (system, bhyve_vm, container, image, cpus, memory, guest_image, network, ssh_key, expose)
-import images (ubuntu_22_04_podman)
+import images.ubuntu_22_04_podman (ubuntu_22_04_podman)
 
 exports ( aeo_orchestration )
 
