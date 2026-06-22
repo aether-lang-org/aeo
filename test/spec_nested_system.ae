@@ -27,15 +27,25 @@ import std.os (getenv, run_capture)
 import std.list
 
 // ---- the composition, exactly as an operator would write it ----
-// Both tiers are containers INSIDE the bhyve VM. db is a stock redis image;
-// app is built from an inline heredoc Dockerfile and uses db as a cache.
+// TWO bhyve VMs on the slim 24.04-minimal+podman base (251MB; the measured
+// best slim guest — see lib/images/README.md): db_vm holds a stock redis;
+// python_vm holds a /add service (readable entrypoint heredoc) that uses redis
+// as a cache, reaching it ACROSS VMs at db_vm's resolved address (REDIS_HOST),
+// under a deny-all egress/ingress whitelist. Each VM's hypervisor is confined
+// under its OWN Capsicum constraint set.
 declare() {
+    // The VMs name the slim logical image "ubuntu-24.04-minimal+podman" — 251MB
+    // (vs 695MB standard jammy), the MEASURED best slim base (boots+net+ssh all
+    // green, see lib/images/README.md). The image_recipe that realizes that
+    // name lives in lib/images/ubuntu_24_04_minimal_podman.ae and is registered
+    // at `aeo up` time (the deploy concern); this DATA-MODEL spec only needs the
+    // logical NAME, so it doesn't import the recipe.
     system("red222") {
         // PHASE 1: provision + first boot db_vm (the redis VM) UNCONSTRAINED.
         db_vm = bhyve_vm("db_vm") {
             cpus(2)
             memory("2G")
-            guest_image("ubuntu-22.04")
+            guest_image("ubuntu-24.04-minimal+podman")
             network("dhcp")
             ssh_key("/home/paul/.ssh/id_rsa.pub")
             db = container("db") {
@@ -60,13 +70,15 @@ declare() {
         // confine it with its OWN, DIFFERENT constraint set ("lock2": python_vm's
         // disk/tap/console).
         //
-        // NOTE (your two-VM split): app reaches redis at 127.0.0.1:6379, which
-        // is same-guest only — across db_vm/python_vm it would need db_vm's IP.
-        // depends(db) is a cross-VM edge here. Flagging, not silently changing.
+        // CROSS-VM (fixed): db lives in db_vm, so app reaches redis at db_vm's
+        // address — NOT 127.0.0.1. The app reads REDIS_HOST (aeo resolves the
+        // egress target "db_vm" to its IP at deploy time); the egress whitelist
+        // below pins the only outbound it's allowed. depends("db") is the
+        // cross-VM ordering edge.
         python_vm = bhyve_vm("python_vm") {
             cpus(2)
             memory("2G")
-            guest_image("ubuntu-22.04")
+            guest_image("ubuntu-24.04-minimal+podman")
             network("dhcp")
             ssh_key("/home/paul/.ssh/id_rsa.pub")
             app = container("app") {
@@ -75,9 +87,15 @@ declare() {
                 // escaping; COPY builds on every podman where a RUN heredoc
                 // doesn't). base() defaults to python:3-alpine.
                 entrypoint(<<PY
-                    import http.server as h, socket
+                    import http.server as h, socket, os
+                    # redis lives in db_vm (a SEPARATE VM), so reach it at
+                    # db_vm's address — aeo resolves the egress target "db_vm"
+                    # to an IP at deploy time and passes it as REDIS_HOST. NOT
+                    # 127.0.0.1 (that was same-guest only; the two-VM split broke
+                    # it). Falls back to localhost for a single-guest layout.
+                    RHOST = os.environ.get("REDIS_HOST", "127.0.0.1")
                     def rcmd(*a):
-                        s = socket.create_connection(("127.0.0.1", 6379), 1)
+                        s = socket.create_connection((RHOST, 6379), 1)
                         s.sendall(("*%d\r\n" % len(a) + "".join("$%d\r\n%s\r\n" % (len(x), x) for x in a)).encode())
                         r = s.recv(4096); s.close(); return r
                     class A(h.BaseHTTPRequestHandler):
@@ -131,9 +149,9 @@ main() {
             aeocha.it("resolves to two top-level VMs, each with its OWN confinement") callback {
                 want = <<TREE
                     system red222:
-                      bhyve db_vm [guest=ubuntu-22.04, cpus=2, mem=2G, confined: disk(/zroot/vm/db_vm/disk0.img)=rd,wr, net(tap0)=rd,wr, console(nmdm-db_vm)=rd,wr]
+                      bhyve db_vm [guest=ubuntu-24.04-minimal+podman, cpus=2, mem=2G, confined: disk(/zroot/vm/db_vm/disk0.img)=rd,wr, net(tap0)=rd,wr, console(nmdm-db_vm)=rd,wr]
                         container db [image=docker.io/library/redis:alpine, expose=6379]
-                      bhyve python_vm [guest=ubuntu-22.04, cpus=2, mem=2G, confined: disk(/zroot/vm/python_vm/disk0.img)=rd,wr, net(tap1)=rd,wr, console(nmdm-python_vm)=rd,wr, net{egress->db_vm:6379, ingress:8080; deny rest}]
+                      bhyve python_vm [guest=ubuntu-24.04-minimal+podman, cpus=2, mem=2G, confined: disk(/zroot/vm/python_vm/disk0.img)=rd,wr, net(tap1)=rd,wr, console(nmdm-python_vm)=rd,wr, net{egress->db_vm:6379, ingress:8080; deny rest}]
                         container app [entrypoint(docker.io/library/python:3-alpine), expose=8080] -> db
 TREE
                 aeocha.assert_str_eq(fw, describe_tree(), want, "resolved tree snapshot")
@@ -223,11 +241,4 @@ _redis_set(ip: string, key: string, val: string) {
     list_add(av, "podman exec db redis-cli SET ${key} ${val}")
     out, status, err = run_capture("/usr/bin/ssh", av, null)
     list_free(av)
-}
-
-_first5(s: string) -> string {
-    if string.length(s) < 5 {
-        return s
-    }
-    return string.substring(s, 0, 5)
 }
