@@ -10,30 +10,15 @@
 //   AEO_HOME=$PWD aeo up examples/recipe_realize/module.ae
 
 import compose (system, bhyve_vm, container, image, cpus, memory, guest_image, network, ssh_key, expose)
-import compose (image_recipe, from, install, netplan_static, systemd_unit, realize_as)
+import images (ubuntu_22_04_podman)
 
 exports ( aeo_orchestration )
 
 aeo_orchestration() {
-    // The per-box recipe: what "ubuntu-22.04+podman" MEANS here. The fast path
-    // (realize_as clone) matches the golden we built on this box; the
-    // from/install/netplan/systemd are the from-scratch build (cold host).
-    image_recipe("ubuntu-22.04+podman") {
-        from("https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img")
-        install("podman")
-        netplan_static("172.16.0.50/24", "172.16.0.1")
-        systemd_unit("aeo-linkup", <<UNIT
-[Unit]
-After=network-pre.target
-[Service]
-Type=oneshot
-ExecStart=/sbin/ip link set enp0s6 up
-[Install]
-WantedBy=multi-user.target
-UNIT
-        )
-        realize_as("clone:aeo-base@golden")
-    }
+    // The recipe now lives in the REUSABLE library lib/images — import it and
+    // call it to register "ubuntu-22.04+podman" (replaces the former inline
+    // image_recipe block; shared across compositions + hosts).
+    ubuntu_22_04_podman()
 
     system("recipe1") {
         // The PORTABLE system declaration: just the logical image name.

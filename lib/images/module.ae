@@ -1,0 +1,60 @@
+// lib/images — REUSABLE image recipes, defined once and shared across
+// compositions and hosts. A composition imports a recipe and calls it to
+// register the image_recipe; then its bhyve_vm just names the logical image:
+//
+//   import images (ubuntu_22_04_podman)
+//   aeo_orchestration() {
+//       ubuntu_22_04_podman()                 // register the recipe (once)
+//       system("x") {
+//           bhyve_vm("vm") { guest_image("ubuntu-22.04+podman") ... }
+//       }
+//   }
+//
+// WHAT/HOW split (see the image_recipe docs in lib/compose):
+//   - The PORTABLE body — from()/install()/systemd_unit() — is the same on
+//     every host and is the reusable, checked-in part.
+//   - The HOST-SPECIFIC bits — the static IP (netplan_static) and the warm
+//     snapshot (realize_as clone target) — are factored into the `_HOST_*`
+//     constants below. Today they hold this box's values; a second host
+//     overrides these (the one place to change for portability). Keeping them
+//     here, clearly marked, is the pragmatic single-box-now / multi-host-later
+//     seam — the recipe BODY never changes per host, only these two lines.
+
+import compose (image_recipe, from, install, netplan_static, systemd_unit, realize_as)
+
+exports ( ubuntu_22_04_podman )
+
+// ---- host-specific bindings (override per host) ----------------------------
+// The only two values that differ per box. On a fresh/Intel host, change these
+// (or, later, have aeo resolve them from host state — the NAT switch subnet +
+// a derived snapshot name).
+_HOST_STATIC_IP() -> string  { return "172.16.0.50/24" }
+_HOST_GATEWAY() -> string    { return "172.16.0.1" }
+_HOST_GOLDEN() -> string     { return "clone:aeo-base@golden" }
+
+// ---- the recipe: Ubuntu 22.04 + podman, link-up unit, static IP ------------
+// Realizes "ubuntu-22.04+podman": Ubuntu jammy cloud image + podman, a
+// systemd unit forcing the NIC up (netplan renders enp0s6 but can leave it
+// down under vm-bhyve), and a static IP. Fast path: clone the golden if it
+// exists; else build from these steps.
+ubuntu_22_04_podman() {
+    image_recipe("ubuntu-22.04+podman") {
+        from("https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img")
+        install("podman")
+        netplan_static(_HOST_STATIC_IP(), _HOST_GATEWAY())
+        systemd_unit("aeo-linkup", <<UNIT
+[Unit]
+Description=aeo: force the guest NIC up (netplan can leave it down under vm-bhyve)
+After=network-pre.target
+Before=network.target
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'for i in $(ls /sys/class/net | grep -v lo); do ip link set $i up; done'
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target
+UNIT
+        )
+        realize_as(_HOST_GOLDEN())
+    }
+}
