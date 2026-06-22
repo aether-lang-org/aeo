@@ -1,6 +1,6 @@
 // lib/images — REUSABLE image recipes, defined once and shared across
 // compositions and hosts. A composition imports a recipe and calls it to
-// register the image_recipe; then its bhyve_vm just names the logical image:
+// register the image_recipe; then its VM just names the logical image:
 //
 //   import images (ubuntu_22_04_podman)
 //   aeo_orchestration() {
@@ -10,38 +10,51 @@
 //       }
 //   }
 //
-// WHAT/HOW split (see the image_recipe docs in lib/compose):
-//   - The PORTABLE body — from()/install()/systemd_unit() — is the same on
-//     every host and is the reusable, checked-in part.
-//   - The HOST-SPECIFIC bits — the static IP (netplan_static) and the warm
-//     snapshot (realize_as clone target) — are factored into the `_HOST_*`
-//     constants below. Today they hold this box's values; a second host
-//     overrides these (the one place to change for portability). Keeping them
-//     here, clearly marked, is the pragmatic single-box-now / multi-host-later
-//     seam — the recipe BODY never changes per host, only these two lines.
+// PORTABILITY MODEL (important — this is the what/how/where split):
+//   - The logical image NAME ("ubuntu-22.04+podman") is host-AGNOSTIC. The
+//     system DSL author must NOT encode the substrate in it (no "+on_bsd" /
+//     "+kvm" — that re-couples the declaration to the host, which is aeo's
+//     job, not the author's). The SAME name realizes differently per host.
+//   - The recipe is declarative DATA. Some fields only make sense on the
+//     bhyve/FreeBSD path (marked BHYVE-ONLY below). The RECIPE does not branch
+//     on the host itself — the REALIZER does: the bhyve driver reads the
+//     bhyve-only fields, the (future) Linux/KVM driver ignores them and uses a
+//     qcow2/podman base instead. So a Linux host silently skips the bhyve
+//     plumbing without the image name or the system DSL changing at all.
+//
+// BHYVE-ONLY fields, and why:
+//   - systemd_unit("aeo-linkup"): works around netplan leaving the NIC DOWN
+//     *under vm-bhyve*. KVM brings the link up natively, so the Linux realizer
+//     ignores this — harmless to leave declared.
+//   - netplan_static(...): the static-IP the bhyve NAT path needs (the bridge
+//     DHCP is unreliable on the BSD host). Linux/KVM uses normal DHCP.
+//   - realize_as("clone:aeo-base@golden"): a ZFS snapshot (FreeBSD/bhyve
+//     storage). The Linux equivalent is a qcow2 backing file / podman base —
+//     the Linux realizer maps the logical name to that instead.
 
 import compose (image_recipe, from, install, netplan_static, systemd_unit, realize_as)
 
 exports ( ubuntu_22_04_podman )
 
-// ---- host-specific bindings (override per host) ----------------------------
-// The only two values that differ per box. On a fresh/Intel host, change these
+// ---- bhyve-host bindings (override per BSD host) ---------------------------
+// Only consumed on the bhyve path. On a fresh/Intel BSD host, change these
 // (or, later, have aeo resolve them from host state — the NAT switch subnet +
 // a derived snapshot name).
-_HOST_STATIC_IP() -> string  { return "172.16.0.50/24" }
-_HOST_GATEWAY() -> string    { return "172.16.0.1" }
-_HOST_GOLDEN() -> string     { return "clone:aeo-base@golden" }
+_BHYVE_STATIC_IP() -> string  { return "172.16.0.50/24" }
+_BHYVE_GATEWAY() -> string    { return "172.16.0.1" }
+_BHYVE_GOLDEN() -> string     { return "clone:aeo-base@golden" }
 
-// ---- the recipe: Ubuntu 22.04 + podman, link-up unit, static IP ------------
-// Realizes "ubuntu-22.04+podman": Ubuntu jammy cloud image + podman, a
-// systemd unit forcing the NIC up (netplan renders enp0s6 but can leave it
-// down under vm-bhyve), and a static IP. Fast path: clone the golden if it
-// exists; else build from these steps.
+// ---- the recipe: Ubuntu 22.04 + podman -------------------------------------
+// Portable name + body; the bhyve-only fields are realized on BSD and ignored
+// by the Linux realizer (see the portability model above).
 ubuntu_22_04_podman() {
     image_recipe("ubuntu-22.04+podman") {
+        // portable on every host
         from("https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img")
         install("podman")
-        netplan_static(_HOST_STATIC_IP(), _HOST_GATEWAY())
+
+        // BHYVE-ONLY (the Linux/KVM realizer ignores these)
+        netplan_static(_BHYVE_STATIC_IP(), _BHYVE_GATEWAY())
         systemd_unit("aeo-linkup", <<UNIT
 [Unit]
 Description=aeo: force the guest NIC up (netplan can leave it down under vm-bhyve)
@@ -55,6 +68,6 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 UNIT
         )
-        realize_as(_HOST_GOLDEN())
+        realize_as(_BHYVE_GOLDEN())
     }
 }
