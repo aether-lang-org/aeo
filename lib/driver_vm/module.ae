@@ -632,6 +632,16 @@ _image_url(idin: string) -> string {
     if id == "ubuntu-24.04" {
         return "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img"
     }
+    if id == "ubuntu-24.04-minimal" {
+        // 251MB — the smallest systemd/netplan option (even lighter than
+        // 22.04-minimal's 294MB).
+        return "https://cloud-images.ubuntu.com/minimal/releases/noble/release/ubuntu-24.04-minimal-cloudimg-amd64.img"
+    }
+    if id == "alpine-3.20" {
+        // 194MB — smallest overall, but OpenRC/ifupdown (not systemd/netplan),
+        // so the recipe's systemd_unit/netplan fields don't apply on it.
+        return "https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/cloud/nocloud_alpine-3.20.3-x86_64-uefi-cloudinit-r0.qcow2"
+    }
     if id == "debian-12" {
         return "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2"
     }

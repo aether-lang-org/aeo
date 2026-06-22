@@ -1,0 +1,28 @@
+// lib/images/alpine_3_20_podman.ae — Alpine 3.20 (~194MB, the SMALLEST). The
+// catch: Alpine is OpenRC + ifupdown + musl, NOT systemd + netplan. So the
+// systemd_unit()/netplan_static() fields here DO NOT APPLY as-is — Alpine needs
+// an OpenRC realizer branch (rc-update, /etc/network/interfaces) that does not
+// exist yet. This recipe is a PLACEHOLDER that records the intent + base image;
+// realizing it needs new driver support. Smallest possible, hardest to wire.
+//
+//   import images.alpine_3_20_podman (alpine_3_20_podman)
+//
+// HOW WELL IT WORKS (measured): see the status comment at the bottom.
+
+import compose (image_recipe, from, install, realize_as)
+
+exports ( alpine_3_20_podman )
+
+_BHYVE_GOLDEN() -> string  { return "clone:aeo-base-alpine@golden" }
+
+alpine_3_20_podman() {
+    image_recipe("alpine-3.20+podman") {
+        from("https://dl-cdn.alpinelinux.org/alpine/v3.20/releases/cloud/nocloud_alpine-3.20.3-x86_64-uefi-cloudinit-r0.qcow2")
+        install("podman")
+        // NOTE: deliberately NO netplan_static/systemd_unit — those are
+        // systemd-isms. Alpine needs OpenRC equivalents the realizer lacks.
+        realize_as(_BHYVE_GOLDEN())
+    }
+}
+
+// STATUS (measured): <pending on-box boot/network test>

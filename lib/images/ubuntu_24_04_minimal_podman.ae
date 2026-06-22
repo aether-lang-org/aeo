@@ -1,0 +1,43 @@
+// lib/images/ubuntu_24_04_minimal_podman.ae — the SMALLEST systemd/netplan
+// guest: Ubuntu 24.04 MINIMAL cloud image (~251MB, vs 294MB for 22.04-minimal
+// and 695MB for standard jammy). Same systemd + netplan as our other Ubuntu
+// recipes, so all the bhyve plumbing (static-IP netplan, link-up unit, cold
+// path) is a drop-in. Newest LTS.
+//
+//   import images.ubuntu_24_04_minimal_podman (ubuntu_24_04_minimal_podman)
+//
+// HOW WELL IT WORKS (measured on the GhostBSD box): see the status comment at
+// the bottom of this file — filled in from a real boot/network test, not a
+// guess.
+
+import compose (image_recipe, from, install, netplan_static, systemd_unit, realize_as)
+
+exports ( ubuntu_24_04_minimal_podman )
+
+_BHYVE_STATIC_IP() -> string  { return "172.16.0.50/24" }
+_BHYVE_GATEWAY() -> string    { return "172.16.0.1" }
+_BHYVE_GOLDEN() -> string     { return "clone:aeo-base-noble-min@golden" }
+
+ubuntu_24_04_minimal_podman() {
+    image_recipe("ubuntu-24.04-minimal+podman") {
+        from("https://cloud-images.ubuntu.com/minimal/releases/noble/release/ubuntu-24.04-minimal-cloudimg-amd64.img")
+        install("podman")
+        netplan_static(_BHYVE_STATIC_IP(), _BHYVE_GATEWAY())
+        systemd_unit("aeo-linkup", <<UNIT
+[Unit]
+Description=aeo: force the guest NIC up (netplan can leave it down under vm-bhyve)
+After=network-pre.target
+Before=network.target
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'for i in $(ls /sys/class/net | grep -v lo); do ip link set $i up; done'
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target
+UNIT
+        )
+        realize_as(_BHYVE_GOLDEN())
+    }
+}
+
+// STATUS (measured): <pending on-box boot/network test>
