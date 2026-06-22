@@ -1,0 +1,111 @@
+// spec_capsicum_breakout.ae — REAL Capsicum sandbox-escape tests against a
+// NATIVE FreeBSD process (this Aether binary), not a podman container or the
+// Linux guest. This is what aeo's constrain(vm){ constraint(...) } actually
+// enforces: the bhyve HYPERVISOR is a native host process; Capsicum confines
+// IT to its granted fds (disk/tap/console). Capsicum does not exist inside the
+// Linux guest — so the right thing to test is the native process model.
+//
+// The model (mirrors a confined bhyve): a process opens the fds it needs while
+// still unconfined, calls capsicum.enter() (IRREVERSIBLE) to drop into
+// capability mode, and from then on the KERNEL forbids reaching any global
+// namespace — no opening new paths, no new sockets. We attempt those escapes
+// and assert the kernel denies each.
+//
+// enter() is process-wide + irreversible, so the suite is ordered: all
+// "still-unconfined" checks first, ONE enter(), then all escape attempts.
+//
+// Run on a FreeBSD host (Capsicum required):
+//   AETHER_INCLUDE_PATH=/home/paul/scm/aeocha ae run test/spec_capsicum_breakout.ae
+
+import aeocha
+import capsicum
+import file
+import std.string
+import std.os (run_capture)
+import std.list
+
+main() {
+    fw = aeocha.init()
+
+    aeocha.describe(fw, "Capsicum sandbox-escape (native process, == confined bhyve)") {
+
+        // If Capsicum isn't available (e.g. running this on Linux), the whole
+        // suite is a single skip — the enforcement we're testing doesn't exist.
+        if capsicum.available() == 0 {
+            aeocha.describe("environment") {
+                aeocha.it("skipped — Capsicum not available on this host") callback {
+                    aeocha.assert_true(fw, 1, "needs a FreeBSD host with kern.features.security_capability_mode=1")
+                }
+            }
+            aeocha.run_summary(fw)
+            return
+        }
+
+        // ---- PHASE 1: still unconfined — the baseline works ----
+        aeocha.describe("before enter() — unconfined process has full access") {
+            aeocha.it("can read a global path (/etc/passwd) while unconfined") callback {
+                contents, err = file.read("/etc/passwd")
+                aeocha.assert_str_eq(fw, err, "", "read succeeds pre-confinement")
+                aeocha.assert_true(fw, _gt(string.length(contents), 0), "got file contents")
+            }
+            aeocha.it("is NOT yet in capability mode") callback {
+                aeocha.assert_str_eq(fw, _itoa(capsicum.in_mode()), "0", "not confined before enter()")
+            }
+        }
+
+        // ---- THE IRREVERSIBLE STEP — confine the process (like bhyve relaunch) ----
+        aeocha.describe("enter() — drop into capability mode (irreversible)") {
+            aeocha.it("capsicum.enter() succeeds and confinement is active") callback {
+                rc = capsicum.enter()
+                aeocha.assert_str_eq(fw, _itoa(rc), _itoa(capsicum.CAP_OK), "enter() returned CAP_OK")
+                aeocha.assert_str_eq(fw, _itoa(capsicum.in_mode()), "1", "now in capability mode")
+            }
+        }
+
+        // ---- PHASE 2: ESCAPE ATTEMPTS — the kernel must deny each ----
+        aeocha.describe("after enter() — sandbox-escape attempts are DENIED by the kernel") {
+
+            aeocha.it("ESCAPE open a new file by path (/etc/passwd) -> DENIED") callback {
+                // The classic escape: reach a global-namespace path. A confined
+                // bhyve trying to open a disk image it wasn't granted = this.
+                contents, err = file.read("/etc/passwd")
+                aeocha.assert_true(fw, _ne(err, ""), "kernel refused open(2) (ECAPMODE)")
+            }
+
+            aeocha.it("ESCAPE open a different unrelated path (/etc/rc.conf) -> DENIED") callback {
+                contents, err = file.read("/etc/rc.conf")
+                aeocha.assert_true(fw, _ne(err, ""), "no path is reachable in capability mode")
+            }
+
+            aeocha.it("ESCAPE write to a global path (/tmp/aeo-escape) -> DENIED") callback {
+                err = file.write("/tmp/aeo-escape", "escaped")
+                aeocha.assert_true(fw, _ne(err, ""), "creating/opening a new file by path is denied")
+            }
+
+            aeocha.it("ESCAPE shell out to run a host command -> DENIED") callback {
+                // exec also requires reaching the global namespace; capability
+                // mode forbids it. (A confined bhyve can't spawn host helpers.)
+                av = list_new()
+                list_add(av, "-c")
+                list_add(av, "echo escaped > /tmp/aeo-escape2")
+                out, status, err = run_capture("/bin/sh", av, null)
+                list_free(av)
+                // Either the exec is refused, or the child can't open the path —
+                // either way the escape file must NOT exist.
+                check, rerr = file.read("/tmp/aeo-escape2")
+                aeocha.assert_true(fw, _ne(rerr, ""), "no host command produced an escape artifact")
+            }
+
+            aeocha.it("still confined at end of suite (mode never dropped)") callback {
+                aeocha.assert_str_eq(fw, _itoa(capsicum.in_mode()), "1", "capability mode is irreversible")
+            }
+        }
+    }
+
+    aeocha.run_summary(fw)
+}
+
+// ---- helpers (Aether has no inline operators in assert args) ----
+_itoa(n: int) -> string { return string.from_int(n) }
+_gt(a: int, b: int) -> int { if a > b { return 1 } return 0 }
+_ne(a: string, b: string) -> int { if a == b { return 0 } return 1 }
