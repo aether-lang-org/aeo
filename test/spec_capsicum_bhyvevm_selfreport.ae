@@ -1,0 +1,83 @@
+// spec_capsicum_bhyvevm_selfreport.ae — Capsicum self-report from inside a real
+// FreeBSD BHYVE-VM (the step up from the jail). This is the literal target:
+// "a process INSIDE a bhyve-vm reports its own confinement back to aeocha."
+//
+// A C probe compiled + run INSIDE a freebsd_vm{} guest opens its allowed
+// channel (stdout, inherited — survives cap_enter; the host captures it over
+// the ssh pipe, since pf blocks arbitrary aeonat->host ports), cap_enter()s,
+// attempts each escape class, and reports BLOCKED/ESCAPED. The confined GUEST
+// process proves its OWN confinement — Capsicum is available IN the FreeBSD
+// guest (a Linux guest can't do this; that's why freebsd_vm exists).
+//
+// Requires the freebsd_vm guest up + ssh-reachable (test/capharness_freebsd.py
+// does compile+run+capture). Run on the FreeBSD host:
+//   AETHER_INCLUDE_PATH=~/aeocha ae run test/spec_capsicum_bhyvevm_selfreport.ae
+
+import aeocha
+import std.string
+import std.os (run_capture)
+import std.list
+import std.config
+
+main() {
+    fw = aeocha.init()
+
+    aeocha.describe(fw, "Capsicum self-report from INSIDE a FreeBSD bhyve-VM") {
+
+        config.put("vm.reports", _run_harness())
+
+        aeocha.describe("the guest process reported back over its allowed channel") {
+            aeocha.it("got reports (the confined GUEST delivered them from inside the VM)") callback {
+                aeocha.assert_true(fw, _r("REPORT "), "self-report received from inside the bhyve-VM")
+            }
+            aeocha.it("the guest process entered Capsicum capability mode") callback {
+                aeocha.assert_true(fw, _r("IN_CAPMODE 1"), "cap_enter() inside the FreeBSD guest")
+            }
+        }
+
+        aeocha.describe("every escape class BLOCKED inside the VM") {
+            aeocha.it("fs-read-breakout BLOCKED") callback {
+                aeocha.assert_true(fw, _r("fs-read BLOCKED"), "open global path -> denied")
+            }
+            aeocha.it("fs-write-breakout BLOCKED") callback {
+                aeocha.assert_true(fw, _r("fs-write BLOCKED"), "create file -> denied")
+            }
+            aeocha.it("tcpip-egress-breakout BLOCKED") callback {
+                aeocha.assert_true(fw, _r("egress-connect BLOCKED"), "connect out -> denied")
+            }
+            aeocha.it("tcpip-ingress-breakout BLOCKED") callback {
+                aeocha.assert_true(fw, _r("ingress-bind BLOCKED"), "bind -> denied")
+            }
+            aeocha.it("NOTHING escaped") callback {
+                aeocha.assert_true(fw, _absent_r("ESCAPED"), "no op slipped past confinement")
+            }
+        }
+
+        aeocha.describe("allowed channel is the controlled exception") {
+            aeocha.it("the report channel survived cap_enter (deny-except-this)") callback {
+                aeocha.assert_true(fw, _r("ALLOWED-CHANNEL still-open OK"), "inherited fd kept working")
+            }
+        }
+    }
+
+    aeocha.run_summary(fw)
+}
+
+_run_harness() -> string {
+    av = list_new()
+    list_add(av, "/home/paul/aeo/test/capharness_freebsd.py")
+    out, status, err = run_capture("/usr/local/bin/python3", av, null)
+    list_free(av)
+    if string.length(out) == 0 {
+        return "HARNESS_UNAVAILABLE ${err}"
+    }
+    return out
+}
+_r(needle: string) -> int {
+    if string.contains(config.get("vm.reports"), needle) == 1 { return 1 }
+    return 0
+}
+_absent_r(needle: string) -> int {
+    if string.contains(config.get("vm.reports"), needle) == 1 { return 0 }
+    return 1
+}
