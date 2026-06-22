@@ -1,0 +1,86 @@
+// spec_containment_linux_vm.ae — the principles-of-containment, demonstrated by
+// a NAIVE process inside a Linux bhyve-VM (paulhammant.com/.../principles-of-
+// containment). The contained does NOT confine itself and does not know it is
+// contained — it just ATTEMPTS to reach host-side things and DISCOVERS the VM
+// boundary by what fails. It reports back over the ONE channel the container
+// configured (the ssh pipe). aeocha checks what-was-gotten vs expected.
+//
+// This is the Linux-guest counterpart to the FreeBSD Capsicum specs. Capsicum
+// is FreeBSD-only, so a Linux guest can't self-confine with it — but it doesn't
+// need to: the bhyve VM BOUNDARY contains it regardless of guest OS. The probe
+// proves the implicit sandbox: host bhyve binary / host files / host processes
+// unreachable; an UN-configured host port unreachable; the configured channel
+// (ssh:22) reachable.
+//
+//   AETHER_INCLUDE_PATH=~/aeocha ae run test/spec_containment_linux_vm.ae
+//   (needs the Linux guest up + ssh-reachable; harness does run+capture.)
+
+import aeocha
+import std.string
+import std.os (run_capture)
+import std.list
+import std.config
+
+main() {
+    fw = aeocha.init()
+
+    aeocha.describe(fw, "containment of a NAIVE process inside a Linux bhyve-VM") {
+
+        config.put("c.reports", _run_harness())
+
+        aeocha.describe("the contained reported back over the configured channel") {
+            aeocha.it("it is a Linux guest, and it reported") callback {
+                aeocha.assert_true(fw, _r("GUEST uname=Linux"), "naive Linux process ran inside the VM")
+                aeocha.assert_true(fw, _r("CONFIGURED-CHANNEL ok"), "reported over the one channel the container allowed")
+            }
+        }
+
+        aeocha.describe("the VM boundary contains it (discovered by attempts, not self-imposed)") {
+            aeocha.it("cannot reach the host's bhyve binary") callback {
+                aeocha.assert_true(fw, _r("host-bhyve-binary CONTAINED"), "host file outside the VM is unreachable")
+            }
+            aeocha.it("cannot reach host-only (FreeBSD) files") callback {
+                aeocha.assert_true(fw, _r("host-freebsd-passwd CONTAINED"), "host /etc/master.passwd not present in guest")
+            }
+            aeocha.it("cannot see the host's processes (only its own)") callback {
+                aeocha.assert_true(fw, _r("host-bhyve-process CONTAINED"), "host process table invisible to the guest")
+            }
+        }
+
+        aeocha.describe("'cannot reach the container unless it configured you to'") {
+            aeocha.it("an UN-configured host port is unreachable") callback {
+                aeocha.assert_true(fw, _r("host-unconfigured-port-8911 CONTAINED"),
+                    "8911 unreachable BECAUSE the container did not open it")
+            }
+            aeocha.it("the CONFIGURED host channel IS reachable") callback {
+                aeocha.assert_true(fw, _r("host-configured-port-22 REACHED"),
+                    "ssh:22 reachable because the container configured it")
+            }
+            aeocha.it("nothing host-side was REACHED that shouldn't be") callback {
+                aeocha.assert_true(fw, _absent_r("host-bhyve-binary REACHED"), "no host-file escape")
+                aeocha.assert_true(fw, _absent_r("host-unconfigured-port-8911 REACHED"), "no un-configured-port escape")
+            }
+        }
+    }
+
+    aeocha.run_summary(fw)
+}
+
+_run_harness() -> string {
+    av = list_new()
+    list_add(av, "/home/paul/aeo/test/containment_harness_linux.py")
+    out, status, err = run_capture("/usr/local/bin/python3", av, null)
+    list_free(av)
+    if string.length(out) == 0 {
+        return "HARNESS_UNAVAILABLE ${err}"
+    }
+    return out
+}
+_r(needle: string) -> int {
+    if string.contains(config.get("c.reports"), needle) == 1 { return 1 }
+    return 0
+}
+_absent_r(needle: string) -> int {
+    if string.contains(config.get("c.reports"), needle) == 1 { return 0 }
+    return 1
+}
