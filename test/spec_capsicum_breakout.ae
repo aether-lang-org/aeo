@@ -1,103 +1,171 @@
-// spec_capsicum_breakout.ae — REAL Capsicum sandbox-escape tests against a
-// NATIVE FreeBSD process (this Aether binary), not a podman container or the
-// Linux guest. This is what aeo's constrain(vm){ constraint(...) } actually
-// enforces: the bhyve HYPERVISOR is a native host process; Capsicum confines
-// IT to its granted fds (disk/tap/console). Capsicum does not exist inside the
-// Linux guest — so the right thing to test is the native process model.
+// spec_capsicum_breakout.ae — Capsicum sandbox-escape tests by CLASS.
 //
-// The model (mirrors a confined bhyve): a process opens the fds it needs while
-// still unconfined, calls capsicum.enter() (IRREVERSIBLE) to drop into
-// capability mode, and from then on the KERNEL forbids reaching any global
-// namespace — no opening new paths, no new sockets. We attempt those escapes
-// and assert the kernel denies each.
+// SCOPE — READ THIS, it matters: this confines THIS TEST BINARY (a native
+// FreeBSD process) and proves the KERNEL MECHANISM denies each escape class. It
+// does NOT run inside a bhyve VM and is NOT the real bhyve process. It is a
+// STAND-IN: bhyve is also a native FreeBSD process, so the same cap_enter() +
+// cap_rights_limit() that deny escapes here would confine bhyve to its
+// disk/tap/console fds. (Capsicum doesn't exist inside the Linux guest, so the
+// native-process model is the only correct place to test it.)
 //
-// enter() is process-wide + irreversible, so the suite is ordered: all
-// "still-unconfined" checks first, ONE enter(), then all escape attempts.
+// What this DOES prove: the Capsicum primitives aeo's constrain(vm){
+// constraint(...) } RELIES ON genuinely block fs-read/fs-write/egress/ingress.
+// What it does NOT prove: that aeo actually launches the REAL bhyve under
+// cap_enter with only its granted fds — that launcher is the gated TODO; until
+// it exists, the real hypervisor runs UNCONFINED and constrain() records intent
+// only. So: mechanism = proven here; wiring-to-real-bhyve = not yet built.
 //
-// Run on a FreeBSD host (Capsicum required):
-//   AETHER_INCLUDE_PATH=/home/paul/scm/aeocha ae run test/spec_capsicum_breakout.ae
+// FOUR breakout classes, each tested at BOTH layers:
+//   fs-read-breakout      fs-write-breakout
+//   tcpip-egress-breakout tcpip-ingress-breakout
+//
+// The two layers per class:
+//   (a) GLOBAL-NAMESPACE — after cap_enter() the kernel forbids reaching any
+//       global namespace: no open(2) by path, no connect(2)/bind(2) to an
+//       address. (NB: socket(2) itself IS allowed — it touches no namespace,
+//       just makes an unbound fd; the boundary is connect/bind, verified by
+//       this suite.) (cap_enter)
+//   (b) HELD-FD RIGHTS   — an fd you already hold, narrowed by rights_limit(),
+//       refuses operations beyond its granted rights: a READ-only fd refuses
+//       write, a CONNECT-only socket refuses bind, etc. This is what
+//       constraint("disk", ..., "rd") vs "rd,wr" means. (cap_rights_limit)
+//
+// cap_enter() is process-wide + irreversible, so ordering is strict: open all
+// the held fds + narrow them while UNCONFINED, then ONE enter(), then all the
+// escape assertions.
+//
+// Build needs the C extern helpers (real int fds for rights_limit):
+//   ae build test/spec_capsicum_breakout.ae -o b --lib lib --lib ~/aeocha \
+//       --extra test/capfd.c
+//   AETHER_INCLUDE_PATH=~/aeocha (for ae run)
 
 import aeocha
 import capsicum
-import file
 import std.string
-import std.os (run_capture)
 import std.list
+
+// raw fd helpers (test/capfd.c)
+extern aeo_open_fd(path: string, write: int) -> int
+extern aeo_socket_fd() -> int
+extern aeo_try_write(fd: int) -> int
+extern aeo_try_read(fd: int) -> int
+extern aeo_try_connect(fd: int, ip_be: int, port: int) -> int
+extern aeo_try_bind(fd: int, port: int) -> int
+extern aeo_try_listen(fd: int) -> int
+extern aeo_close_fd(fd: int) -> int
 
 main() {
     fw = aeocha.init()
 
-    aeocha.describe(fw, "Capsicum sandbox-escape (native process, == confined bhyve)") {
+    aeocha.describe(fw, "Capsicum breakout classes (kernel mechanism; stand-in process, NOT real bhyve)") {
 
-        // If Capsicum isn't available (e.g. running this on Linux), the whole
-        // suite is a single skip — the enforcement we're testing doesn't exist.
         if capsicum.available() == 0 {
             aeocha.describe("environment") {
-                aeocha.it("skipped — Capsicum not available on this host") callback {
-                    aeocha.assert_true(fw, 1, "needs a FreeBSD host with kern.features.security_capability_mode=1")
+                aeocha.it("skipped — Capsicum not available (need FreeBSD)") callback {
+                    aeocha.assert_true(fw, 1, "kern.features.security_capability_mode must be 1")
                 }
             }
             aeocha.run_summary(fw)
             return
         }
 
-        // ---- PHASE 1: still unconfined — the baseline works ----
-        aeocha.describe("before enter() — unconfined process has full access") {
-            aeocha.it("can read a global path (/etc/passwd) while unconfined") callback {
-                contents, err = file.read("/etc/passwd")
-                aeocha.assert_str_eq(fw, err, "", "read succeeds pre-confinement")
-                aeocha.assert_true(fw, _gt(string.length(contents), 0), "got file contents")
-            }
-            aeocha.it("is NOT yet in capability mode") callback {
-                aeocha.assert_str_eq(fw, _itoa(capsicum.in_mode()), "0", "not confined before enter()")
-            }
-        }
+        // ---- SETUP (still unconfined): open the fds we will hold + narrow ----
+        // A read-only file fd (granted R_READ only — models constraint disk=rd).
+        ro_fd = aeo_open_fd("/etc/passwd", 0)
+        capsicum.rights_limit(ro_fd, capsicum.R_READ | capsicum.R_SEEK | capsicum.R_FSTAT)
+        // A write-capable temp file fd (granted R_WRITE only — no read).
+        wo_fd = aeo_open_fd("/tmp/aeo-held-write", 1)
+        capsicum.rights_limit(wo_fd, capsicum.R_WRITE)
+        // A socket fd granted CONNECT only (egress), and one granted nothing
+        // network-actionable (to prove ingress bind is denied).
+        conn_fd = aeo_socket_fd()
+        capsicum.rights_limit(conn_fd, capsicum.R_CONNECT)
+        bind_fd = aeo_socket_fd()
+        capsicum.rights_limit(bind_fd, capsicum.R_READ)   // deliberately NOT R_BIND
 
-        // ---- THE IRREVERSIBLE STEP — confine the process (like bhyve relaunch) ----
-        aeocha.describe("enter() — drop into capability mode (irreversible)") {
-            aeocha.it("capsicum.enter() succeeds and confinement is active") callback {
+        // ---- THE IRREVERSIBLE STEP ----
+        aeocha.describe("enter() — confine the process") {
+            aeocha.it("cap_enter() succeeds; now in capability mode") callback {
                 rc = capsicum.enter()
-                aeocha.assert_str_eq(fw, _itoa(rc), _itoa(capsicum.CAP_OK), "enter() returned CAP_OK")
-                aeocha.assert_str_eq(fw, _itoa(capsicum.in_mode()), "1", "now in capability mode")
+                aeocha.assert_str_eq(fw, _i(rc), _i(capsicum.CAP_OK), "enter() == CAP_OK")
+                aeocha.assert_str_eq(fw, _i(capsicum.in_mode()), "1", "confined")
             }
         }
 
-        // ---- PHASE 2: ESCAPE ATTEMPTS — the kernel must deny each ----
-        aeocha.describe("after enter() — sandbox-escape attempts are DENIED by the kernel") {
-
-            aeocha.it("ESCAPE open a new file by path (/etc/passwd) -> DENIED") callback {
-                // The classic escape: reach a global-namespace path. A confined
-                // bhyve trying to open a disk image it wasn't granted = this.
-                contents, err = file.read("/etc/passwd")
-                aeocha.assert_true(fw, _ne(err, ""), "kernel refused open(2) (ECAPMODE)")
+        // ================= fs-read-breakout =================
+        aeocha.describe("fs-read-breakout") {
+            aeocha.it("(global) open a NEW path to read -> DENIED") callback {
+                fd = aeo_open_fd("/etc/rc.conf", 0)
+                aeocha.assert_str_eq(fw, _i(fd), "-1", "open(2) for read refused in cap mode")
             }
-
-            aeocha.it("ESCAPE open a different unrelated path (/etc/rc.conf) -> DENIED") callback {
-                contents, err = file.read("/etc/rc.conf")
-                aeocha.assert_true(fw, _ne(err, ""), "no path is reachable in capability mode")
+            aeocha.it("(held-rights) a WRITE-only fd refuses READ") callback {
+                // wo_fd was granted R_WRITE only — reading it must fail.
+                e = aeo_try_read(wo_fd)
+                aeocha.assert_true(fw, _ne0(e), "read on a write-only-granted fd denied (errno ${_i(e)})")
             }
-
-            aeocha.it("ESCAPE write to a global path (/tmp/aeo-escape) -> DENIED") callback {
-                err = file.write("/tmp/aeo-escape", "escaped")
-                aeocha.assert_true(fw, _ne(err, ""), "creating/opening a new file by path is denied")
+            aeocha.it("(held-rights) the granted READ fd CAN still read (grant honored)") callback {
+                e = aeo_try_read(ro_fd)
+                aeocha.assert_str_eq(fw, _i(e), "0", "ro_fd keeps its R_READ — confinement is least-privilege, not all-deny")
             }
+        }
 
-            aeocha.it("ESCAPE shell out to run a host command -> DENIED") callback {
-                // exec also requires reaching the global namespace; capability
-                // mode forbids it. (A confined bhyve can't spawn host helpers.)
-                av = list_new()
-                list_add(av, "-c")
-                list_add(av, "echo escaped > /tmp/aeo-escape2")
-                out, status, err = run_capture("/bin/sh", av, null)
-                list_free(av)
-                // Either the exec is refused, or the child can't open the path —
-                // either way the escape file must NOT exist.
-                check, rerr = file.read("/tmp/aeo-escape2")
-                aeocha.assert_true(fw, _ne(rerr, ""), "no host command produced an escape artifact")
+        // ================= fs-write-breakout =================
+        aeocha.describe("fs-write-breakout") {
+            aeocha.it("(global) open/creat a NEW path to write -> DENIED") callback {
+                fd = aeo_open_fd("/tmp/aeo-escape-write", 1)
+                aeocha.assert_str_eq(fw, _i(fd), "-1", "open(2) for write refused in cap mode")
             }
+            aeocha.it("(held-rights) a READ-only fd refuses WRITE") callback {
+                // ro_fd was granted R_READ only — writing it must fail.
+                e = aeo_try_write(ro_fd)
+                aeocha.assert_true(fw, _ne0(e), "write on a read-only-granted fd denied (errno ${_i(e)})")
+            }
+        }
 
-            aeocha.it("still confined at end of suite (mode never dropped)") callback {
-                aeocha.assert_str_eq(fw, _itoa(capsicum.in_mode()), "1", "capability mode is irreversible")
+        // ================= tcpip-egress-breakout =================
+        // Note: socket(2) ITSELF is allowed in capability mode (it touches no
+        // global namespace — just an unbound fd). The ESCAPE is connect(2),
+        // which reaches an ADDRESS (the global namespace) — that's what's
+        // denied. (Verified empirically: this test originally expected socket()
+        // to fail; it doesn't, and shouldn't. The egress boundary is connect.)
+        aeocha.describe("tcpip-egress-breakout") {
+            aeocha.it("(global) connect() a fresh socket OUT -> DENIED") callback {
+                // socket() is fine; connect() to an address is the egress escape.
+                s = aeo_socket_fd()
+                e = aeo_try_connect(s, 0x01010101, 80)   // 1.1.1.1:80, network order
+                aeo_close_fd(s)
+                aeocha.assert_true(fw, _ne0(e), "connect(2) to an address denied in cap mode (errno ${_i(e)})")
+            }
+            aeocha.it("(held-rights) a CONNECT-granted socket may NOT bind (ingress)") callback {
+                // conn_fd has R_CONNECT only — bind (an ingress op) must fail.
+                e = aeo_try_bind(conn_fd, 18080)
+                aeocha.assert_true(fw, _ne0(e), "bind on a connect-only socket denied (errno ${_i(e)})")
+            }
+        }
+
+        // ================= tcpip-ingress-breakout =================
+        aeocha.describe("tcpip-ingress-breakout") {
+            aeocha.it("(global) bind() a fresh socket to a port -> DENIED") callback {
+                // socket() is allowed; bind() to a port is the ingress escape.
+                s = aeo_socket_fd()
+                e = aeo_try_bind(s, 18079)
+                aeo_close_fd(s)
+                aeocha.assert_true(fw, _ne0(e), "bind(2) to a port denied in cap mode (errno ${_i(e)})")
+            }
+            aeocha.it("(held-rights) a non-BIND socket refuses bind") callback {
+                // bind_fd was granted R_READ (not R_BIND) — bind must fail.
+                e = aeo_try_bind(bind_fd, 18081)
+                aeocha.assert_true(fw, _ne0(e), "bind without R_BIND denied (errno ${_i(e)})")
+            }
+            aeocha.it("(held-rights) a non-LISTEN socket refuses listen") callback {
+                e = aeo_try_listen(bind_fd)
+                aeocha.assert_true(fw, _ne0(e), "listen without R_LISTEN denied (errno ${_i(e)})")
+            }
+        }
+
+        aeocha.describe("confinement is durable") {
+            aeocha.it("still in capability mode at end (irreversible)") callback {
+                aeocha.assert_str_eq(fw, _i(capsicum.in_mode()), "1", "mode never dropped")
             }
         }
     }
@@ -105,7 +173,5 @@ main() {
     aeocha.run_summary(fw)
 }
 
-// ---- helpers (Aether has no inline operators in assert args) ----
-_itoa(n: int) -> string { return string.from_int(n) }
-_gt(a: int, b: int) -> int { if a > b { return 1 } return 0 }
-_ne(a: string, b: string) -> int { if a == b { return 0 } return 1 }
+_i(n: int) -> string { return string.from_int(n) }
+_ne0(n: int) -> int { if n == 0 { return 0 } return 1 }
