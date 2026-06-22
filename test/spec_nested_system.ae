@@ -21,7 +21,7 @@
 import aeocha
 import compose (system, bhyve_vm, container)
 import compose (image, dockerfile, entrypoint, base, cpus, memory, guest_image, network, ssh_key, health, expose, depends)
-import compose (suspend, constrain, grant_fd, egress, ingress, deny_egress, start, get_suspended, get_started, get_constraints, get_netpolicy, describe_tree)
+import compose (suspend, constrain, grant_fd, egress, ingress, ingress_from, deny_egress, start, get_suspended, get_started, get_constraints, get_netpolicy, describe_tree)
 import std.string
 import std.os (getenv, run_capture)
 import std.list
@@ -67,7 +67,9 @@ declare() {
             grant_fd("net",     "tap0", "rd,wr")     // the DEVICE fd, not a port
             grant_fd("console", "nmdm-db_vm", "rd,wr")
             // PF PORT POLICY — db_vm is the redis SERVER:
-            ingress(6379)        //   accept redis on 6379 — and NOTHING else in
+            ingress_from(6379, "python_vm")  // accept 6379 from python_vm ONLY.
+                                 //   A 3rd/4th VM hitting db_vm:6379 is DENIED —
+                                 //   the open port answers exactly one client.
             deny_egress()        //   reach out to NOTHING. If redis is later
                                  //   compromised (latent malware), it STILL
                                  //   can't phone home / exfiltrate.
@@ -157,7 +159,7 @@ main() {
             aeocha.it("resolves to two top-level VMs, each with its OWN confinement") callback {
                 want = <<TREE
                     system red222:
-                      bhyve db_vm [guest=ubuntu-24.04-minimal+podman, cpus=2, mem=2G, confined: disk(/zroot/vm/db_vm/disk0.img)=rd,wr, net(tap0)=rd,wr, console(nmdm-db_vm)=rd,wr, net{ingress:6379, egress:DENY-ALL; deny rest}]
+                      bhyve db_vm [guest=ubuntu-24.04-minimal+podman, cpus=2, mem=2G, confined: disk(/zroot/vm/db_vm/disk0.img)=rd,wr, net(tap0)=rd,wr, console(nmdm-db_vm)=rd,wr, net{ingress:6379<-python_vm, egress:DENY-ALL; deny rest}]
                         container db [image=docker.io/library/redis:alpine, expose=6379]
                       bhyve python_vm [guest=ubuntu-24.04-minimal+podman, cpus=2, mem=2G, confined: disk(/zroot/vm/python_vm/disk0.img)=rd,wr, net(tap1)=rd,wr, console(nmdm-python_vm)=rd,wr, net{egress->db_vm:6379, ingress:8080; deny rest}]
                         container app [entrypoint(docker.io/library/python:3-alpine), expose=8080] -> db
@@ -187,14 +189,14 @@ TREE
                     "may reach db_vm:6379 + accept 8080 — and NOTHING else")
             }
 
-            aeocha.it("db_vm (the redis SERVER) ingress-allows 6379 and BLOCKS all egress") callback {
-                // The server's policy is now EXPLICIT, not silent: accept redis
-                // in on 6379, and reach out to NOTHING — so a compromised redis
-                // (latent malware) can't phone home / exfiltrate. deny_egress()
-                // makes the deny-default VISIBLE + asserted, vs the old silence.
+            aeocha.it("db_vm answers 6379 to python_vm ONLY, and BLOCKS all egress") callback {
+                // Peer-restricted ingress: redis on 6379 is reachable by
+                // python_vm alone — a 3rd/4th VM is DENIED (the port answers
+                // exactly one client). Plus egress to NOTHING, so a compromised
+                // redis can't phone home. Both explicit + asserted, not silent.
                 aeocha.assert_str_eq(fw, get_netpolicy("db_vm"),
-                    "ingress:6379, egress:DENY-ALL",
-                    "redis in on 6379; zero outbound (malware can't exfiltrate)")
+                    "ingress:6379<-python_vm, egress:DENY-ALL",
+                    "6379 from python_vm only (no 3rd VM); zero outbound")
             }
         }
 

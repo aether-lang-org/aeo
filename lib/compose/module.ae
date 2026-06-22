@@ -48,7 +48,7 @@ exports (
     image_recipe, from, install, netplan_static, systemd_unit, realize_as,
     imgcount, imgname_at, get_img_from, get_img_install, get_img_netplan,
     get_img_units, get_img_unit_body, get_img_realize,
-    suspend, constrain, grant_fd, constraint, egress, ingress, deny_egress, deny_ingress, start,
+    suspend, constrain, grant_fd, constraint, egress, ingress, ingress_from, deny_egress, deny_ingress, start,
     get_suspended, get_started, get_constraints, get_netpolicy,
     describe_tree
 )
@@ -295,6 +295,17 @@ egress(_ctx: ptr, target: string, port: int) {
 }
 ingress(_ctx: ptr, port: int) {
     _net_add(_ctx, "ingress:${string_from_int(port)}")
+}
+//   ingress_from(port, peer) — accept IN on `port` but ONLY from `peer` (a
+//       resource name aeo resolves to an IP). A 3rd/4th VM hitting this port is
+//       DENIED — the open port is reachable by the named peer alone. This is
+//       the complement of egress(target, port): egress names who you may reach
+//       OUT to; ingress_from names who may reach IN. (Mechanism: pf source
+//       filter — `pass proto tcp from <peer_ip> to <self_ip> port N; block to
+//       <self_ip> port N`.) Use for a service that must answer exactly one
+//       client: e.g. redis answering only the app VM, not every guest.
+ingress_from(_ctx: ptr, port: int, peer: string) {
+    _net_add(_ctx, "ingress:${string_from_int(port)}<-${peer}")
 }
 deny_egress(_ctx: ptr)  { _net_add(_ctx, "egress:DENY-ALL") }
 deny_ingress(_ctx: ptr) { _net_add(_ctx, "ingress:DENY-ALL") }
