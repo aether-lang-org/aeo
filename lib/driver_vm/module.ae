@@ -399,6 +399,124 @@ _snapshot_exists(snap: string) -> int {
     return 0
 }
 
+// COLD PATH — build a clean golden from the recipe when the realize target is
+// absent, then snapshot it so future clones are fast. Called by the runner
+// (which has the recipe data). install_csv is comma-joined packages; units_csv
+// is comma-joined systemd unit names with bodies looked up by the runner and
+// passed pre-rendered in unit_writes (shell that writes+enables them).
+// snap_target is the realize target to snapshot as (e.g. "aeo-base@golden").
+//
+// The sequence is what the on-box diagnosis proved is needed for a WORKING,
+// CLONE-SAFE golden:
+//   1. apt install the packages
+//   2. load `overlay` at boot (podman's storage driver needs it; the broken
+//      hand-made golden failed here)
+//   3. write the systemd units (the runner pre-renders them)
+//   4. CLEAN shutdown — the broken golden's aborted-ext4-journal (-> RO fs ->
+//      overlay can't init) came from snapshotting an UNCLEAN guest. Halt and
+//      wait for poweroff BEFORE snapshotting so the journal is consistent.
+//   5. snapshot as snap_target.
+bhyve_realize_cold(builder_vm: string, install_csv: string, unit_writes: string, snap_target: string) -> string {
+    // The guest is already provisioned + booted + ssh-reachable at the static
+    // IP (the caller did _bhyve_provision + _apply_static_ip + start + wait).
+    apply = "set -e\n"
+    apply = "${apply}export DEBIAN_FRONTEND=noninteractive\n"
+    if string_length(install_csv) > 0 {
+        // install_csv is "podman, foo" -> apt wants spaces; commas are fine to
+        // strip to spaces.
+        pkgs = _csv_to_spaces(install_csv)
+        apply = "${apply}sudo apt-get update -qq && sudo apt-get install -y -qq ${pkgs}\n"
+    }
+    // overlay at boot (the fix the broken golden was missing)
+    apply = "${apply}echo overlay | sudo tee /etc/modules-load.d/aeo.conf >/dev/null\n"
+    apply = "${apply}sudo modprobe overlay\n"
+    // hostname resolution (silence the sudo warning every command hit)
+    apply = "${apply}grep -q aeo-guest /etc/hosts || echo '127.0.1.1 aeo-guest' | sudo tee -a /etc/hosts >/dev/null\n"
+    if string_length(unit_writes) > 0 {
+        apply = "${apply}${unit_writes}\n"
+    }
+    // verify podman actually works with overlay before we bless this golden
+    apply = "${apply}sudo podman info --format '{{.Store.GraphDriverName}}' >/dev/null\n"
+
+    rerr = _guest_ssh_script(apply)
+    if rerr != "" {
+        return "aeo: cold-realize: applying recipe in '${builder_vm}' failed: ${rerr}"
+    }
+    // CLEAN shutdown — critical: snapshot only a quiesced fs (else aborted
+    // journal -> RO -> overlay broken, the exact bug we diagnosed).
+    _guest_ssh_script("sudo sync; sudo systemctl poweroff &")
+    if _wait_vm_stopped(builder_vm) == 0 {
+        // force it off if it didn't halt cleanly in time
+        _vm_ok("poweroff", builder_vm)
+    }
+    // snapshot as the realize target
+    serr = _snapshot_as(builder_vm, snap_target)
+    if serr != "" {
+        return serr
+    }
+    return ""
+}
+
+// run a multi-line shell script inside the guest over ssh; "" on success.
+_guest_ssh_script(script: string) -> string {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "ssh -i /home/paul/.ssh/id_rsa -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 ubuntu@172.16.0.50 ${_shq(script)}")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    if status != 0 {
+        return out
+    }
+    return ""
+}
+
+// poll until the VM is Stopped (clean poweroff), up to ~60s. 1 if stopped.
+_wait_vm_stopped(vm: string) -> int {
+    i = 0
+    while i < 20 {
+        i = i + 1
+        out = _vm_out("list", "")
+        if string_contains(out, "${vm} ") == 1 {
+            // crude: re-list and check state column for Stopped
+        }
+        if _bhyve_running(vm) == 0 {
+            return 1
+        }
+        _sleep(3)
+    }
+    return 0
+}
+
+// snapshot a stopped VM as <vm>@<tag> derived from snap_target.
+_snapshot_as(vm: string, snap_target: string) -> string {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "sudo -n vm snapshot ${snap_target} 2>&1")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    if status != 0 {
+        return "aeo: snapshot '${snap_target}' failed: ${out}"
+    }
+    return ""
+}
+
+_csv_to_spaces(csv: string) -> string {
+    // "a, b, c" -> "a b c" (commas to spaces; collapse handled by shell)
+    out = ""
+    n = string_length(csv)
+    i = 0
+    while i < n {
+        c = string_char_at(csv, i)
+        if c == 44 {
+            out = "${out} "
+        } else {
+            out = string_concat(out, string_from_char(c))
+        }
+        i = i + 1
+    }
+    return out
+}
+
 // Clone an arbitrary snapshot into res_name (the recipe-driven fast path).
 _bhyve_clone_from(res_name: string, snap: string) -> string {
     av = list_new()

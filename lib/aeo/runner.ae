@@ -140,6 +140,32 @@ _realize_target(img: string) -> string {
     return ""
 }
 
+// Render the shell that writes + enables the recipe's systemd units inside the
+// guest (each as /etc/systemd/system/<name>.service), for the cold-path build.
+// Returns "" if the recipe declares no units.
+_render_unit_writes(img: string) -> string {
+    units = compose.get_img_units(img)   // "aeo-linkup, other"
+    if string_length(units) == 0 {
+        return ""
+    }
+    // single-unit common case (the recipe today has one); split on ", " for more.
+    sh = ""
+    name = _first_csv(units)
+    body = compose.get_img_unit_body(img, name)
+    if string_length(body) > 0 {
+        sh = "cat <<'AEOUNIT' | sudo tee /etc/systemd/system/${name}.service >/dev/null\n${body}\nAEOUNIT\nsudo systemctl enable ${name}.service"
+    }
+    return sh
+}
+
+_first_csv(csv: string) -> string {
+    p = string_index_of(csv, ",")
+    if p < 0 {
+        return csv
+    }
+    return string_substring(csv, 0, p)
+}
+
 // The shell that BUILDS the image from its recipe when the realize target is
 // absent (fresh host / cold cache): fetch from(), provision, then install
 // packages + write the static netplan + install the systemd units inside the
