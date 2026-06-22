@@ -40,4 +40,10 @@ UNIT
     }
 }
 
-// STATUS (measured): <pending on-box boot/network test>
+// STATUS (measured 2026-06-22 on the GhostBSD box, cold provision):
+//   BEST CANDIDATE — full drop-in. 251MB image. BOOTS (ping 172.16.0.50 at
+//   ~6s, bhyve idle at 4.7s CPU). NETWORKS (netplan static applied, tap
+//   transmitting). SSH WORKS (cloud-init installed our key — unlike
+//   22.04-minimal/debian, 24.04's cloud-init seeded correctly over our
+//   path). So this one is reachable end-to-end with zero extra work: smallest
+//   systemd/netplan guest that's a true drop-in. RECOMMENDED default slim base.

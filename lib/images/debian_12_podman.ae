@@ -40,4 +40,11 @@ UNIT
     }
 }
 
-// STATUS (measured): <pending on-box boot/network test>
+// STATUS (measured 2026-06-22 on the GhostBSD box, cold provision):
+//   WORKS for boot+network, SSH gap. 333MB. BOOTS (ping at ~18s, idle 3.5s
+//   CPU). NETWORKS — and a pleasant surprise: debian-12 genericcloud DOES
+//   ship /etc/netplan, so our static-IP netplan applied cleanly (the "networkd
+//   gap" feared above did NOT bite — tap transmitting, pingable). BUT NO SSH:
+//   cloud-init didn't install our key (same seed gap as 22.04-minimal). Needs
+//   the offline authorized_keys injection. Heavier than the ubuntu-minimals
+//   and not obviously better — keep as an option, but 24.04-minimal wins.

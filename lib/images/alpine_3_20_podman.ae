@@ -25,4 +25,14 @@ alpine_3_20_podman() {
     }
 }
 
-// STATUS (measured): <pending on-box boot/network test>
+// STATUS (measured 2026-06-22 on the GhostBSD box, cold provision):
+//   BOOTS ONLY — not network-ready without new work. 194MB (smallest). The
+//   guest BOOTS fine under bhyve (Running, idle at 5.7s CPU, tap transmitting
+//   at L2 — in=17). BUT it does NOT get our static IP: Alpine has no netplan,
+//   so the /etc/netplan static-IP path is a no-op and the guest never reaches
+//   172.16.0.50 (no ping, no ssh). To actually use Alpine we'd need an OpenRC
+//   realizer branch: /etc/network/interfaces (ifupdown) static config + an
+//   rc-update link-up service instead of the systemd unit, + apk (not apt) for
+//   podman. Smallest image, most work — deferred. Confirms the earlier call to
+//   pick ubuntu-minimal over Alpine: ~100MB smaller isn't worth a second
+//   init-system realizer right now.

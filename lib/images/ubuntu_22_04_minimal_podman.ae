@@ -53,3 +53,12 @@ UNIT
         realize_as(_BHYVE_GOLDEN())
     }
 }
+
+// STATUS (measured 2026-06-22 on the GhostBSD box, cold provision):
+//   WORKS for boot+network, SSH gap. 294MB (56% < standard jammy's 695MB).
+//   BOOTS (ping 172.16.0.50 at ~6s, idle 4s CPU). NETWORKS (netplan static
+//   applied, 2.1G disk vs jammy's 20G). sshd + cloud-init present. BUT NO SSH:
+//   cloud-init did NOT install our key (authorized_keys missing) — needs the
+//   offline authorized_keys injection (same as patch-static-ip does for the
+//   netplan). Solid, but 24.04-minimal is smaller AND seeds ssh cleanly, so
+//   prefer that one. See [[aeo-lighter-guest-minimal]].
