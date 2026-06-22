@@ -27,7 +27,7 @@
 // The runner reads the count + per-name fields back via the get_* helpers.
 
 import std.config
-import std.string (string_length, string_char_at, string_from_int, string_substring, string_index_of)
+import std.string (string_length, string_char_at, string_from_int, string_substring, string_index_of, string_contains)
 
 exports (
     system,
@@ -49,7 +49,7 @@ exports (
     imgcount, imgname_at, get_img_from, get_img_install, get_img_netplan,
     get_img_units, get_img_unit_body, get_img_realize,
     suspend, constrain, grant_fd, constraint, egress, ingress, ingress_from, deny_egress, deny_ingress, start,
-    get_suspended, get_started, get_constraints, get_netpolicy,
+    get_suspended, get_started, get_constraints, get_netpolicy, pf_rules_for,
     describe_tree
 )
 
@@ -489,6 +489,86 @@ get_constraints(vm: string) -> string { return config.get("aeo.cmp.constraints.$
 // A VM's network whitelist (egress/ingress in its constrain block). "" = no
 // rules declared; once any rule exists, all other traffic is denied.
 get_netpolicy(vm: string) -> string { return config.get("aeo.cmp.netpolicy.${vm}") }
+
+// pf_rules_for(vm) — generate the pf ruleset that ENFORCES a VM's netpolicy.
+// Deny-default whitelist: emit `pass` lines for each declared flow, then a
+// catch-all block. Peer names ($peer) and the VM's own address ($self) are
+// left as TOKENS the driver substitutes with resolved IPs at apply time (so
+// compose stays IP-agnostic — same late-resolution as egress's target). One
+// rule per line. Empty if the VM has no netpolicy.
+//
+// Mapping (from the netpolicy entries):
+//   ingress:P            -> pass in proto tcp to $self port P
+//   ingress:P<-PEER      -> pass in proto tcp from $PEER to $self port P
+//   egress->TGT:P        -> pass out proto tcp from $self to $TGT port P
+//   egress:DENY-ALL      -> (no pass; the catch-all block denies all egress)
+//   ingress:DENY-ALL     -> (no pass; catch-all denies all ingress)
+// then: block in/out to/from $self  (deny rest).
+pf_rules_for(vm: string) -> string {
+    pol = get_netpolicy(vm)
+    if string_length(pol) == 0 {
+        return ""
+    }
+    rules = ""
+    rest = pol
+    // walk comma-separated entries
+    more = 1
+    while more == 1 {
+        idx = string_index_of(rest, ", ")
+        entry = rest
+        if idx >= 0 {
+            entry = string_substring(rest, 0, idx)
+            rest = string_substring(rest, idx + 2, string_length(rest))
+        } else {
+            more = 0
+        }
+        r = _pf_rule_of(vm, entry)
+        if string_length(r) > 0 {
+            if string_length(rules) == 0 {
+                rules = r
+            } else {
+                rules = "${rules}\n${r}"
+            }
+        }
+    }
+    // deny-default catch-all (after the passes)
+    block = "block in proto tcp to $${vm}\nblock out proto tcp from $${vm}"
+    if string_length(rules) == 0 {
+        return block
+    }
+    return "${rules}\n${block}"
+}
+// one pf pass line for a single netpolicy entry (or "" for DENY-ALL markers).
+_pf_rule_of(vm: string, entry: string) -> string {
+    // ingress:PORT<-PEER
+    arrow = string_index_of(entry, "<-")
+    if arrow >= 0 {
+        portpart = string_substring(entry, 8, arrow)       // after "ingress:"
+        peer = string_substring(entry, arrow + 2, string_length(entry))
+        return "pass in proto tcp from $${peer} to $${vm} port ${portpart}"
+    }
+    // egress->TGT:PORT
+    eg = string_index_of(entry, "egress->")
+    if eg == 0 {
+        rest2 = string_substring(entry, 8, string_length(entry))   // TGT:PORT
+        colon = string_index_of(rest2, ":")
+        tgt = string_substring(rest2, 0, colon)
+        port = string_substring(rest2, colon + 1, string_length(rest2))
+        return "pass out proto tcp from $${vm} to $${tgt} port ${port}"
+    }
+    // ingress:PORT (from anyone)  — but NOT the DENY-ALL marker
+    ig = string_index_of(entry, "ingress:")
+    if ig == 0 {
+        portpart2 = string_substring(entry, 8, string_length(entry))
+        if string_contains(portpart2, "DENY-ALL") == 1 {
+            return ""
+        }
+        return "pass in proto tcp to $${vm} port ${portpart2}"
+    }
+    // egress:DENY-ALL -> no pass (catch-all handles it)
+    return ""
+}
+
 get_nic(nm: string) -> string     { return config.get("aeo.cmp.nic.${nm}") }
 
 // Guest provisioning getters (defaults make a bhyve_vm work with no
