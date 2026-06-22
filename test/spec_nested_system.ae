@@ -21,7 +21,7 @@
 import aeocha
 import compose (system, bhyve_vm, container)
 import compose (image, dockerfile, entrypoint, base, cpus, memory, guest_image, network, ssh_key, health, expose, depends)
-import compose (suspend, constrain, constraint, egress, ingress, start, get_suspended, get_started, get_constraints, get_netpolicy, describe_tree)
+import compose (suspend, constrain, grant_fd, egress, ingress, deny_egress, start, get_suspended, get_started, get_constraints, get_netpolicy, describe_tree)
 import std.string
 import std.os (getenv, run_capture)
 import std.list
@@ -60,9 +60,17 @@ declare() {
         // start, as a verb sequence on the db_vm handle.
         suspend(db_vm)
         constrain(db_vm) {           // the block IS db_vm's — names its target
-            constraint("disk",    "/zroot/vm/db_vm/disk0.img", "rd,wr")
-            constraint("net",     "tap0", "rd,wr")
-            constraint("console", "nmdm-db_vm", "rd,wr")
+            // Capsicum FD GRANTS — which kernel objects the bhyve PROCESS may
+            // touch (NOT ports): the disk image, the tap network DEVICE, the
+            // console. Everything else is denied once bhyve cap_enter()s.
+            grant_fd("disk",    "/zroot/vm/db_vm/disk0.img", "rd,wr")
+            grant_fd("net",     "tap0", "rd,wr")     // the DEVICE fd, not a port
+            grant_fd("console", "nmdm-db_vm", "rd,wr")
+            // PF PORT POLICY — db_vm is the redis SERVER:
+            ingress(6379)        //   accept redis on 6379 — and NOTHING else in
+            deny_egress()        //   reach out to NOTHING. If redis is later
+                                 //   compromised (latent malware), it STILL
+                                 //   can't phone home / exfiltrate.
         }
         start(db_vm)
 
@@ -121,11 +129,11 @@ PY
 
         suspend(python_vm)
         constrain(python_vm) {           // the block IS python_vm's — its own grants
-            constraint("disk",    "/zroot/vm/python_vm/disk0.img", "rd,wr")
-            constraint("net",     "tap1", "rd,wr")
-            constraint("console", "nmdm-python_vm", "rd,wr")
-            // Workload-mode network whitelist (pf, not Capsicum). In steady
-            // state python_vm may ONLY:
+            // Capsicum fd grants (devices the bhyve process may touch):
+            grant_fd("disk",    "/zroot/vm/python_vm/disk0.img", "rd,wr")
+            grant_fd("net",     "tap1", "rd,wr")     // the DEVICE fd, not a port
+            grant_fd("console", "nmdm-python_vm", "rd,wr")
+            // PF port policy (deny-default whitelist). python_vm may ONLY:
             egress("db_vm", 6379)        //   reach redis (db_vm:6379) — nowhere else out
             ingress(8080)                //   accept on 8080 — nothing else in
         }
@@ -149,7 +157,7 @@ main() {
             aeocha.it("resolves to two top-level VMs, each with its OWN confinement") callback {
                 want = <<TREE
                     system red222:
-                      bhyve db_vm [guest=ubuntu-24.04-minimal+podman, cpus=2, mem=2G, confined: disk(/zroot/vm/db_vm/disk0.img)=rd,wr, net(tap0)=rd,wr, console(nmdm-db_vm)=rd,wr]
+                      bhyve db_vm [guest=ubuntu-24.04-minimal+podman, cpus=2, mem=2G, confined: disk(/zroot/vm/db_vm/disk0.img)=rd,wr, net(tap0)=rd,wr, console(nmdm-db_vm)=rd,wr, net{ingress:6379, egress:DENY-ALL; deny rest}]
                         container db [image=docker.io/library/redis:alpine, expose=6379]
                       bhyve python_vm [guest=ubuntu-24.04-minimal+podman, cpus=2, mem=2G, confined: disk(/zroot/vm/python_vm/disk0.img)=rd,wr, net(tap1)=rd,wr, console(nmdm-python_vm)=rd,wr, net{egress->db_vm:6379, ingress:8080; deny rest}]
                         container app [entrypoint(docker.io/library/python:3-alpine), expose=8080] -> db
@@ -173,12 +181,20 @@ TREE
 
             aeocha.it("python_vm's workload-mode network is a deny-all whitelist") callback {
                 // egress only to redis, ingress only on 8080; everything else
-                // is denied (pf, separate from the Capsicum fd constraints).
+                // is denied (pf, separate from the Capsicum fd grants).
                 aeocha.assert_str_eq(fw, get_netpolicy("python_vm"),
                     "egress->db_vm:6379, ingress:8080",
                     "may reach db_vm:6379 + accept 8080 — and NOTHING else")
-                // db_vm declares no egress/ingress (it's not the one reaching out).
-                aeocha.assert_str_eq(fw, get_netpolicy("db_vm"), "", "db_vm has no outbound policy")
+            }
+
+            aeocha.it("db_vm (the redis SERVER) ingress-allows 6379 and BLOCKS all egress") callback {
+                // The server's policy is now EXPLICIT, not silent: accept redis
+                // in on 6379, and reach out to NOTHING — so a compromised redis
+                // (latent malware) can't phone home / exfiltrate. deny_egress()
+                // makes the deny-default VISIBLE + asserted, vs the old silence.
+                aeocha.assert_str_eq(fw, get_netpolicy("db_vm"),
+                    "ingress:6379, egress:DENY-ALL",
+                    "redis in on 6379; zero outbound (malware can't exfiltrate)")
             }
         }
 

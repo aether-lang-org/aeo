@@ -48,7 +48,7 @@ exports (
     image_recipe, from, install, netplan_static, systemd_unit, realize_as,
     imgcount, imgname_at, get_img_from, get_img_install, get_img_netplan,
     get_img_units, get_img_unit_body, get_img_realize,
-    suspend, constrain, constraint, egress, ingress, start,
+    suspend, constrain, grant_fd, constraint, egress, ingress, deny_egress, deny_ingress, start,
     get_suspended, get_started, get_constraints, get_netpolicy,
     describe_tree
 )
@@ -241,36 +241,63 @@ suspend(vm: string) {
 // `constrain(vm)` — opens THE VM'S OWN confinement block. The vm name is the
 // _ctx pushed to the trailing block (like the other openers), so each inner
 // `constraint(...)` records its grant directly onto that VM. No floating block,
-// no hidden binding: the block literally refers to the VM it confines. Inside:
-//   constraint(name, target, rights) — a bound capability: WHAT (a path/tap/
-//       socket), and the rights on it. rights_limit(fd_of(target), mask).
-// Anything not granted is DENIED once bhyve cap_enter()s. A VM with any
-// constraint is "confined".
+// no hidden binding: the block literally refers to the VM it confines.
+//
+// A constrain block holds TWO distinct kinds of rule — keep them straight:
+//
+//   grant_fd(kind, target, rights) — a CAPSICUM FD GRANT. It says the bhyve
+//       hypervisor PROCESS may use this one kernel object (a disk image file, a
+//       tap NETWORK DEVICE, a console) with these rights. It is NOT a firewall
+//       rule and has NOTHING to do with ports — `grant_fd("net","tap0","rd,wr")`
+//       means "bhyve may read/write the tap0 DEVICE fd", not "open port X".
+//       Anything not granted is DENIED once bhyve cap_enter()s. (Mechanism:
+//       cap_rights_limit(fd_of(target), mask).)
+//
+//   ingress(port) / egress(target, port) — a PF PORT POLICY (a whitelist). This
+//       IS about ports: which TCP flows in/out are allowed; everything else is
+//       denied. (Mechanism: pf rules — see below.)
+//
+// So: grant_fd = which devices the hypervisor may touch; ingress/egress = which
+// ports may flow. A VM with any grant_fd is "confined".
 constrain(vm: string) -> string {
     return vm
 }
-constraint(_ctx: ptr, name: string, target: string, rights: string) {
+grant_fd(_ctx: ptr, kind: string, target: string, rights: string) {
     prev = config.get("aeo.cmp.constraints.${_ctx}")
-    entry = "${name}(${target})=${rights}"
+    entry = "${kind}(${target})=${rights}"
     if string_length(prev) == 0 {
         config.put("aeo.cmp.constraints.${_ctx}", entry)
     } else {
         config.put("aeo.cmp.constraints.${_ctx}", "${prev}, ${entry}")
     }
 }
-// Network policy inside a constrain(vm){} block — a WHITELIST. In workload
-// mode (after provision), the VM may only do what's listed; everything else
-// is DENIED. Enforced by pf (a different mechanism than the Capsicum fd
-// constraints above — direction/peer filtering, not fd rights).
+// constraint(...) — DEPRECATED alias for grant_fd (the old, quaint name that
+// read like a port rule but is an fd grant). Kept so existing specs build.
+constraint(_ctx: ptr, kind: string, target: string, rights: string) {
+    grant_fd(_ctx, kind, target, rights)
+}
+// Network policy inside a constrain(vm){} block — a WHITELIST, deny-by-default.
+// In workload mode (after provision), the VM may ONLY do what's listed;
+// everything else is DENIED. Enforced by pf (a different mechanism than the
+// Capsicum fd grants above — direction/peer/port filtering, not fd rights).
 //   egress(target, port)  — may CONNECT OUT to `target` (a resource name aeo
 //       resolves to an IP at deploy time) on `port`. Nothing else outbound.
 //   ingress(port)         — may ACCEPT IN on `port`. Nothing else inbound.
+//   deny_egress()         — EXPLICIT "reaches out to NOTHING". Use on a pure
+//       server (e.g. redis): if the workload is later compromised (latent
+//       malware), it STILL cannot phone home / exfiltrate. NB: declaring no
+//       egress is deny-default too, but deny_egress() makes the intent VISIBLE
+//       and asserted — silence reads as "didn't consider it"; this reads as
+//       "considered it, blocked it".
+//   deny_ingress()        — EXPLICIT "accepts NOTHING in" (a pure client).
 egress(_ctx: ptr, target: string, port: int) {
     _net_add(_ctx, "egress->${target}:${string_from_int(port)}")
 }
 ingress(_ctx: ptr, port: int) {
     _net_add(_ctx, "ingress:${string_from_int(port)}")
 }
+deny_egress(_ctx: ptr)  { _net_add(_ctx, "egress:DENY-ALL") }
+deny_ingress(_ctx: ptr) { _net_add(_ctx, "ingress:DENY-ALL") }
 _net_add(vm: string, entry: string) {
     prev = config.get("aeo.cmp.netpolicy.${vm}")
     if string_length(prev) == 0 {
