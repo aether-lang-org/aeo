@@ -48,7 +48,7 @@ exports (
     image_recipe, from, install, netplan_static, systemd_unit, realize_as,
     imgcount, imgname_at, get_img_from, get_img_install, get_img_netplan,
     get_img_units, get_img_unit_body, get_img_realize,
-    suspend, constrain, grant_fd, constraint, egress, ingress, ingress_from, deny_egress, deny_ingress, start,
+    suspend, constrain, grant_fd, egress, ingress, ingress_from, deny_egress, deny_ingress, start,
     get_suspended, get_started, get_constraints, get_netpolicy, pf_rules_for,
     describe_tree, dns_hosts
 )
@@ -270,11 +270,6 @@ grant_fd(_ctx: ptr, kind: string, target: string, rights: string) {
     } else {
         config.put("aeo.cmp.constraints.${_ctx}", "${prev}, ${entry}")
     }
-}
-// constraint(...) — DEPRECATED alias for grant_fd (the old, quaint name that
-// read like a port rule but is an fd grant). Kept so existing specs build.
-constraint(_ctx: ptr, kind: string, target: string, rights: string) {
-    grant_fd(_ctx, kind, target, rights)
 }
 // Network policy inside a constrain(vm){} block — a WHITELIST, deny-by-default.
 // In workload mode (after provision), the VM may ONLY do what's listed;
