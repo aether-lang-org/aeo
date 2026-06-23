@@ -50,7 +50,7 @@ exports (
     get_img_units, get_img_unit_body, get_img_realize,
     suspend, constrain, grant_fd, constraint, egress, ingress, ingress_from, deny_egress, deny_ingress, start,
     get_suspended, get_started, get_constraints, get_netpolicy, pf_rules_for,
-    describe_tree
+    describe_tree, dns_hosts
 )
 
 // --- the trailing-block builder DSL ----------------------------------
@@ -729,6 +729,37 @@ describe_tree() -> string {
         if string_char_at(out, ln - 1) == 10 {
             return string_substring(out, 0, ln - 1)
         }
+    }
+    return out
+}
+
+// dns_hosts() — the aeo-owned name->IP mapping as a dnsmasq hosts file: one
+// "<ip>  <name>" line per resource that has an IP. aeo writes this where
+// dnsmasq reads it (addn-hosts=...), so a guest workload can resolve a resource
+// by NAME (e.g. connect("db_vm", 6379)) — aeo owns the names, dnsmasq serves
+// them. No DNS middleman: dnsmasq is already the resolver in the guests' path.
+//
+// LIGHTEST path (chosen). TODO (the real feature a custom server would earn):
+// SPLIT-HORIZON / health-aware resolution — answer per-querying-VM so name
+// resolution IS access control (python_vm resolves db_vm; a stranger VM gets
+// NXDOMAIN, pairing with ingress_from), and db_vm -> whichever replica is
+// healthy. dnsmasq can't do that; a slim aeo responder in front of it could.
+dns_hosts() -> string {
+    out = ""
+    n = count()
+    ri = 0
+    while ri < n {
+        nm = name_at(ri)
+        ip = get_ip(nm)
+        if string_length(ip) > 0 {
+            line = "${ip}  ${nm}"
+            if string_length(out) == 0 {
+                out = line
+            } else {
+                out = "${out}\n${line}"
+            }
+        }
+        ri = ri + 1
     }
     return out
 }

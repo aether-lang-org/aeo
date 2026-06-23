@@ -1,0 +1,32 @@
+// spec_dns_hosts.ae — aeo owns resource-name->IP naming; dnsmasq serves it.
+// dns_hosts() emits the dnsmasq addn-hosts file ("<ip>  <name>" per resource),
+// so a guest workload can resolve a resource by NAME (connect("db_vm",6379)).
+// No DNS middleman: dnsmasq is already the resolver in the guests' path; aeo
+// just writes a file it reads. (Proven live on the box: dnsmasq resolves db_vm
+// -> 172.16.0.50 from this file; external names still forward.)
+
+import aeocha
+import compose (system, bhyve_vm, ip, cpus, memory, dns_hosts)
+import std.string
+
+declare() {
+    system("red222") {
+        db = bhyve_vm("db_vm") { ip("172.16.0.50"); cpus(1); memory("1G") }
+        py = bhyve_vm("python_vm") { ip("172.16.0.51"); cpus(1); memory("1G") }
+    }
+}
+
+main() {
+    fw = aeocha.init()
+    declare()
+    aeocha.describe(fw, "aeo-owned naming -> dnsmasq hosts file") {
+        aeocha.describe("dns_hosts() emits the name->IP mappings") {
+            aeocha.it("maps each resource name to its IP (dnsmasq hosts format)") callback {
+                aeocha.assert_str_eq(fw, dns_hosts(),
+                    "172.16.0.50  db_vm\n172.16.0.51  python_vm",
+                    "the addn-hosts file aeo writes; dnsmasq serves it")
+            }
+        }
+    }
+    aeocha.run_summary(fw)
+}
