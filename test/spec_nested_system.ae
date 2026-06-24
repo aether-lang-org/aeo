@@ -167,20 +167,13 @@ PY
 // suite is exhaustive + cleans up after itself.
 run_aeo(mode: string) -> string {
     declare()                          // the composition — always resolved
-
-    if mode == "check" {
-        return _mode_check()
+    match (mode) {
+        "check" -> { return _mode_check() }
+        "up"    -> { return _mode_up() }
+        "smoke" -> { return _mode_smoke() }
+        "suite" -> { return _mode_suite() }
+        _       -> { return "aeo: unknown AEO_MODE '${mode}' (check|up|smoke|suite)" }
     }
-    if mode == "up" {
-        return _mode_up()
-    }
-    if mode == "smoke" {
-        return _mode_smoke()
-    }
-    if mode == "suite" {
-        return _mode_suite()
-    }
-    return "aeo: unknown AEO_MODE '${mode}' (check|up|smoke|suite)"
 }
 
 // CHECK — data-model assertions, in-process, no deploy (the default).
