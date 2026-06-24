@@ -1,0 +1,188 @@
+// lib/ipam — sticky per-project IP allocation for ITERATIVE DEV.
+//
+// The composition is IP-free (names resources: db_vm, python_vm). ipam binds a
+// resource NAME to an address and — crucially for "try again, try yet again"
+// DX — REUSES the same address across re-runs. The binding lives in a
+// per-project file ./.aeo/<system>.ips (gitignored), so:
+//
+//   run 1:  resolve_ip("red222","db_vm") -> allocate lowest-free -> write -> .137
+//   run 2+: resolve_ip("red222","db_vm") -> READ the file -> REUSE .137  (sticky)
+//   make clean: binding SURVIVES (it's ./.aeo, not ./target)
+//   rm -rf .aeo  (or aeo reset): fresh allocation next run
+//
+// So an iterating dev keeps the same address run-after-run (their curl/browser/
+// poked-redis all stay valid) until they explicitly say "fresh". Ops mode
+// (UAT/prod) uses the SAME file format but authored + committed + pinned —
+// resolve_ip reads it and reuses, never re-allocating an already-bound name.
+//
+// Range: defaults to the NAT subnet aeo's setup-nat.sh creates
+// (172.16.0.10..250, skipping the .1 gateway); override via AEO_IP_RANGE_BASE /
+// AEO_IP_RANGE_LO / AEO_IP_RANGE_HI. Allocator picks the lowest free address.
+
+import std.string (string_length, string_index_of, string_substring, string_from_int, string_char_at)
+import std.os (getenv, run_capture)
+import std.list
+import file
+
+exports (
+    resolve_ip, binding_path, reset_bindings, bindings_dump
+)
+
+// ---- range (convention default + env override) ----
+_range_base() -> string {
+    v = getenv("AEO_IP_RANGE_BASE")
+    if string_length(v) > 0 { return v }
+    return "172.16.0."                 // the NAT subnet setup-nat.sh creates
+}
+_range_lo() -> int { return _env_int("AEO_IP_RANGE_LO", 10) }   // skip .1 gateway + low
+_range_hi() -> int { return _env_int("AEO_IP_RANGE_HI", 250) }
+_env_int(name: string, dflt: int) -> int {
+    v = getenv(name)
+    if string_length(v) == 0 { return dflt }
+    return _atoi(v)
+}
+
+// ---- the binding file: ./.aeo/<system>.ips ----
+binding_path(system: string) -> string {
+    return ".aeo/${system}.ips"
+}
+
+// resolve_ip(system, resource) -> address. Sticky: reuse if already bound;
+// else allocate the lowest-free address in the range, persist, return it.
+resolve_ip(system: string, resource: string) -> string {
+    path = binding_path(system)
+    body = _read(path)
+    // already bound? reuse (the iterative-dev sticky property).
+    existing = _lookup(body, resource)
+    if string_length(existing) > 0 {
+        return existing
+    }
+    // allocate the lowest-free address not already in the file.
+    addr = _alloc_free(body)
+    // append "resource  addr" and persist (creating .aeo/ if needed).
+    _ensure_dir()
+    line = "${resource}  ${addr}"
+    newbody = body
+    if string_length(newbody) == 0 {
+        newbody = line
+    } else {
+        newbody = "${body}\n${line}"
+    }
+    _write(path, newbody)
+    return addr
+}
+
+// reset: clear a system's bindings (the explicit "give me fresh IPs" gesture).
+reset_bindings(system: string) {
+    _write(binding_path(system), "")
+}
+
+// dump the current bindings (for `aeo ips` / debugging).
+bindings_dump(system: string) -> string {
+    return _read(binding_path(system))
+}
+
+// ---- internals ----
+
+// lowest address in [lo,hi] whose "<base><n>" doesn't already appear in body.
+_alloc_free(body: string) -> string {
+    n = _range_lo()
+    hi = _range_hi()
+    while n <= hi {
+        cand = "${_range_base()}${string_from_int(n)}"
+        if _contains_addr(body, cand) == 0 {
+            return cand
+        }
+        n = n + 1
+    }
+    return ""   // range exhausted
+}
+
+// look up the address bound to `resource` in the file body ("" if none).
+// lines are "<resource>  <addr>".
+_lookup(body: string, resource: string) -> string {
+    rest = body
+    more = 1
+    while more == 1 {
+        nl = string_index_of(rest, "\n")
+        line = rest
+        if nl >= 0 {
+            line = string_substring(rest, 0, nl)
+            rest = string_substring(rest, nl + 1, string_length(rest))
+        } else {
+            more = 0
+        }
+        // split on the first run of spaces
+        sp = string_index_of(line, " ")
+        if sp >= 0 {
+            nm = string_substring(line, 0, sp)
+            if nm == resource {
+                return _trim_left_spaces(string_substring(line, sp, string_length(line)))
+            }
+        }
+    }
+    return ""
+}
+
+// 1 if the address appears as a value anywhere in body (collision check).
+_contains_addr(body: string, addr: string) -> int {
+    if string_index_of(body, " ${addr}") >= 0 { return 1 }   // "  <addr>"
+    if string_index_of(body, "${addr}\n") >= 0 { return 1 }
+    // exact tail (last line, no trailing newline)
+    bl = string_length(body)
+    al = string_length(addr)
+    if bl >= al {
+        if string_substring(body, bl - al, bl) == addr {
+            // make sure it's a value (preceded by space), not a name fragment
+            if bl > al {
+                if string_char_at(body, bl - al - 1) == 32 { return 1 }
+            }
+        }
+    }
+    return 0
+}
+
+_trim_left_spaces(s: string) -> string {
+    i = 0
+    n = string_length(s)
+    while i < n {
+        if string_char_at(s, i) != 32 { return string_substring(s, i, n) }
+        i = i + 1
+    }
+    return ""
+}
+
+_read(path: string) -> string {
+    content, err = file.read(path)
+    if err != "" {
+        return ""
+    }
+    return content
+}
+_write(path: string, content: string) {
+    err = file.write(path, content)
+}
+_ensure_dir() {
+    // file.write to .aeo/<sys>.ips needs .aeo/ to exist. mkdir -p (idempotent).
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "mkdir -p .aeo")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+}
+
+_atoi(s: string) -> int {
+    n = 0
+    i = 0
+    len = string_length(s)
+    while i < len {
+        c = string_char_at(s, i)
+        if c >= 48 {
+            if c <= 57 {
+                n = n * 10 + (c - 48)
+            }
+        }
+        i = i + 1
+    }
+    return n
+}

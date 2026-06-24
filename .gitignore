@@ -21,3 +21,6 @@
 # Local scratch
 /tmp/
 *.swp
+
+# iterative-dev sticky IP bindings (lib/ipam) — per-dev, not committed
+.aeo/
