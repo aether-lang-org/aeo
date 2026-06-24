@@ -20,9 +20,8 @@
 // AEO_IP_RANGE_LO / AEO_IP_RANGE_HI. Allocator picks the lowest free address.
 
 import std.string (string_length, string_index_of, string_substring, string_from_int, string_char_at)
-import std.os (getenv, run_capture)
-import std.list
-import file
+import std.os (getenv)
+import std.fs (read, write, mkdir_p)
 
 exports (
     resolve_ip, binding_path, reset_bindings, bindings_dump
@@ -153,22 +152,18 @@ _trim_left_spaces(s: string) -> string {
 }
 
 _read(path: string) -> string {
-    content, err = file.read(path)
+    content, err = read(path)
     if err != "" {
         return ""
     }
     return content
 }
 _write(path: string, content: string) {
-    err = file.write(path, content)
+    err = write(path, content)
 }
 _ensure_dir() {
-    // file.write to .aeo/<sys>.ips needs .aeo/ to exist. mkdir -p (idempotent).
-    av = list_new()
-    list_add(av, "-c")
-    list_add(av, "mkdir -p .aeo")
-    out, status, err = run_capture("/bin/sh", av, null)
-    list_free(av)
+    // write to .aeo/<sys>.ips needs .aeo/ to exist. mkdir_p is idempotent.
+    e = mkdir_p(".aeo")
 }
 
 _atoi(s: string) -> int {

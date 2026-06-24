@@ -150,7 +150,7 @@ up(kind: string, res_name: string, image: string, cpus: int, mem: string, tap: s
 // vm-bhyve owns tap/disk/boot/networking; aeo orchestrates it like podman.
 // `vm` needs root, so it runs under sudo (operator pre-authorizes; see the
 // NOPASSWD sudoers note). Idempotent: existing+running VM is a no-op.
-bhyve_up(res_name: string, guest_image: string, realize_target: string, cpus: int, mem: string, network: string, ssh_key: string) -> string {
+bhyve_up(res_name: string, guest_image: string, realize_target: string, guest_ip: string, cpus: int, mem: string, network: string, ssh_key: string) -> string {
     if _bhyve_running(res_name) == 1 {
         return ""
     }
@@ -179,13 +179,12 @@ bhyve_up(res_name: string, guest_image: string, realize_target: string, cpus: in
             }
         }
     }
-    // Before first boot, give the guest a clean STATIC IP (172.16.0.50) by
-    // writing a valid netplan directly into its disk. This is the reliable
-    // path: it sidesteps the bridge DHCP-broadcast issue, and avoids the
-    // cloud-init-schema trap that bit the seed-edit approach. Idempotent —
-    // patch-static-ip.sh skips if already applied. (Best-effort: if the
-    // helper isn't present we still try to boot + wait.)
-    _apply_static_ip(res_name)
+    // Before first boot, give the guest its STATIC IP (guest_ip, resolved per
+    // VM by ipam — no longer a single hardcoded .50) by writing a valid netplan
+    // directly into its disk. Sidesteps the bridge DHCP-broadcast issue + the
+    // cloud-init-schema trap. Idempotent. (Best-effort: if the helper isn't
+    // present we still try to boot + wait.)
+    _apply_static_ip(res_name, guest_ip)
     started = _vm_ok("start", res_name)
     if started == 0 {
         out = _vm_out("start", res_name)
@@ -193,11 +192,11 @@ bhyve_up(res_name: string, guest_image: string, realize_target: string, cpus: in
             return "aeo: 'vm start ${res_name}' failed: ${out}"
         }
     }
-    // Only report success once the guest is actually reachable (ssh on the
-    // static IP) — so the runner doesn't try to bring up nested containers
-    // before the VM is up. AMD guests boot ~130s; wait generously.
-    if _wait_guest_ready() == 0 {
-        return "aeo: vm '${res_name}' started but never became ssh-reachable at 172.16.0.50 (boot/network?)"
+    // Only report success once the guest is actually reachable (ssh on its
+    // resolved IP) — so the runner doesn't bring up nested containers before
+    // the VM is up. Guests boot ~130s; wait generously.
+    if _wait_guest_ready(guest_ip) == 0 {
+        return "aeo: vm '${res_name}' started but never became ssh-reachable at ${guest_ip} (boot/network?)"
     }
     return ""
 }
@@ -218,24 +217,24 @@ _amd_image_present() -> int {
 // Apply the clean static-IP netplan to the VM's disk (proven reliable path).
 // Best-effort via test/patch-static-ip.sh; the script stops the VM, writes
 // /etc/netplan/99-aeo-static.yaml, and is a no-op if already patched.
-_apply_static_ip(res_name: string) -> int {
+_apply_static_ip(res_name: string, guest_ip: string) -> int {
     av = list_new()
     list_add(av, "-c")
     // The script self-sudoes each privileged op (no /bin/sh NOPASSWD), so we
     // invoke it as the normal user. A marker file makes it idempotent
-    // (skip if already patched this VM). Best-effort.
-    list_add(av, "S=${_aeo_home()}/test/patch-static-ip.sh; M=/tmp/aeo-staticip-${res_name}.done; if [ -f \"$S\" ] && [ ! -f \"$M\" ]; then sh \"$S\" ${res_name} 172.16.0.50 >/dev/null 2>&1 && touch \"$M\"; fi; true")
+    // (skip if already patched this VM). guest_ip is ipam-resolved per VM.
+    list_add(av, "S=${_aeo_home()}/test/patch-static-ip.sh; M=/tmp/aeo-staticip-${res_name}.done; if [ -f \"$S\" ] && [ ! -f \"$M\" ]; then sh \"$S\" ${res_name} ${guest_ip} >/dev/null 2>&1 && touch \"$M\"; fi; true")
     out, status, err = run_capture("/bin/sh", av, null)
     list_free(av)
     return 1
 }
 
-// Wait until the guest answers ssh at its static IP. ~5min budget (AMD boot
+// Wait until the guest answers ssh at its (resolved) IP. ~5min budget (boot
 // ~130s + sshd). Returns 1 if reachable, 0 on timeout.
-_wait_guest_ready() -> int {
+_wait_guest_ready(guest_ip: string) -> int {
     av = list_new()
     list_add(av, "-c")
-    list_add(av, "for i in $(seq 1 40); do nc -z -w2 172.16.0.50 22 2>/dev/null && { echo ready; break; }; sleep 8; done")
+    list_add(av, "for i in $(seq 1 40); do nc -z -w2 ${guest_ip} 22 2>/dev/null && { echo ready; break; }; sleep 8; done")
     out, status, err = run_capture("/bin/sh", av, null)
     list_free(av)
     if string_contains(out, "ready") == 1 {
@@ -273,8 +272,8 @@ _aeo_home() -> string {
 //   expose     — the port to publish (from expose()); 0 = none
 // Either dockerfile (build it) OR image (pull+run a stock image, e.g. the
 // redis db tier) — dockerfile wins if both are set.
-guest_container_up(host_vm: string, name: string, dockerfile: string, entrypoint: string, base: string, image: string, expose: int) -> string {
-    ip = _guest_ip(host_vm)
+guest_container_up(host_vm: string, host_ip: string, name: string, dockerfile: string, entrypoint: string, base: string, image: string, expose: int) -> string {
+    ip = _guest_ip(host_vm, host_ip)
     if ip == "" {
         return "aeo: guest VM '${host_vm}' has no reachable IP (booted+networked?) for container '${name}'"
     }
@@ -320,12 +319,13 @@ guest_container_up(host_vm: string, name: string, dockerfile: string, entrypoint
 // The guest VM's IP. Prefers the cloud-init static IP convention
 // (172.16.0.50 on the NAT net); falls back to an ARP/lease lookup by the
 // VM's MAC. Returns "" if not found.
-_guest_ip(host_vm: string) -> string {
+// Resolve the guest's reachable IP. Prefer the ipam-resolved host_ip (the
+// binding bhyve_up assigned this VM); if that doesn't answer ssh, fall back to
+// a MAC->arp/lease lookup. So multiple VMs each resolve to their OWN address.
+_guest_ip(host_vm: string, host_ip: string) -> string {
     av = list_new()
     list_add(av, "-c")
-    // 1) if 172.16.0.50:22 answers, use it (static-IP convention).
-    // 2) else resolve the VM's MAC -> a 172.16.0.x lease/arp entry.
-    list_add(av, "if nc -z -w2 172.16.0.50 22 2>/dev/null; then echo 172.16.0.50; else MAC=$(grep -o 'network0_mac=\"[^\"]*\"' /zroot/vm/${host_vm}/${host_vm}.conf 2>/dev/null | cut -d'\"' -f2); ping -c1 -W1 172.16.0.255 >/dev/null 2>&1; arp -an 2>/dev/null | grep -i \"$MAC\" | grep -oE '172.16.0.[0-9]+' | head -1; fi")
+    list_add(av, "if nc -z -w2 ${host_ip} 22 2>/dev/null; then echo ${host_ip}; else MAC=$(grep -o 'network0_mac=\"[^\"]*\"' /zroot/vm/${host_vm}/${host_vm}.conf 2>/dev/null | cut -d'\"' -f2); ping -c1 -W1 172.16.0.255 >/dev/null 2>&1; arp -an 2>/dev/null | grep -i \"$MAC\" | grep -oE '172.16.0.[0-9]+' | head -1; fi")
     out, status, err = run_capture("/bin/sh", av, null)
     list_free(av)
     return _first_line(out)
@@ -425,7 +425,7 @@ _snapshot_exists(snap: string) -> int {
 //      overlay can't init) came from snapshotting an UNCLEAN guest. Halt and
 //      wait for poweroff BEFORE snapshotting so the journal is consistent.
 //   5. snapshot as snap_target.
-bhyve_realize_cold(builder_vm: string, install_csv: string, unit_writes: string, snap_target: string) -> string {
+bhyve_realize_cold(builder_vm: string, builder_ip: string, install_csv: string, unit_writes: string, snap_target: string) -> string {
     // The guest is already provisioned + booted + ssh-reachable at the static
     // IP (the caller did _bhyve_provision + _apply_static_ip + start + wait).
     apply = "set -e\n"
@@ -447,13 +447,13 @@ bhyve_realize_cold(builder_vm: string, install_csv: string, unit_writes: string,
     // verify podman actually works with overlay before we bless this golden
     apply = "${apply}sudo podman info --format '{{.Store.GraphDriverName}}' >/dev/null\n"
 
-    rerr = _guest_ssh_script(apply)
+    rerr = _guest_ssh_script(builder_ip, apply)
     if rerr != "" {
         return "aeo: cold-realize: applying recipe in '${builder_vm}' failed: ${rerr}"
     }
     // CLEAN shutdown — critical: snapshot only a quiesced fs (else aborted
     // journal -> RO -> overlay broken, the exact bug we diagnosed).
-    _guest_ssh_script("sudo sync; sudo systemctl poweroff &")
+    _guest_ssh_script(builder_ip, "sudo sync; sudo systemctl poweroff &")
     if _wait_vm_stopped(builder_vm) == 0 {
         // force it off if it didn't halt cleanly in time
         _vm_ok("poweroff", builder_vm)
@@ -466,11 +466,11 @@ bhyve_realize_cold(builder_vm: string, install_csv: string, unit_writes: string,
     return ""
 }
 
-// run a multi-line shell script inside the guest over ssh; "" on success.
-_guest_ssh_script(script: string) -> string {
+// run a multi-line shell script inside the guest (at ip) over ssh; "" on success.
+_guest_ssh_script(ip: string, script: string) -> string {
     av = list_new()
     list_add(av, "-c")
-    list_add(av, "ssh -i ${_guest_key()} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 ubuntu@172.16.0.50 ${_shq(script)}")
+    list_add(av, "ssh -i ${_guest_key()} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 ubuntu@${ip} ${_shq(script)}")
     out, status, err = run_capture("/bin/sh", av, null)
     list_free(av)
     if status != 0 {

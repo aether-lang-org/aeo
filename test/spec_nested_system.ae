@@ -31,6 +31,7 @@ import compose (suspend, constrain, grant_fd, egress, ingress, ingress_from, den
 import std.string
 import std.os (getenv, run_capture)
 import std.list
+import ipam (resolve_ip)
 
 // ---- the composition, exactly as an operator would write it ----
 // TWO bhyve VMs on the slim 24.04-minimal+podman base (251MB; the measured
@@ -377,10 +378,13 @@ _http_eq(url: string, want: string) -> int {
     return 0
 }
 
+// The app VM's address for the live-deploy probes. AEO_GUEST_IP overrides;
+// otherwise resolve python_vm's ipam binding (the same sticky address the
+// driver deployed it at) — no hardcoded .50.
 _ip() -> string {
     ip = getenv("AEO_GUEST_IP")
     if string.length(ip) == 0 {
-        return "172.16.0.50"
+        return ipam.resolve_ip("red222", "python_vm")
     }
     return ip
 }

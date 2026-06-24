@@ -23,6 +23,7 @@ import driver_linux
 import driver_bsd
 import driver_vm
 import compose
+import ipam
 import resource (set_state, get_state, STATE_DOWN, STATE_BOOTING, STATE_UP, STATE_FAILED)
 import host (family, profile)
 import aeo_compose (aeo_orchestration)
@@ -217,7 +218,10 @@ driver_up(nm: string, k: string) -> string {
         // host-reachable service in the guest (not a host-local podman run).
         host = compose.get_host(nm)
         if host != "" {
-            return driver_vm.guest_container_up(host, nm, compose.get_dockerfile(nm), compose.get_entrypoint(nm), compose.get_base(nm), compose.get_image(nm), compose.get_expose(nm))
+            // the host VM's ipam-resolved IP (same binding bhyve_up used) — so
+            // the container path ssh's to the right guest, not a hardcoded .50.
+            hip = ipam.resolve_ip(compose.get_system(host), host)
+            return driver_vm.guest_container_up(host, hip, nm, compose.get_dockerfile(nm), compose.get_entrypoint(nm), compose.get_base(nm), compose.get_image(nm), compose.get_expose(nm))
         }
         img = _container_image(nm, "")
         if string_starts_err(img) == 1 {
@@ -235,7 +239,12 @@ driver_up(nm: string, k: string) -> string {
         // (fast); else full-provision. The runner resolves the recipe (it
         // bridges compose<->driver) and passes the clone target down.
         gi = compose.get_guest_image(nm)
-        return driver_vm.bhyve_up(nm, gi, _realize_target(gi), compose.get_cpus(nm), compose.get_memory(nm), compose.get_network(nm), compose.get_ssh_key(nm))
+        // Resolve this VM's IP via the per-project sticky binding (ipam):
+        // reused across re-runs (iterative-dev DX), distinct per VM — retiring
+        // the old single 172.16.0.50 assumption. The runner resolves (it has the
+        // system name) + passes the address down; the driver receives it.
+        gip = ipam.resolve_ip(compose.get_system(nm), nm)
+        return driver_vm.bhyve_up(nm, gi, _realize_target(gi), gip, compose.get_cpus(nm), compose.get_memory(nm), compose.get_network(nm), compose.get_ssh_key(nm))
     }
     if k == "kvm" {
         return driver_vm.up("kvm", nm, compose.get_image(nm), compose.get_cpus(nm), compose.get_memory(nm), compose.get_nic(nm))
