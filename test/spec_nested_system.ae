@@ -158,7 +158,7 @@ PY
 //   check  — data-model assertions only; resolve declare(), assert the tree +
 //            policy, no deployment. Runs anywhere, instant. (DEFAULT.)
 //   up     — `aeo up` the composition, leave it STANDING. No checks.
-//   smoke  — `aeo up`, then the SLIM post-deploy check (the HSBC shape: did it
+//   smoke  — `aeo up`, then the SLIM post-deploy check (deploy-with-verification: did it
 //            come up right?), leave it STANDING. Slim aeocha check. This is
 //            the "deploy + post-deployment verification expected to pass" mode.
 //   suite  — `aeo up`, run the FULLER checks, then TEAR DOWN. (CI shape.)
@@ -259,7 +259,7 @@ _mode_up() -> string {
     return "up: system stood up + left running (no checks)"
 }
 
-// SMOKE — the HSBC shape: deploy, a SLIM post-deploy check (did it come up
+// SMOKE — deploy-with-verification: deploy, a SLIM post-deploy check (did it come up
 // right?), LEAVE IT STANDING. Same aeocha HTTP path as suite — smoke differs
 // only in being slim + staying up (suite is exhaustive + tears down).
 _mode_smoke() -> string {
