@@ -1,8 +1,7 @@
-// examples/silly_addition_cache.ae — THE canonical apex composition: a two-tier system
-// across two confined bhyve VMs on a FreeBSD host. This is what `aeo up` runs;
-// test/spec_nested_system.ae asserts against THIS composition (its smoke/suite
-// modes `aeo up` this file), so the two never drift — the example is the source
-// of truth, the spec is the verifier.
+// examples/silly_addition_cache.ae — THE all-in-one apex demo: a self-contained
+// composition that BOTH declares a two-tier system AND verifies it, off a single
+// file. A shop writes thousands of these, each standing alone — composition +
+// the four operational modes, nothing imported from a sibling spec.
 //
 //   system("silly_addition_cache")  (on a FreeBSD host)
 //     ├─ db_vm     (bhyve VM, Linux guest) ─ db  (redis — a TCP cache)
@@ -19,22 +18,57 @@
 // — see lib/images/README.md). The image_recipe realizing that name is
 // registered at `aeo up` time (lib/images/ubuntu_24_04_minimal_podman.ae).
 //
+// TWO doors into this one file:
+//   - `aeo up examples/silly_addition_cache.ae` — the front-door imports it as
+//     the aeo_compose module and calls aeo_orchestration() (ignores main()).
+//   - `ae run examples/silly_addition_cache.ae` (AEO_MODE=check|up|smoke|suite)
+//     — runs main() → the rich run_aeo() door, asserting/deploying in place.
+//
+// MULTI-MODE (env AEO_MODE) — one artifact, four behaviours off ONE composition:
+//   check  — (DEFAULT) data-model assertions only; no deploy. Instant, anywhere.
+//   up     — `aeo up`, leave the system STANDING. No checks.
+//   smoke  — `aeo up` + a SLIM post-deploy verification, leave it STANDING.
+//   suite  — `aeo up` + the FULLER aeocha checks, then TEAR DOWN. CI shape.
+//
+// Run the verifying modes (aeocha on the include path):
+//   AETHER_INCLUDE_PATH=$HOME/scm/aeocha ae run examples/silly_addition_cache.ae
+//   AEO_MODE=smoke AETHER_INCLUDE_PATH=... ae run examples/silly_addition_cache.ae
+//   AEO_MODE=up ...   /   AEO_MODE=suite ...
+// Deploy modes shell out to `aeo up <this file>`; override binary/home/dsl via
+// AEO / AEO_HOME / AEO_DSL.
+//
 // What's REAL vs. the frontier:
-//   - REAL: grammar + data model + gating + confinement policy. dry-run/status
-//     resolve the full tree; `aeo up` clones the golden, boots each VM at its
+//   - REAL: grammar + data model + gating + confinement policy. check resolves
+//     the full tree; `aeo up` clones the golden, boots each VM at its
 //     ipam-resolved IP, builds+runs both containers over ssh.
 //   - FRONTIER: aeo reaches into the guest over ssh today; the cleaner end-state
-//     hands each VM's resident AEO-AGENT the instructions (containment-
-//     respecting, depth-agnostic). See docs/aeo-agent.md.
+//     hands each VM's resident AEO-AGENT the instructions. See docs/aeo-agent.md.
 
-import std.os (getenv)
-import std.string (string_concat)
+import aeocha
 import compose (system, bhyve_vm, container)
 import compose (image, entrypoint, cpus, memory, guest_image, network, ssh_key, health, expose, depends)
 import compose (suspend, constrain, grant_fd, egress, ingress, ingress_from, deny_egress, start)
+import compose (get_suspended, get_started, get_constraints, get_netpolicy, describe_tree)
+// Two std.string surfaces, intentionally: the NAMED form (string_concat, …) is
+// what THIS file's code calls — and the only form available when `aeo up` inlines
+// this module into the runner (lib/ imports std.string named). The BARE form is
+// required because the aeocha framework (inlined in the verifying modes) calls
+// string.equals/string.length/… ; Aether lets both coexist in one unit.
+import std.string (string_length, string_from_int, string_concat)
+import std.string
+import std.os (getenv, run_capture)
+import std.list
+import ipam
 
 exports ( aeo_orchestration )
 
+// ---- the composition, exactly as an operator would write it ----
+// TWO bhyve VMs on the slim 24.04-minimal+podman base (251MB; the measured best
+// slim guest — see lib/images/README.md): db_vm holds a stock redis; python_vm
+// holds a /add service (readable entrypoint heredoc) that uses redis as a cache,
+// reaching it ACROSS VMs at db_vm's resolved address (REDIS_HOST), under a
+// deny-all egress/ingress whitelist. Each VM's hypervisor is confined under its
+// OWN Capsicum constraint set. This is the function `aeo up` calls.
 aeo_orchestration() {
     system("silly_addition_cache") {
         // PHASE 1: provision + first boot db_vm (the redis VM) UNCONSTRAINED.
@@ -43,7 +77,7 @@ aeo_orchestration() {
             memory("2G")
             guest_image("ubuntu-24.04-minimal+podman")
             network("dhcp")
-            ssh_key(_keypub())
+            ssh_key(_key_pub())
             db = container("db") {
                 image("docker.io/library/redis:alpine")
                 expose(6379)
@@ -73,7 +107,7 @@ aeo_orchestration() {
             memory("2G")
             guest_image("ubuntu-24.04-minimal+podman")
             network("dhcp")
-            ssh_key(_keypub())
+            ssh_key(_key_pub())
             app = container("app") {
                 // The workload as a READABLE heredoc — aeo writes it to /app.py
                 // + synthesizes a COPY-based Dockerfile (COPY builds on every
@@ -120,5 +154,223 @@ PY
     }
 }
 
-// $HOME-based ssh key so a colleague's checkout works without editing source.
-_keypub() -> string { return string_concat(getenv("HOME"), "/.ssh/id_rsa.pub") }
+// ---- MODES (the rich entrypoint) ----
+// run_aeo(mode) is the recommended door — mode in, structured result out. main()
+// below is the lowered fallback for `ae run`. Modes (env AEO_MODE, default
+// "check"):
+//   check  — data-model assertions only; resolve the composition, assert the
+//            tree + policy, no deployment. Runs anywhere, instant. (DEFAULT.)
+//   up     — `aeo up` the composition, leave it STANDING. No checks.
+//   smoke  — `aeo up`, then the SLIM post-deploy check, leave it STANDING.
+//   suite  — `aeo up`, run the FULLER checks, then TEAR DOWN. (CI shape.)
+//
+// smoke vs suite: smoke is slim + leaves the system up (you keep poking it);
+// suite is exhaustive + cleans up after itself.
+run_aeo(mode: string) -> string {
+    aeo_orchestration()                // the composition — always resolved
+    match (mode) {
+        "check" -> { return _mode_check() }
+        "up"    -> { return _mode_up() }
+        "smoke" -> { return _mode_smoke() }
+        "suite" -> { return _mode_suite() }
+        _       -> { return "aeo: unknown AEO_MODE '${mode}' (check|up|smoke|suite)" }
+    }
+}
+
+// CHECK — data-model assertions, in-process, no deploy (the default).
+_mode_check() -> string {
+    fw = aeocha.init()
+
+    aeocha.describe(fw, "nested system: bhyve_vm{ db(redis) ; app }") {
+
+        aeocha.describe("declaration (data model)") {
+            // One snapshot assertion of the WHOLE resolved tree. aeo emits the
+            // canonical model (compose.describe_tree()); we assert it equals the
+            // expected shape — system, nesting, kinds, images, expose, and the
+            // app->db dependency, all in one line. If resolution changes, the
+            // diff shows exactly what moved.
+            aeocha.it("resolves to two top-level VMs, each with its OWN confinement") callback {
+                want = <<TREE
+                    system silly_addition_cache:
+                      bhyve db_vm [guest=ubuntu-24.04-minimal+podman, cpus=2, mem=2G, confined: disk(/zroot/vm/db_vm/disk0.img)=rd,wr, net(tap0)=rd,wr, console(nmdm-db_vm)=rd,wr, net{ingress:6379<-python_vm, egress:DENY-ALL; deny rest}]
+                        container db [image=docker.io/library/redis:alpine, expose=6379]
+                      bhyve python_vm [guest=ubuntu-24.04-minimal+podman, cpus=2, mem=2G, confined: disk(/zroot/vm/python_vm/disk0.img)=rd,wr, net(tap1)=rd,wr, console(nmdm-python_vm)=rd,wr, net{egress->db_vm:6379, ingress:8080; deny rest}]
+                        container app [entrypoint(docker.io/library/python:3-alpine), expose=8080] -> db
+TREE
+                aeocha.assert_str_eq(fw, describe_tree(), want, "resolved tree snapshot")
+            }
+
+            aeocha.it("each VM's constrain block names ITS OWN VM (no floating block)") callback {
+                // The constraints live directly on the VM the constrain(vm){}
+                // block named — db_vm's grants on db_vm, python_vm's on python_vm.
+                aeocha.assert_str_eq(fw, get_suspended("db_vm"), "1", "db_vm suspended")
+                aeocha.assert_str_eq(fw, get_started("db_vm"), "1", "db_vm resumed")
+                aeocha.assert_str_eq(fw, get_constraints("db_vm"),
+                    "disk(/zroot/vm/db_vm/disk0.img)=rd,wr, net(tap0)=rd,wr, console(nmdm-db_vm)=rd,wr",
+                    "db_vm's own fd grants")
+                aeocha.assert_str_eq(fw, get_suspended("python_vm"), "1", "python_vm suspended")
+                aeocha.assert_str_eq(fw, get_constraints("python_vm"),
+                    "disk(/zroot/vm/python_vm/disk0.img)=rd,wr, net(tap1)=rd,wr, console(nmdm-python_vm)=rd,wr",
+                    "python_vm's own fd grants (DIFFERENT from db_vm's)")
+            }
+
+            aeocha.it("python_vm's workload-mode network is a deny-all whitelist") callback {
+                // egress only to redis, ingress only on 8080; everything else
+                // is denied (pf, separate from the Capsicum fd grants).
+                aeocha.assert_str_eq(fw, get_netpolicy("python_vm"),
+                    "egress->db_vm:6379, ingress:8080",
+                    "may reach db_vm:6379 + accept 8080 — and NOTHING else")
+            }
+
+            aeocha.it("db_vm answers 6379 to python_vm ONLY, and BLOCKS all egress") callback {
+                // Peer-restricted ingress: redis on 6379 is reachable by
+                // python_vm alone — a 3rd/4th VM is DENIED (the port answers
+                // exactly one client). Plus egress to NOTHING, so a compromised
+                // redis can't phone home. Both explicit + asserted, not silent.
+                aeocha.assert_str_eq(fw, get_netpolicy("db_vm"),
+                    "ingress:6379<-python_vm, egress:DENY-ALL",
+                    "6379 from python_vm only (no 3rd VM); zero outbound")
+            }
+        }
+
+    }
+
+    aeocha.run_summary(fw)
+    return "check: data-model assertions complete"
+}
+
+// UP — deploy the composition and LEAVE IT STANDING. No checks. The system
+// outlives this process (bhyve/podman daemonize — not children of the spec), so
+// "leave up" is simply: deploy, return, don't tear down.
+_mode_up() -> string {
+    rc = _aeo_up()
+    if rc != 0 {
+        return "up: FAILED (aeo up rc=${string_from_int(rc)})"
+    }
+    return "up: system stood up + left running (no checks)"
+}
+
+// SMOKE — deploy-with-verification: deploy, a SLIM post-deploy check (did it come
+// up right?), LEAVE IT STANDING. Same aeocha HTTP path as suite — smoke differs
+// only in being slim + staying up (suite is exhaustive + tears down).
+_mode_smoke() -> string {
+    rc = _aeo_up()
+    if rc != 0 {
+        return "smoke: deploy FAILED (rc=${string_from_int(rc)}) — no point smoking"
+    }
+    fw = aeocha.init()
+    aeocha.describe(fw, "post-deploy smoke") {
+        aeocha.it("the service answers correctly") callback {
+            base = _base()
+            aeocha.expect_http_get_body_eq(fw, "${base}/add/2/2", "4", "2 + 2 = 4")
+            aeocha.expect_http_get_body_eq(fw, "${base}/add/40/2", "42", "40 + 2 = 42")
+        }
+    }
+    aeocha.run_summary(fw)
+    return "smoke: post-deploy verification ran, system left STANDING"
+}
+
+// SUITE — deploy, run the FULLER checks (aeocha, incl. the cache behaviour),
+// then TEAR DOWN. The CI shape: exhaustive + self-cleaning.
+_mode_suite() -> string {
+    rc = _aeo_up()
+    if rc != 0 {
+        return "suite: deploy FAILED (rc=${string_from_int(rc)})"
+    }
+    fw = aeocha.init()
+    aeocha.describe(fw, "live deployment (full suite)") {
+        aeocha.it("app computes arithmetic over HTTP (2+2=4, 2+3=5, 40+2=42)") callback {
+            base = _base()
+            aeocha.expect_http_get_body_eq(fw, "${base}/add/2/2", "4", "2 + 2 = 4")
+            aeocha.expect_http_get_body_eq(fw, "${base}/add/2/3", "5", "2 + 3 = 5")
+            aeocha.expect_http_get_body_eq(fw, "${base}/add/40/2", "42", "40 + 2 = 42")
+        }
+        aeocha.it("app serves from the db cache (poke redis, read it back)") callback {
+            _redis_set(_ip(), "add:2:3", "CACHED99")
+            aeocha.expect_http_get_body_eq(fw, "${_base()}/add/2/3", "CACHED99", "2+3 -> cached value")
+        }
+    }
+    aeocha.run_summary(fw)
+    _aeo_down()                          // CI shape: clean up after ourselves
+    return "suite: full checks ran, system TORN DOWN"
+}
+
+// main() — the lowered FALLBACK (for `ae run`). Reads AEO_MODE (default check),
+// delegates to the rich run_aeo() door, prints the summary. `aeo up` ignores
+// this and calls aeo_orchestration() directly.
+main() {
+    m = getenv("AEO_MODE")
+    if string_length(m) == 0 {
+        m = "check"
+    }
+    println(run_aeo(m))
+}
+
+// ---- helpers ----
+
+// shell out to `aeo up` the composition (deploy). Returns the exit code.
+_aeo_up() -> int {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "AEO_HOME=${_aeo_home()} ${_aeo_bin()} up ${_dsl()}")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    return status
+}
+_aeo_down() {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "AEO_HOME=${_aeo_home()} ${_aeo_bin()} down ${_dsl()}")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+}
+_aeo_bin() -> string {
+    b = getenv("AEO")
+    if string_length(b) == 0 {
+        return "/tmp/aeo"
+    }
+    return b
+}
+// operator home / ssh key — $HOME-based so a colleague's checkout works unedited.
+// (string_concat, not ${} interpolation — getenv inside ${} mis-parses.)
+_home() -> string { return getenv("HOME") }
+_key_priv() -> string { return string_concat(_home(), "/.ssh/id_rsa") }
+_key_pub() -> string  { return string_concat(_home(), "/.ssh/id_rsa.pub") }
+_aeo_home() -> string {
+    h = getenv("AEO_HOME")
+    if string_length(h) == 0 {
+        return string_concat(_home(), "/aeo")
+    }
+    return h
+}
+_dsl() -> string {
+    d = getenv("AEO_DSL")
+    if string_length(d) == 0 {
+        return "examples/silly_addition_cache.ae"
+    }
+    return d
+}
+
+// The app VM's address for the live-deploy probes: python_vm's sticky ipam
+// binding (the address the driver deployed it at), AEO_GUEST_IP overriding.
+_ip() -> string {
+    return ipam.resolve_ip_or_env("silly_addition_cache", "python_vm")
+}
+
+_base() -> string {
+    return "http://${_ip()}:8080"
+}
+
+// Poke a key into the deployed redis (db) over ssh, so the next GET proves
+// app read from the cache rather than recomputing.
+_redis_set(ip: string, key: string, val: string) {
+    av = list_new()
+    list_add(av, "-i")
+    list_add(av, _key_priv())
+    list_add(av, "-o")
+    list_add(av, "StrictHostKeyChecking=no")
+    list_add(av, "ubuntu@${ip}")
+    list_add(av, "podman exec db redis-cli SET ${key} ${val}")
+    out, status, err = run_capture("/usr/bin/ssh", av, null)
+    list_free(av)
+}

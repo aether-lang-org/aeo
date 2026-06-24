@@ -1,9 +1,9 @@
 # Parked examples
 
-Set aside while the focus is **`examples/silly_addition_cache/`** (the `aeo up`
-target for the apex spec `test/spec_nested_system.ae`). These are smaller
-single-tier demos — strict subsets of the nested two-tier system. Nothing
-deleted; revive with `git mv examples/_parked/<x> examples/`.
+Set aside while the focus is **`examples/silly_addition_cache.ae`** (the all-in-one
+`aeo up` target that also self-verifies via its check/up/smoke/suite modes).
+These are smaller single-tier demos — strict subsets of the nested two-tier
+system. Nothing deleted; revive with `git mv examples/_parked/<x> examples/`.
 
 - `aeo_compose/` — minimal compose entry demo.
 - `jail_compose/` — a BSD jail tier on its own.
