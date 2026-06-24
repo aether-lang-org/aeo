@@ -40,7 +40,7 @@
 //   AETHER_INCLUDE_PATH=~/aeocha (for ae run)
 
 import aeocha
-import capsicum
+import std.capsicum
 import std.string
 import std.list
 

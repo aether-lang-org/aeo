@@ -1,28 +1,43 @@
 # Parked tests / scripts
 
-Set aside while the focus is the apex spec **`test/spec_nested_system.ae`**
-(the max-complexity example: `system { bhyve_vm { db(redis) ; app } }`).
-Everything here is a strict *subset* of what that spec exercises. Nothing here
-is deleted lightly — revive any of it with `git mv test/_parked/<x> test/`.
+What remains here needs a **real privileged backend** (FreeBSD + root: a live
+bhyve VM or jail bring-up) that the in-tree unit/integration suite can't assume.
+Everything that runs unprivileged — including the container-tier specs that
+boot real podman/docker nodes — has been **revived into `test/`**. Revive any
+remaining item with `git mv test/_parked/<x> test/`.
 
-(Pre-Aeocha hand-rolled `demo_*`/`integration_app` versions and the broken
-`spec_capsicum.ae` were DELETED — superseded, see below.)
+The apex showcase is the all-in-one demo **`examples/silly_addition_cache.ae`**
+(`system { bhyve_vm{ db(redis) } ; bhyve_vm{ app } }`), which both declares the
+two-tier system AND self-verifies it via its check/up/smoke/suite modes — that
+is the integration-class showcase. The `test/` specs cover the tech *underneath*
+it module-by-module (compose/ipam/host/driver_linux/driver_bsd/capsicum).
 
-## Still here (valid Aeocha specs / probes — narrower, not stale)
+## Still here (need root + FreeBSD — driven separately, not in run-spec.sh)
 
-- `spec_running_nodes.ae`, `spec_dockerfile.ae`, `spec_integration_app.ae` —
-  Aeocha specs for simpler tiers (real containers compute/communicate;
-  inline-Dockerfile build; container-in-host HTTP). Subsets of the apex.
-- `smoke_*.ae`, `real_*.ae` — driver/host smoke + root-required real
-  bring-up probes (thin / few assertions).
+- `real_bhyve.ae` — boots an ACTUAL bhyve VM via the driver, checks it's alive
+  at the hypervisor level, tears it down. Root + a UEFI bootrom/disk image.
+  Provision: `sudo sh setup-bhyve.sh`; run: `sudo /tmp/real_bhyve`.
+- `real_jail.ae` — boots an ACTUAL jail via the driver against a minimal root,
+  probes liveness with a real jexec health check, tears it down. Root + a
+  populated jail root (see `../setup-jail-root.sh`).
 
 ## Scripts (superseded; kept as historical reference)
 
 - `converge-loop.sh`, `converge-nested.sh` — superseded by
   `test/soup-to-nuts.sh` (DSL-driven deploy + curl).
 - `setup-bhyve.sh`, `setup-guest.sh` — older provisioning helpers; the live
-  prereqs are now `setup-nat.sh` + `patch-amd-image.sh` (+ `setup-base.sh`,
+  prereqs are now `../setup-nat.sh` + `../patch-amd-image.sh` (+ `setup-base.sh`,
   `patch-static-ip.sh`, `setup-jail-root.sh`).
+
+## Revived into test/ (2026-06-24 — was parked under the apex-only narrowing)
+
+- `spec_running_nodes.ae`, `spec_dockerfile.ae`, `spec_integration_app.ae` —
+  Aeocha specs that boot REAL containers via `driver_linux` (compute,
+  communicate, inline-Dockerfile build, container-in-host HTTP). Skip cleanly
+  when no container engine is on PATH.
+- `smoke_host.ae` — host-profile probe (BSD/Linux + capsicum/casper booleans).
+- `smoke_linux.ae` — `driver_linux` up→probe→health→down against a real engine.
+- `smoke_bsd.ae` — `driver_bsd` pure-logic + idempotency (no privilege).
 
 ## Deleted (superseded — listed so the history is clear)
 
