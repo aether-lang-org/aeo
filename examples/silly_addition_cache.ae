@@ -63,19 +63,21 @@ import ipam
 exports ( aeo_orchestration )
 
 // ---- the composition, exactly as an operator would write it ----
-// TWO bhyve VMs on the slim 24.04-minimal+podman base (251MB; the measured best
-// slim guest — see lib/images/README.md): db_vm holds a stock redis; python_vm
-// holds a /add service (readable entrypoint heredoc) that uses redis as a cache,
-// reaching it ACROSS VMs at db_vm's resolved address (REDIS_HOST), under a
-// deny-all egress/ingress whitelist. Each VM's hypervisor is confined under its
-// OWN Capsicum constraint set. This is the function `aeo up` calls.
+// TWO bhyve VMs on a slim systemd/netplan guest. The guest image is SWAPPABLE
+// via AEO_GUEST_IMAGE (see _guest_image() below) so this same demo runs the
+// whole lib/images/ permutation set; it defaults to the measured-best slim base
+// "ubuntu-24.04-minimal+podman" (251MB — see lib/images/README.md). db_vm holds
+// a stock redis; python_vm holds a /add service (readable entrypoint heredoc)
+// that uses redis as a cache, reaching it ACROSS VMs at db_vm's resolved address
+// (REDIS_HOST), under a deny-all egress/ingress whitelist. Each VM's hypervisor
+// is confined under its OWN Capsicum constraint set. The function `aeo up` calls.
 aeo_orchestration() {
     system("silly_addition_cache") {
         // PHASE 1: provision + first boot db_vm (the redis VM) UNCONSTRAINED.
         db_vm = bhyve_vm("db_vm") {
             cpus(2)
             memory("2G")
-            guest_image("ubuntu-24.04-minimal+podman")
+            guest_image(_guest_image())
             network("dhcp")
             ssh_key(_key_pub())
             db = container("db") {
@@ -105,7 +107,7 @@ aeo_orchestration() {
         python_vm = bhyve_vm("python_vm") {
             cpus(2)
             memory("2G")
-            guest_image("ubuntu-24.04-minimal+podman")
+            guest_image(_guest_image())
             network("dhcp")
             ssh_key(_key_pub())
             app = container("app") {
@@ -190,13 +192,17 @@ _mode_check() -> string {
             // app->db dependency, all in one line. If resolution changes, the
             // diff shows exactly what moved.
             aeocha.it("resolves to two top-level VMs, each with its OWN confinement") callback {
-                want = <<TREE
-                    system silly_addition_cache:
-                      bhyve db_vm [guest=ubuntu-24.04-minimal+podman, cpus=2, mem=2G, confined: disk(/zroot/vm/db_vm/disk0.img)=rd,wr, net(tap0)=rd,wr, console(nmdm-db_vm)=rd,wr, net{ingress:6379<-python_vm, egress:DENY-ALL; deny rest}]
-                        container db [image=docker.io/library/redis:alpine, expose=6379]
-                      bhyve python_vm [guest=ubuntu-24.04-minimal+podman, cpus=2, mem=2G, confined: disk(/zroot/vm/python_vm/disk0.img)=rd,wr, net(tap1)=rd,wr, console(nmdm-python_vm)=rd,wr, net{egress->db_vm:6379, ingress:8080; deny rest}]
-                        container app [entrypoint(docker.io/library/python:3-alpine), expose=8080] -> db
-TREE
+                // Built with ${gi} interpolation (a <<TREE heredoc is RAW — it
+                // would NOT interpolate) so the snapshot tracks AEO_GUEST_IMAGE:
+                // check stays correct on any lib/images/ guest, not just the
+                // default. Everything but the two guest= fields is image-independent.
+                gi = _guest_image()
+                ln1 = "system silly_addition_cache:\n"
+                ln2 = "  bhyve db_vm [guest=${gi}, cpus=2, mem=2G, confined: disk(/zroot/vm/db_vm/disk0.img)=rd,wr, net(tap0)=rd,wr, console(nmdm-db_vm)=rd,wr, net{ingress:6379<-python_vm, egress:DENY-ALL; deny rest}]\n"
+                ln3 = "    container db [image=docker.io/library/redis:alpine, expose=6379]\n"
+                ln4 = "  bhyve python_vm [guest=${gi}, cpus=2, mem=2G, confined: disk(/zroot/vm/python_vm/disk0.img)=rd,wr, net(tap1)=rd,wr, console(nmdm-python_vm)=rd,wr, net{egress->db_vm:6379, ingress:8080; deny rest}]\n"
+                ln5 = "    container app [entrypoint(docker.io/library/python:3-alpine), expose=8080] -> db"
+                want = string_concat(string_concat(string_concat(ln1, ln2), string_concat(ln3, ln4)), ln5)
                 aeocha.assert_str_eq(fw, describe_tree(), want, "resolved tree snapshot")
             }
 
@@ -349,6 +355,20 @@ _dsl() -> string {
         return "examples/silly_addition_cache.ae"
     }
     return d
+}
+
+// Both VMs' guest image — AEO_GUEST_IMAGE swaps the whole demo onto any guest in
+// lib/images/ (driver_vm resolves the base URL by the part before '+', so any of
+// ubuntu-24.04-minimal+podman / ubuntu-22.04-minimal+podman / ubuntu-22.04+podman
+// / debian-12+podman / alpine-3.20+podman works). Default = measured-best slim.
+// check-mode's tree snapshot interpolates this, so check stays correct under any
+// AEO_GUEST_IMAGE — the env applies cleanly to every mode.
+_guest_image() -> string {
+    g = getenv("AEO_GUEST_IMAGE")
+    if string_length(g) == 0 {
+        return "ubuntu-24.04-minimal+podman"
+    }
+    return g
 }
 
 // The app VM's address for the live-deploy probes: python_vm's sticky ipam

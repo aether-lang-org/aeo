@@ -11,6 +11,14 @@ aeo_orchestration() {
 }
 ```
 
+The apex demo `examples/silly_addition_cache.ae` reads the guest image from
+`AEO_GUEST_IMAGE` (default `ubuntu-24.04-minimal+podman`), so the SAME demo runs
+the whole permutation set below — e.g.
+`AEO_GUEST_IMAGE=debian-12+podman AEO_MODE=check ae run examples/silly_addition_cache.ae`.
+`driver_vm` resolves the base-image URL from the part before `+`, so any name in
+this table works without importing its recipe (the recipe only adds the
+golden-clone fast path + systemd/netplan layers).
+
 ## How well each works (measured on the GhostBSD/bhyve box, 2026-06-22)
 
 Cold-provisioned each from its image; checked boot, network (static IP on the
