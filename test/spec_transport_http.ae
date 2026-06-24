@@ -1,0 +1,90 @@
+// spec_transport_http.ae — the aeo-agent CONDUIT (lib/transport_http), tested
+// offline (no live socket), exactly as aeb tests its agent core
+// (tests/test_agent_scope.ae): the queue + auth + protocol round-trip logic,
+// not a bound port. The live HTTP path (serve_create -> a real listener, the
+// client send_command/probe_health over TCP) is integration, exercised when the
+// agent actually runs in a guest.
+//
+//   sh test/run-spec.sh test/spec_transport_http.ae
+//
+// Covers:
+//   - the inbound queue drains in ARRIVAL order, one command per recv_one
+//   - queue_pending() tracks depth; recv_one("") returns "" when drained
+//   - a full protocol line round-trips through the queue INTACT (the
+//     config-KV-aliasing dangling-string bug is regression-guarded here)
+//   - auth is FAIL-CLOSED: token_ok denies when no token is configured, denies a
+//     wrong token, allows the configured token
+
+import aeocha
+import transport_http (default_port, set_serve_token, token_ok, queue_push, recv_one, queue_pending)
+import protocol (encode_boot, encode_halt, verb_of, token_of, arg1_of)
+import std.string (string_from_int)
+import std.string   // bare form too: aeocha (inlined) calls string.X — aether#870
+
+main() {
+    fw = aeocha.init()
+
+    aeocha.describe(fw, "aeo-agent conduit (transport_http) — offline core") {
+
+        aeocha.describe("the inbound queue") {
+            aeocha.it("drains commands in arrival order, one per recv_one") callback {
+                queue_push("boot tok n1")
+                queue_push("halt tok n2")
+                queue_push("probe tok n3")
+                a = recv_one("")
+                b = recv_one("")
+                c = recv_one("")
+                aeocha.assert_str_eq(fw, a, "boot tok n1", "1st out = 1st in")
+                aeocha.assert_str_eq(fw, b, "halt tok n2", "2nd out = 2nd in")
+                aeocha.assert_str_eq(fw, c, "probe tok n3", "3rd out = 3rd in")
+            }
+
+            aeocha.it("recv_one returns \"\" once drained") callback {
+                d = recv_one("")
+                aeocha.assert_str_eq(fw, d, "", "empty queue -> empty string")
+                aeocha.assert_str_eq(fw, string_from_int(queue_pending()), "0", "0 pending")
+            }
+        }
+
+        aeocha.describe("protocol round-trips through the queue INTACT") {
+            // Regression guard: config.get hands back the STORED buffer (not a
+            // copy); an over-eager slot-clear used to free it under the returned
+            // string -> garbage. A real encoded line must survive + re-parse.
+            aeocha.it("an encoded boot line survives the queue and re-parses") callback {
+                line = encode_boot("s3cret", "db_vm")
+                queue_push(line)
+                got = recv_one("")
+                aeocha.assert_str_eq(fw, got, "boot s3cret db_vm", "line intact (no dangling)")
+                aeocha.assert_str_eq(fw, verb_of(got), "boot", "verb parses")
+                aeocha.assert_str_eq(fw, token_of(got), "s3cret", "token parses")
+                aeocha.assert_str_eq(fw, arg1_of(got), "db_vm", "node parses")
+            }
+        }
+
+        aeocha.describe("auth is fail-closed (single-parent token)") {
+            aeocha.it("denies when NO token is configured") callback {
+                set_serve_token("")
+                aeocha.assert_str_eq(fw, string_from_int(token_ok("boot anything n1")), "0",
+                    "no token configured -> deny (fail-closed)")
+            }
+            aeocha.it("denies a WRONG token") callback {
+                set_serve_token("right")
+                aeocha.assert_str_eq(fw, string_from_int(token_ok(encode_halt("wrong", "n1"))), "0",
+                    "mismatched token -> deny")
+            }
+            aeocha.it("allows the CONFIGURED token") callback {
+                set_serve_token("right")
+                aeocha.assert_str_eq(fw, string_from_int(token_ok(encode_boot("right", "n1"))), "1",
+                    "matching token -> allow")
+            }
+        }
+
+        aeocha.describe("conduit constants") {
+            aeocha.it("listens on a port beside aeb-agent's 9440") callback {
+                aeocha.assert_str_eq(fw, string_from_int(default_port()), "9450", "default port 9450")
+            }
+        }
+    }
+
+    aeocha.run_summary(fw)
+}
