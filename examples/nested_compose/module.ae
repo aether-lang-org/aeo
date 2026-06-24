@@ -35,6 +35,8 @@
 // Import the openers (system + the block-host bhyve_vm + jail + container)
 // and the block setters.
 
+import std.os (getenv)
+import std.string (string_concat)
 import compose (system, bhyve_vm, container)
 import compose (dockerfile, image, cpus, memory, guest_image, network, ssh_key, health, expose, depends)
 
@@ -49,7 +51,7 @@ aeo_orchestration() {
             // The guest, declared — aeo provisions it via vm-bhyve:
             guest_image("ubuntu-22.04")     // UEFI cloud image, netplan-native
             network("dhcp")              // get an IP on the host bridge
-            ssh_key("/home/paul/.ssh/id_rsa.pub")   // so aeo can ssh in
+            ssh_key(_keypub())   // so aeo can ssh in
 
             // Tier 1: db — a real TCP store. Stock redis, zero config; the
             // app caches computed sums in it (crude memoization). Few lines:
@@ -99,3 +101,6 @@ DOCKER
         }
     }
 }
+
+// $HOME-based ssh key so a colleague's checkout works without editing source.
+_keypub() -> string { return string_concat(getenv("HOME"), "/.ssh/id_rsa.pub") }

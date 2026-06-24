@@ -24,7 +24,7 @@
 set -u
 
 GOLDEN="${GOLDEN:-aeo-base@golden}"
-KEY="${KEY:-/home/paul/.ssh/id_rsa}"
+KEY="${KEY:-$HOME/.ssh/id_rsa}"
 N="${N:-1}"
 CAT="${1:-all}"
 

@@ -17,7 +17,7 @@
 //   suite  — `aeo up` + the FULLER aeocha checks, then TEAR DOWN. CI shape.
 //
 // Run (aeocha on the include path):
-//   AETHER_INCLUDE_PATH=/home/paul/scm/aeocha ae run test/spec_nested_system.ae
+//   AETHER_INCLUDE_PATH=$HOME/scm/aeocha ae run test/spec_nested_system.ae
 //   AEO_MODE=smoke AETHER_INCLUDE_PATH=... ae run test/spec_nested_system.ae
 //   AEO_MODE=up    ...   /   AEO_MODE=suite ...
 // Deploy modes shell out to `aeo up <AEO_DSL>` (default
@@ -53,7 +53,7 @@ declare() {
             memory("2G")
             guest_image("ubuntu-24.04-minimal+podman")
             network("dhcp")
-            ssh_key("/home/paul/.ssh/id_rsa.pub")
+            ssh_key(_key_pub())
             db = container("db") {
                 image("docker.io/library/redis:alpine")
                 expose(6379)
@@ -96,7 +96,7 @@ declare() {
             memory("2G")
             guest_image("ubuntu-24.04-minimal+podman")
             network("dhcp")
-            ssh_key("/home/paul/.ssh/id_rsa.pub")
+            ssh_key(_key_pub())
             app = container("app") {
                 // The workload as a READABLE heredoc — aeo writes it to
                 // /app.py + synthesizes a COPY-based Dockerfile (no printf, no
@@ -337,10 +337,15 @@ _aeo_bin() -> string {
     }
     return b
 }
+// operator home / ssh key — $HOME-based so a colleague's checkout works unedited.
+// (string.concat, not ${} interpolation — getenv inside ${} mis-parses.)
+_home() -> string { return getenv("HOME") }
+_key_priv() -> string { return string.concat(_home(), "/.ssh/id_rsa") }
+_key_pub() -> string  { return string.concat(_home(), "/.ssh/id_rsa.pub") }
 _aeo_home() -> string {
     h = getenv("AEO_HOME")
     if string.length(h) == 0 {
-        return "/home/paul/aeo"
+        return string.concat(_home(), "/aeo")
     }
     return h
 }
@@ -389,7 +394,7 @@ _base() -> string {
 _redis_set(ip: string, key: string, val: string) {
     av = list_new()
     list_add(av, "-i")
-    list_add(av, "/home/paul/.ssh/id_rsa")
+    list_add(av, _key_priv())
     list_add(av, "-o")
     list_add(av, "StrictHostKeyChecking=no")
     list_add(av, "ubuntu@${ip}")

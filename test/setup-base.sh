@@ -22,7 +22,7 @@ set -eu
 BASE="aeo-base"
 IMG="jammy-server-cloudimg-amd64.img"
 URL="https://cloud-images.ubuntu.com/jammy/current/$IMG"
-KEY="${KEY:-/home/paul/.ssh/id_rsa.pub}"
+KEY="${KEY:-$HOME/.ssh/id_rsa.pub}"
 
 case "${1:-}" in
 --destroy)
@@ -51,7 +51,7 @@ case "${1:-}" in
     for n in $(seq 200 254); do ping -c1 -W1 192.168.0.$n >/dev/null 2>&1; done
     BIP=$(arp -a 2>/dev/null | grep -i "$MAC" | grep -oE '192.168.0.[0-9]+' | head -1)
     if [ -n "$BIP" ]; then
-        ssh -i /home/paul/.ssh/id_rsa -o StrictHostKeyChecking=no ubuntu@"$BIP" '
+        ssh -i $HOME/.ssh/id_rsa -o StrictHostKeyChecking=no ubuntu@"$BIP" '
           sudo tee /etc/netplan/99-aeo-dhcp.yaml >/dev/null <<EOF
 network:
   version: 2

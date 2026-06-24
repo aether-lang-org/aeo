@@ -245,12 +245,17 @@ _wait_guest_ready() -> int {
 }
 
 // aeo's home (where test/ scripts live) — AEO_HOME, else the repo default.
+// The operator's home dir (for ssh keys etc.) — $HOME, so a colleague's
+// checkout works without editing source. Falls back to "" only if HOME is unset.
+_home() -> string {
+    return getenv("HOME")
+}
 _aeo_home() -> string {
     h = getenv("AEO_HOME")
     if string_length(h) > 0 {
         return h
     }
-    return "/home/paul/aeo"
+    return "${_home()}/aeo"
 }
 
 // Bring a container UP INSIDE a guest VM (the nested-execution wire). The
@@ -327,7 +332,11 @@ _guest_ip(host_vm: string) -> string {
 }
 
 _guest_key() -> string {
-    return "/home/paul/.ssh/id_rsa"
+    k = getenv("AEO_SSH_KEY")
+    if string_length(k) > 0 {
+        return k
+    }
+    return "${_home()}/.ssh/id_rsa"
 }
 
 // First non-empty line of s, trimmed of a trailing newline.
@@ -461,7 +470,7 @@ bhyve_realize_cold(builder_vm: string, install_csv: string, unit_writes: string,
 _guest_ssh_script(script: string) -> string {
     av = list_new()
     list_add(av, "-c")
-    list_add(av, "ssh -i /home/paul/.ssh/id_rsa -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 ubuntu@172.16.0.50 ${_shq(script)}")
+    list_add(av, "ssh -i ${_guest_key()} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 ubuntu@172.16.0.50 ${_shq(script)}")
     out, status, err = run_capture("/bin/sh", av, null)
     list_free(av)
     if status != 0 {
@@ -561,7 +570,7 @@ _bhyve_provision(res_name: string, guest_image: string, ssh_key: string, network
     }
     key = ssh_key
     if string_length(key) == 0 {
-        key = "/home/paul/.ssh/id_rsa.pub"
+        key = "${_home()}/.ssh/id_rsa.pub"
     }
     nc = cpus
     if nc < 1 {

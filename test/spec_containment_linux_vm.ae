@@ -17,7 +17,7 @@
 
 import aeocha
 import std.string
-import std.os (run_capture)
+import std.os (run_capture, getenv)
 import std.list
 import std.config
 
@@ -68,7 +68,7 @@ main() {
 
 _run_harness() -> string {
     av = list_new()
-    list_add(av, "/home/paul/aeo/test/containment_harness_linux.py")
+    list_add(av, string.concat(_aeohome(), "/test/containment_harness_linux.py"))
     out, status, err = run_capture("/usr/local/bin/python3", av, null)
     list_free(av)
     if string.length(out) == 0 {

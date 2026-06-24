@@ -6,9 +6,9 @@
 # pipe. Prints REPORT <line> for the aeocha spec to assert on. The pf on the
 # host blocks arbitrary aeonat->host ports, so stdout-over-ssh is the permitted
 # channel (sshd:22 is reachable; high ports are not).
-import subprocess, sys
+import subprocess, sys, os.path
 IP = sys.argv[1] if len(sys.argv) > 1 else "172.16.0.50"
-KEY = "/home/paul/.ssh/id_rsa"
+KEY = os.path.expanduser("~/.ssh/id_rsa")
 SRC = "/tmp/capprobe_freebsd_stdout.c"
 def gssh(cmd):
     return subprocess.run(["ssh","-i",KEY,"-o","StrictHostKeyChecking=no",

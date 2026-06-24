@@ -27,6 +27,7 @@ import aeocha
 import capsicum
 import compose (system, bhyve_vm, container, cpus, memory, guest_image, network, ssh_key, expose, suspend, constrain, grant_fd, start, get_constraints)
 import std.string
+import std.os (getenv)
 import std.list
 
 extern aeo_open_fd(path: string, write: int) -> int
@@ -41,7 +42,7 @@ declare() {
             memory("2G")
             guest_image("ubuntu-24.04-minimal+podman")
             network("dhcp")
-            ssh_key("/home/paul/.ssh/id_rsa.pub")
+            ssh_key(_keypub())
             d = container("db") { expose(6379) }
         }
         suspend(vm)
@@ -131,3 +132,5 @@ main() {
 
 _i(n: int) -> string { return string.from_int(n) }
 _ne0(n: int) -> int { if n == 0 { return 0 } return 1 }
+
+_keypub() -> string { return string.concat(getenv("HOME"), "/.ssh/id_rsa.pub") }

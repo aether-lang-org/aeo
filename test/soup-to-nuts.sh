@@ -46,7 +46,7 @@ echo "  /add/2/3  = $a   (expect 5)"
 echo "  /add/40/2 = $b   (expect 42)"
 
 echo "=== prove the cache: overwrite db, re-request, expect the CACHED value ==="
-ssh -i /home/paul/.ssh/id_rsa -o StrictHostKeyChecking=no ubuntu@"$GIP" \
+ssh -i $HOME/.ssh/id_rsa -o StrictHostKeyChecking=no ubuntu@"$GIP" \
     'podman exec db redis-cli SET add:2:3 CACHED99 >/dev/null 2>&1' 2>/dev/null
 c=$(curl -fsS -m 8 "http://$GIP:8080/add/2/3" 2>/dev/null)
 echo "  /add/2/3 after cache poke = $c   (expect CACHED99 — proves app read db)"
