@@ -21,7 +21,7 @@
 //   AEO_MODE=smoke AETHER_INCLUDE_PATH=... ae run test/spec_nested_system.ae
 //   AEO_MODE=up    ...   /   AEO_MODE=suite ...
 // Deploy modes shell out to `aeo up <AEO_DSL>` (default
-// examples/silly_addition_cache/module.ae); override the binary/home/dsl via
+// examples/silly_addition_cache.ae); override the binary/home/dsl via
 // AEO / AEO_HOME / AEO_DSL.
 
 import aeocha
@@ -347,7 +347,7 @@ _aeo_home() -> string {
 _dsl() -> string {
     d = getenv("AEO_DSL")
     if string.length(d) == 0 {
-        return "examples/silly_addition_cache/module.ae"
+        return "examples/silly_addition_cache.ae"
     }
     return d
 }

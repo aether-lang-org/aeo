@@ -1,4 +1,4 @@
-// examples/silly_addition_cache — THE canonical apex composition: a two-tier system
+// examples/silly_addition_cache.ae — THE canonical apex composition: a two-tier system
 // across two confined bhyve VMs on a FreeBSD host. This is what `aeo up` runs;
 // test/spec_nested_system.ae asserts against THIS composition (its smoke/suite
 // modes `aeo up` this file), so the two never drift — the example is the source

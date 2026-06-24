@@ -11,7 +11,7 @@
 # This stands in for an operator's provision(...) step — aeo does not ship a
 # userland; it orchestrates one the operator populates. The silly_addition_cache
 # example declares dataset("zroot/jails/db"), so `setup-jail-root.sh db` is
-# the prerequisite for `aeo up examples/silly_addition_cache/module.ae`.
+# the prerequisite for `aeo up examples/silly_addition_cache.ae`.
 set -eu
 
 if [ "${1:-}" = "--teardown" ]; then
@@ -41,4 +41,4 @@ cp -a /rescue/. "$ROOT/rescue/"
 ln -sf /rescue/sh "$ROOT/bin/sh" 2>/dev/null || true
 
 echo "jail root ready at $ROOT (rescue tools installed)"
-echo "now:  sudo aeo up examples/silly_addition_cache/module.ae   (db will boot)"
+echo "now:  sudo aeo up examples/silly_addition_cache.ae   (db will boot)"
