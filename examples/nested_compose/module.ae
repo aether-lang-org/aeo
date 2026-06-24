@@ -1,104 +1,122 @@
-// examples/nested_compose — the nesting demo: a two-tier Linux app INSIDE a
-// bhyve VM on a FreeBSD host. "Linux inside GhostBSD", and aeo's realization
-// of the Principles of Containment nesting rule: each contained item is
-// further restricted without knowing its depth.
+// examples/nested_compose — THE canonical apex composition: a two-tier system
+// across two confined bhyve VMs on a FreeBSD host. This is what `aeo up` runs;
+// test/spec_nested_system.ae asserts against THIS composition (its smoke/suite
+// modes `aeo up` this file), so the two never drift — the example is the source
+// of truth, the spec is the verifier.
 //
 //   system("red222")  (on a FreeBSD host)
-//     └─ myapp (bhyve VM, a Linux guest)
-//          ├─ db  (redis container — a TCP cache, INSIDE the VM)
-//          └─ app (python container, INSIDE the VM) ── depends ──► db
+//     ├─ db_vm     (bhyve VM, Linux guest) ─ db  (redis — a TCP cache)
+//     └─ python_vm (bhyve VM, Linux guest) ─ app (python /add service) ─► db_vm:6379
 //
-// Both tiers are Linux containers, so they live INSIDE the bhyve Linux VM
-// (a Linux container can't run directly on the FreeBSD host kernel — aeo's
-// host-gating fast-fails a `container` declared at the BSD host level). The
-// app speaks the redis wire protocol to db over the guest's localhost:
-// GET the cached sum, compute + SET on a miss — a real two-tier system, a
-// few DSL lines per tier.
+// Each VM's HYPERVISOR is confined under its OWN Capsicum grant set (disk/tap/
+// console fds), and a deny-default pf port policy: db_vm answers 6379 to
+// python_vm ONLY (a 3rd VM is denied) and reaches OUT to nothing (a compromised
+// redis can't exfiltrate); python_vm may egress only to db_vm:6379 and accept
+// only 8080. The app reaches redis ACROSS VMs at db_vm's resolved address
+// (REDIS_HOST), not 127.0.0.1.
+//
+// Slim base: "ubuntu-24.04-minimal+podman" (251MB, the measured-best slim guest
+// — see lib/images/README.md). The image_recipe realizing that name is
+// registered at `aeo up` time (lib/images/ubuntu_24_04_minimal_podman.ae).
 //
 // What's REAL vs. the frontier:
-//   - REAL today: the grammar + data model + gating. `aeo status`/`dry-run`
-//     resolve the full nested tree — myapp as a bhyve VM, db + app nested
-//     inside it, app depends(db) ordering db first.
-//   - REAL now too: `aeo up` actually creates `app` INSIDE the running
-//     `myapp` guest. The runner routes a nested container (get_host != "")
-//     to driver_vm.guest_container_up: it ssh's into the guest, writes this
-//     inline Dockerfile, podman-builds + runs it with expose(8080)
-//     published — so `app` runs in the VM, reachable from the host at
-//     <guest-ip>:8080. Driven entirely by this DSL (no shell script).
-//   - FRONTIER: today aeo reaches into the guest over ssh. The cleaner
-//     end-state hands `myapp`'s resident AEO-AGENT the instructions for
-//     `app` (and anything below it); the agent brings it up locally and
-//     reports back out — containment-respecting + depth-agnostic. See
-//     docs/aeo-agent.md. (Gated in practice by the intermittent AMD Ryzen
-//     guest-boot hang — see docs/bhyve-networking-journey.md.)
-//
-// Import the openers (system + the block-host bhyve_vm + jail + container)
-// and the block setters.
+//   - REAL: grammar + data model + gating + confinement policy. dry-run/status
+//     resolve the full tree; `aeo up` clones the golden, boots each VM at its
+//     ipam-resolved IP, builds+runs both containers over ssh.
+//   - FRONTIER: aeo reaches into the guest over ssh today; the cleaner end-state
+//     hands each VM's resident AEO-AGENT the instructions (containment-
+//     respecting, depth-agnostic). See docs/aeo-agent.md.
 
 import std.os (getenv)
 import std.string (string_concat)
 import compose (system, bhyve_vm, container)
-import compose (dockerfile, image, cpus, memory, guest_image, network, ssh_key, health, expose, depends)
+import compose (image, entrypoint, cpus, memory, guest_image, network, ssh_key, health, expose, depends)
+import compose (suspend, constrain, grant_fd, egress, ingress, ingress_from, deny_egress, start)
 
 exports ( aeo_orchestration )
 
 aeo_orchestration() {
     system("red222") {
-
-        bhyve_vm("myapp") {
+        // PHASE 1: provision + first boot db_vm (the redis VM) UNCONSTRAINED.
+        db_vm = bhyve_vm("db_vm") {
             cpus(2)
             memory("2G")
-            // The guest, declared — aeo provisions it via vm-bhyve:
-            guest_image("ubuntu-22.04")     // UEFI cloud image, netplan-native
-            network("dhcp")              // get an IP on the host bridge
-            ssh_key(_keypub())   // so aeo can ssh in
-
-            // Tier 1: db — a real TCP store. Stock redis, zero config; the
-            // app caches computed sums in it (crude memoization). Few lines:
-            // an image and the port. Comes up before app (app depends on it).
-            //
-            // SCOPE of expose(p) today: the driver runs containers with
-            // `--network host`, so the port binds the GUEST VM's network
-            // stack. That means port p is reachable (a) by sibling containers
-            // in this VM (app -> 127.0.0.1:6379), (b) anywhere in the guest
-            // OS, and (c) from the GhostBSD host at <guest-ip>:p. It is NOT
-            // reachable from the wider LAN — the guest sits on the host's NAT
-            // net (172.16.0.0/24), which only forwards outbound. So 6379 here
-            // is slightly over-exposed (host-reachable though only app needs
-            // it); a future model could keep db on a private podman net and
-            // only -p publish expose()'d ports. See driver_vm guest_container_up.
+            guest_image("ubuntu-24.04-minimal+podman")
+            network("dhcp")
+            ssh_key(_keypub())
             db = container("db") {
                 image("docker.io/library/redis:alpine")
                 expose(6379)
                 health("redis-cli ping")
             }
+        }
 
-            // Tier 2: app — the workload. A Python (stdlib, no pip) HTTP
-            // arithmetic service, GET /add/2/3 -> "5", that uses db
-            // idiomatically: it speaks the redis wire protocol (RESP) over a
-            // raw socket — GET the cached answer, and on a miss compute it +
-            // SET it. Both tiers are containers in this VM, talking over the
-            // guest's localhost. expose(8080) makes app reachable from the
-            // host; depends(db) orders db first.
+        // PHASE 2: confine db_vm's hypervisor — its OWN grant set + port policy.
+        suspend(db_vm)
+        constrain(db_vm) {
+            // Capsicum FD GRANTS — which kernel objects the bhyve PROCESS may
+            // touch (NOT ports): disk image, tap DEVICE, console.
+            grant_fd("disk",    "/zroot/vm/db_vm/disk0.img", "rd,wr")
+            grant_fd("net",     "tap0", "rd,wr")
+            grant_fd("console", "nmdm-db_vm", "rd,wr")
+            // PF PORT POLICY — db_vm is the redis SERVER:
+            ingress_from(6379, "python_vm")  // 6379 from python_vm ONLY (no 3rd VM)
+            deny_egress()                    // reach out to NOTHING (no exfiltration)
+        }
+        start(db_vm)
+
+        // PHASE 3: provision python_vm (the app VM), then confine it with its
+        // OWN, DIFFERENT grant set. app reaches redis at db_vm's address via
+        // REDIS_HOST (cross-VM), not 127.0.0.1.
+        python_vm = bhyve_vm("python_vm") {
+            cpus(2)
+            memory("2G")
+            guest_image("ubuntu-24.04-minimal+podman")
+            network("dhcp")
+            ssh_key(_keypub())
             app = container("app") {
-                // The app.py is written via a single `RUN printf '...\n...'`
-                // line, NOT a Dockerfile `RUN cat <<'PY'` heredoc: the guest's
-                // podman (Ubuntu 22.04 ships 3.4.x) does not support RUN
-                // heredocs (its Dockerfile parser reads the body lines as
-                // instructions). printf is portable across podman versions.
-                // (The OUTER <<DOCKER is an Aether heredoc — fine; only the
-                // inner Dockerfile heredoc was the problem.)
-                dockerfile(<<DOCKER
-                    FROM docker.io/library/python:3-alpine
-                    RUN printf 'import http.server as h, socket\ndef rcmd(*a):\n s=socket.create_connection(("127.0.0.1",6379),1)\n s.sendall(("*%%d\\r\\n"%%len(a)+"".join("$%%d\\r\\n%%s\\r\\n"%%(len(x),x) for x in a)).encode())\n r=s.recv(4096); s.close(); return r\nclass A(h.BaseHTTPRequestHandler):\n def do_GET(self):\n  p=self.path.strip("/").split("/")\n  try:\n   k="add:%%s:%%s"%%(p[1],p[2]); c=rcmd("GET",k)\n   if c[:1]==b"$" and c[1:2]!=b"-": b=c.split(b"\\r\\n")[1].decode()\n   else: b=str(int(p[1])+int(p[2])); rcmd("SET",k,b)\n  except: b="err"\n  self.send_response(200); self.end_headers(); self.wfile.write(b.encode())\n def log_message(self,*a): pass\nh.HTTPServer(("0.0.0.0",8080),A).serve_forever()\n' > /app.py
-                    CMD ["python", "/app.py"]
-DOCKER
+                // The workload as a READABLE heredoc — aeo writes it to /app.py
+                // + synthesizes a COPY-based Dockerfile (COPY builds on every
+                // podman where a RUN heredoc doesn't). base() = python:3-alpine.
+                entrypoint(<<PY
+                    import http.server as h, socket, os
+                    # redis lives in db_vm (a SEPARATE VM) — aeo resolves the
+                    # egress target "db_vm" to its IP at deploy time and passes
+                    # it as REDIS_HOST. Falls back to localhost single-guest.
+                    RHOST = os.environ.get("REDIS_HOST", "127.0.0.1")
+                    def rcmd(*a):
+                        s = socket.create_connection((RHOST, 6379), 1)
+                        s.sendall(("*%d\r\n" % len(a) + "".join("$%d\r\n%s\r\n" % (len(x), x) for x in a)).encode())
+                        r = s.recv(4096); s.close(); return r
+                    class A(h.BaseHTTPRequestHandler):
+                        def do_GET(self):
+                            p = self.path.strip("/").split("/")
+                            try:
+                                k = "add:%s:%s" % (p[1], p[2]); c = rcmd("GET", k)
+                                if c[:1] == b"$" and c[1:2] != b"-": b = c.split(b"\r\n")[1].decode()
+                                else: b = str(int(p[1]) + int(p[2])); rcmd("SET", k, b)
+                            except: b = "err"
+                            self.send_response(200); self.end_headers(); self.wfile.write(b.encode())
+                        def log_message(self, *a): pass
+                    h.HTTPServer(("0.0.0.0", 8080), A).serve_forever()
+PY
                 )
                 expose(8080)
                 health("curl -fsS http://localhost:8080/add/0/0")
-                depends(db)
+                depends("db")    // cross-VM edge: 'db' is in db_vm — by NAME.
             }
         }
+
+        suspend(python_vm)
+        constrain(python_vm) {
+            grant_fd("disk",    "/zroot/vm/python_vm/disk0.img", "rd,wr")
+            grant_fd("net",     "tap1", "rd,wr")
+            grant_fd("console", "nmdm-python_vm", "rd,wr")
+            // PF port policy (deny-default whitelist). python_vm may ONLY:
+            egress("db_vm", 6379)        // reach redis (db_vm:6379) — nowhere else out
+            ingress(8080)                // accept on 8080 — nothing else in
+        }
+        start(python_vm)
     }
 }
 
