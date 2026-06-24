@@ -24,7 +24,7 @@ import std.os (getenv)
 import std.fs (read, write, mkdir_p)
 
 exports (
-    resolve_ip, binding_path, reset_bindings, bindings_dump
+    resolve_ip, resolve_ip_or_env, binding_path, reset_bindings, bindings_dump
 )
 
 // ---- range (convention default + env override) ----
@@ -69,6 +69,20 @@ resolve_ip(system: string, resource: string) -> string {
     }
     _write(path, newbody)
     return addr
+}
+
+// resolve_ip_or_env(system, resource) — resolve_ip, but a manual override wins:
+// AEO_GUEST_IP (a single global, for a one-guest-of-interest test harness) takes
+// precedence over the sticky binding. Use this where a caller wants to point at
+// an externally-known address (a hand-deployed guest, a remote box) without
+// touching .aeo. (Sibling of the AEO_IP_RANGE_* overrides above — the manual
+// knobs live in ipam, not copied into each spec.)
+resolve_ip_or_env(system: string, resource: string) -> string {
+    o = getenv("AEO_GUEST_IP")
+    if string_length(o) > 0 {
+        return o
+    }
+    return resolve_ip(system, resource)
 }
 
 // reset: clear a system's bindings (the explicit "give me fresh IPs" gesture).
