@@ -11,9 +11,9 @@
 //
 //   check  — (DEFAULT) data-model assertions only; no deploy. Instant, anywhere.
 //   up     — `aeo up`, leave the system STANDING. No checks.
-//   smoke  — `aeo up` + the SLIM post-deploy verification (did it come up
-//            right?), leave it STANDING. The "deploy + verification expected to
-//            pass" shape. Slim/no-framework (curl-and-compare, pass/fail).
+//   smoke  — `aeo up` + a SLIM post-deploy verification (did it come up right?),
+//            leave it STANDING. The "deploy + verification expected to pass"
+//            shape. Same aeocha HTTP path as suite — just slim + stays up.
 //   suite  — `aeo up` + the FULLER aeocha checks, then TEAR DOWN. CI shape.
 //
 // Run (aeocha on the include path):
@@ -31,7 +31,6 @@ import compose (suspend, constrain, grant_fd, egress, ingress, ingress_from, den
 import std.string
 import std.os (getenv, run_capture)
 import std.list
-import std.http
 import ipam (resolve_ip)
 
 // ---- the composition, exactly as an operator would write it ----
@@ -160,7 +159,7 @@ PY
 //            policy, no deployment. Runs anywhere, instant. (DEFAULT.)
 //   up     — `aeo up` the composition, leave it STANDING. No checks.
 //   smoke  — `aeo up`, then the SLIM post-deploy check (the HSBC shape: did it
-//            come up right? curl /add, redis cache), leave it STANDING. This is
+//            come up right?), leave it STANDING. Slim aeocha check. This is
 //            the "deploy + post-deployment verification expected to pass" mode.
 //   suite  — `aeo up`, run the FULLER checks, then TEAR DOWN. (CI shape.)
 //
@@ -260,23 +259,24 @@ _mode_up() -> string {
     return "up: system stood up + left running (no checks)"
 }
 
-// SMOKE — the HSBC shape: deploy, then the SLIM post-deployment verification
-// (did it come up right?), and LEAVE IT STANDING. Slim + no-framework: a couple
-// of curl-and-compare probes returning pass/fail, not the full suite.
+// SMOKE — the HSBC shape: deploy, a SLIM post-deploy check (did it come up
+// right?), LEAVE IT STANDING. Same aeocha HTTP path as suite — smoke differs
+// only in being slim + staying up (suite is exhaustive + tears down).
 _mode_smoke() -> string {
     rc = _aeo_up()
     if rc != 0 {
         return "smoke: deploy FAILED (rc=${string.from_int(rc)}) — no point smoking"
     }
-    // slim post-deploy probes (no aeocha — plain pass/fail, the lightest form).
-    p1 = _http_eq("${_base()}/add/2/2", "4")
-    p2 = _http_eq("${_base()}/add/40/2", "42")
-    if p1 == 1 {
-        if p2 == 1 {
-            return "smoke: PASS — deployed, post-deploy verification green, left STANDING"
+    fw = aeocha.init()
+    aeocha.describe(fw, "post-deploy smoke") {
+        aeocha.it("the service answers correctly") callback {
+            base = _base()
+            aeocha.expect_http_get_body_eq(fw, "${base}/add/2/2", "4", "2 + 2 = 4")
+            aeocha.expect_http_get_body_eq(fw, "${base}/add/40/2", "42", "40 + 2 = 42")
         }
     }
-    return "smoke: FAIL — deployed but post-deploy verification did not pass (system left up for inspection)"
+    aeocha.run_summary(fw)
+    return "smoke: post-deploy verification ran, system left STANDING"
 }
 
 // SUITE — deploy, run the FULLER checks (aeocha, incl. the cache behaviour),
@@ -357,23 +357,6 @@ _dsl() -> string {
         return "examples/nested_compose/module.ae"
     }
     return d
-}
-
-// slim no-framework HTTP probe: 1 if GET url body == want, else 0. Uses the
-// stdlib http client (std.http.get -> (body, err); it checks status for us),
-// not a curl shell-out.
-_http_eq(url: string, want: string) -> int {
-    body, err = http.get(url)
-    if err != "" {
-        return 0
-    }
-    if body == want {
-        return 1
-    }
-    if body == "${want}\n" {     // tolerate a trailing newline
-        return 1
-    }
-    return 0
 }
 
 // The app VM's address for the live-deploy probes. AEO_GUEST_IP overrides;
