@@ -1,10 +1,10 @@
-// examples/nested_compose — THE canonical apex composition: a two-tier system
+// examples/add_cache — THE canonical apex composition: a two-tier system
 // across two confined bhyve VMs on a FreeBSD host. This is what `aeo up` runs;
 // test/spec_nested_system.ae asserts against THIS composition (its smoke/suite
 // modes `aeo up` this file), so the two never drift — the example is the source
 // of truth, the spec is the verifier.
 //
-//   system("red222")  (on a FreeBSD host)
+//   system("add_cache")  (on a FreeBSD host)
 //     ├─ db_vm     (bhyve VM, Linux guest) ─ db  (redis — a TCP cache)
 //     └─ python_vm (bhyve VM, Linux guest) ─ app (python /add service) ─► db_vm:6379
 //
@@ -36,7 +36,7 @@ import compose (suspend, constrain, grant_fd, egress, ingress, ingress_from, den
 exports ( aeo_orchestration )
 
 aeo_orchestration() {
-    system("red222") {
+    system("add_cache") {
         // PHASE 1: provision + first boot db_vm (the redis VM) UNCONSTRAINED.
         db_vm = bhyve_vm("db_vm") {
             cpus(2)

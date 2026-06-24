@@ -1,6 +1,6 @@
 # Parked examples
 
-Set aside while the focus is **`examples/nested_compose/`** (the `aeo up`
+Set aside while the focus is **`examples/add_cache/`** (the `aeo up`
 target for the apex spec `test/spec_nested_system.ae`). These are smaller
 single-tier demos — strict subsets of the nested two-tier system. Nothing
 deleted; revive with `git mv examples/_parked/<x> examples/`.

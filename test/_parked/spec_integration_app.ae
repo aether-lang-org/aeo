@@ -22,7 +22,7 @@ PORT() -> int { return 8080 }
 // `RUN cat <<'PY'` heredoc — this build runs on the HOST podman (4.3.1),
 // whose Dockerfile parser does NOT support RUN heredocs (it reads the heredoc
 // body lines as Dockerfile instructions: "Unknown instruction: IMPORT"). The
-// nested_compose app uses the heredoc form because that build runs in the
+// add_cache app uses the heredoc form because that build runs in the
 // guest; here, printf keeps it host-podman-portable.
 DF() -> string {
     return <<DOCKER

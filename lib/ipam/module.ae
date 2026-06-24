@@ -5,8 +5,8 @@
 // DX — REUSES the same address across re-runs. The binding lives in a
 // per-project file ./.aeo/<system>.ips (gitignored), so:
 //
-//   run 1:  resolve_ip("red222","db_vm") -> allocate lowest-free -> write -> .137
-//   run 2+: resolve_ip("red222","db_vm") -> READ the file -> REUSE .137  (sticky)
+//   run 1:  resolve_ip("add_cache","db_vm") -> allocate lowest-free -> write -> .137
+//   run 2+: resolve_ip("add_cache","db_vm") -> READ the file -> REUSE .137  (sticky)
 //   make clean: binding SURVIVES (it's ./.aeo, not ./target)
 //   rm -rf .aeo  (or aeo reset): fresh allocation next run
 //

@@ -10,7 +10,7 @@ import compose (system, bhyve_vm, ip, cpus, memory, dns_hosts)
 import std.string
 
 declare() {
-    system("red222") {
+    system("add_cache") {
         db = bhyve_vm("db_vm") { ip("172.16.0.50"); cpus(1); memory("1G") }
         py = bhyve_vm("python_vm") { ip("172.16.0.51"); cpus(1); memory("1G") }
     }

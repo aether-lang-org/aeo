@@ -3,7 +3,7 @@
 #
 # This script bypasses the DSL (it hardcodes the app + ssh's into the guest
 # itself). The real soup-to-nuts experience is now DSL-driven:
-#   sudo sh test/soup-to-nuts.sh   ->  aeo up examples/nested_compose + curl
+#   sudo sh test/soup-to-nuts.sh   ->  aeo up examples/add_cache + curl
 # Kept for reference only.
 #
 # Runs ON the FreeBSD host. Proves the full nested chain end-to-end:
