@@ -31,6 +31,7 @@ import compose (suspend, constrain, grant_fd, egress, ingress, ingress_from, den
 import std.string
 import std.os (getenv, run_capture)
 import std.list
+import std.http
 import ipam (resolve_ip)
 
 // ---- the composition, exactly as an operator would write it ----
@@ -358,21 +359,18 @@ _dsl() -> string {
     return d
 }
 
-// slim no-framework HTTP probe: 1 if GET url body == want, else 0.
+// slim no-framework HTTP probe: 1 if GET url body == want, else 0. Uses the
+// stdlib http client (std.http.get -> (body, err); it checks status for us),
+// not a curl shell-out.
 _http_eq(url: string, want: string) -> int {
-    av = list_new()
-    list_add(av, "-c")
-    list_add(av, "curl -fsS --max-time 5 ${url}")
-    out, status, err = run_capture("/bin/sh", av, null)
-    list_free(av)
-    if status != 0 {
+    body, err = http.get(url)
+    if err != "" {
         return 0
     }
-    if out == want {
+    if body == want {
         return 1
     }
-    // tolerate a trailing newline
-    if out == "${want}\n" {
+    if body == "${want}\n" {     // tolerate a trailing newline
         return 1
     }
     return 0
