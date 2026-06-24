@@ -1,10 +1,10 @@
 #!/bin/sh
 # soup-to-nuts.sh — THE end-to-end experience, driven by the aeo DSL.
 #
-# Runs `aeo up examples/add_cache/module.ae` — which brings up the whole
+# Runs `aeo up examples/silly_addition_cache/module.ae` — which brings up the whole
 # nested system declared in the DSL:
 #
-#   system("add_cache")
+#   system("silly_addition_cache")
 #     └─ myapp (bhyve Linux VM)
 #          ├─ db  (redis container — a TCP cache)
 #          └─ app (python container) ── depends ──► db
@@ -26,7 +26,7 @@ set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 AEO="${AEO:-/tmp/aeo}"
-DSL="$ROOT/examples/add_cache/module.ae"
+DSL="$ROOT/examples/silly_addition_cache/module.ae"
 GIP="${GIP:-172.16.0.50}"
 
 echo "=== prerequisite check ==="

@@ -21,7 +21,7 @@
 //   AEO_MODE=smoke AETHER_INCLUDE_PATH=... ae run test/spec_nested_system.ae
 //   AEO_MODE=up    ...   /   AEO_MODE=suite ...
 // Deploy modes shell out to `aeo up <AEO_DSL>` (default
-// examples/add_cache/module.ae); override the binary/home/dsl via
+// examples/silly_addition_cache/module.ae); override the binary/home/dsl via
 // AEO / AEO_HOME / AEO_DSL.
 
 import aeocha
@@ -47,7 +47,7 @@ declare() {
     // name lives in lib/images/ubuntu_24_04_minimal_podman.ae and is registered
     // at `aeo up` time (the deploy concern); this DATA-MODEL spec only needs the
     // logical NAME, so it doesn't import the recipe.
-    system("add_cache") {
+    system("silly_addition_cache") {
         // PHASE 1: provision + first boot db_vm (the redis VM) UNCONSTRAINED.
         db_vm = bhyve_vm("db_vm") {
             cpus(2)
@@ -191,7 +191,7 @@ _mode_check() -> string {
             // shows exactly what moved.
             aeocha.it("resolves to two top-level VMs, each with its OWN confinement") callback {
                 want = <<TREE
-                    system add_cache:
+                    system silly_addition_cache:
                       bhyve db_vm [guest=ubuntu-24.04-minimal+podman, cpus=2, mem=2G, confined: disk(/zroot/vm/db_vm/disk0.img)=rd,wr, net(tap0)=rd,wr, console(nmdm-db_vm)=rd,wr, net{ingress:6379<-python_vm, egress:DENY-ALL; deny rest}]
                         container db [image=docker.io/library/redis:alpine, expose=6379]
                       bhyve python_vm [guest=ubuntu-24.04-minimal+podman, cpus=2, mem=2G, confined: disk(/zroot/vm/python_vm/disk0.img)=rd,wr, net(tap1)=rd,wr, console(nmdm-python_vm)=rd,wr, net{egress->db_vm:6379, ingress:8080; deny rest}]
@@ -347,7 +347,7 @@ _aeo_home() -> string {
 _dsl() -> string {
     d = getenv("AEO_DSL")
     if string.length(d) == 0 {
-        return "examples/add_cache/module.ae"
+        return "examples/silly_addition_cache/module.ae"
     }
     return d
 }
@@ -355,7 +355,7 @@ _dsl() -> string {
 // The app VM's address for the live-deploy probes: python_vm's sticky ipam
 // binding (the address the driver deployed it at), AEO_GUEST_IP overriding.
 _ip() -> string {
-    return ipam.resolve_ip_or_env("add_cache", "python_vm")
+    return ipam.resolve_ip_or_env("silly_addition_cache", "python_vm")
 }
 
 _base() -> string {

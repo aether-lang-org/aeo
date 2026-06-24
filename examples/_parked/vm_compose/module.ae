@@ -2,7 +2,7 @@
 //
 // A single bhyve VM as a leaf resource in a system. Demonstrates the leaf
 // VM kind-verb + sizing setters. (For a VM that CONTAINS resources — a
-// Linux container inside a bhyve VM — see examples/add_cache.)
+// Linux container inside a bhyve VM — see examples/silly_addition_cache.)
 //
 // Booting a real guest needs vmm.ko loaded, a UEFI bootrom (pkg
 // bhyve-firmware), a bootable disk image, and a tap on a host bridge. The

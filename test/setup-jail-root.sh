@@ -5,13 +5,13 @@
 # dirs a jail expects. Root required.
 #
 #   sudo sh test/setup-jail-root.sh [name]       # default name: db
-#   sudo sh test/setup-jail-root.sh db           # the add_cache DSL's jail
+#   sudo sh test/setup-jail-root.sh db           # the silly_addition_cache DSL's jail
 #   sudo sh test/setup-jail-root.sh --teardown [name]
 #
 # This stands in for an operator's provision(...) step — aeo does not ship a
-# userland; it orchestrates one the operator populates. The add_cache
+# userland; it orchestrates one the operator populates. The silly_addition_cache
 # example declares dataset("zroot/jails/db"), so `setup-jail-root.sh db` is
-# the prerequisite for `aeo up examples/add_cache/module.ae`.
+# the prerequisite for `aeo up examples/silly_addition_cache/module.ae`.
 set -eu
 
 if [ "${1:-}" = "--teardown" ]; then
@@ -41,4 +41,4 @@ cp -a /rescue/. "$ROOT/rescue/"
 ln -sf /rescue/sh "$ROOT/bin/sh" 2>/dev/null || true
 
 echo "jail root ready at $ROOT (rescue tools installed)"
-echo "now:  sudo aeo up examples/add_cache/module.ae   (db will boot)"
+echo "now:  sudo aeo up examples/silly_addition_cache/module.ae   (db will boot)"

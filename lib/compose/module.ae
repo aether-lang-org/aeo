@@ -683,7 +683,7 @@ _to_int(s: string) -> int {
 // entire model in a single line instead of field-by-field. Order is
 // declaration order (stable). Example:
 //
-//   system add_cache:
+//   system silly_addition_cache:
 //     bhyve myapp [guest=ubuntu-22.04, cpus=2, mem=2G]:
 //       container db [image=docker.io/library/redis:alpine, expose=6379]
 //       container app [dockerfile, expose=8080] -> db
