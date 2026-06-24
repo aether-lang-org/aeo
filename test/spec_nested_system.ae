@@ -6,17 +6,23 @@
 // Python /add service that uses it), confines the bhyve hypervisor in a second
 // phase (constrain{}), and verifies it. describe blocks:
 //
-//   "nested system (declaration)"  — data-model assertions. Run anywhere,
-//                                     instant, no deployment.
-//   "live deployment"              — HTTP arithmetic + cache checks against
-//                                     a DEPLOYED system. Gated on AEO_VERIFY=1;
-//                                     skipped otherwise.
+// MULTI-MODE (env AEO_MODE) — one artifact, four behaviours off ONE declare().
+// The rich entry is run_aeo(mode); main() is the lowered fallback for `ae run`.
 //
-// Run (aeocha must be on the include path):
+//   check  — (DEFAULT) data-model assertions only; no deploy. Instant, anywhere.
+//   up     — `aeo up`, leave the system STANDING. No checks.
+//   smoke  — `aeo up` + the SLIM post-deploy verification (did it come up
+//            right?), leave it STANDING. The "deploy + verification expected to
+//            pass" shape. Slim/no-framework (curl-and-compare, pass/fail).
+//   suite  — `aeo up` + the FULLER aeocha checks, then TEAR DOWN. CI shape.
+//
+// Run (aeocha on the include path):
 //   AETHER_INCLUDE_PATH=/home/paul/scm/aeocha ae run test/spec_nested_system.ae
-//   AEO_VERIFY=1 AETHER_INCLUDE_PATH=... ae run test/spec_nested_system.ae   # + live
-//
-// Mirrors examples/nested_compose/module.ae (the `aeo up` target).
+//   AEO_MODE=smoke AETHER_INCLUDE_PATH=... ae run test/spec_nested_system.ae
+//   AEO_MODE=up    ...   /   AEO_MODE=suite ...
+// Deploy modes shell out to `aeo up <AEO_DSL>` (default
+// examples/nested_compose/module.ae); override the binary/home/dsl via
+// AEO / AEO_HOME / AEO_DSL.
 
 import aeocha
 import compose (system, bhyve_vm, container)
@@ -143,9 +149,42 @@ PY
     }
 }
 
-main() {
+// ---- MODES (the rich entrypoint) ----
+// run_aeo(mode) is the recommended door — mode in, structured result out (a
+// pass/fail-ish summary string). main() below is the lowered fallback for
+// `ae run`. Modes (env AEO_MODE, default "check"):
+//
+//   check  — data-model assertions only; resolve declare(), assert the tree +
+//            policy, no deployment. Runs anywhere, instant. (DEFAULT.)
+//   up     — `aeo up` the composition, leave it STANDING. No checks.
+//   smoke  — `aeo up`, then the SLIM post-deploy check (the HSBC shape: did it
+//            come up right? curl /add, redis cache), leave it STANDING. This is
+//            the "deploy + post-deployment verification expected to pass" mode.
+//   suite  — `aeo up`, run the FULLER checks, then TEAR DOWN. (CI shape.)
+//
+// smoke vs suite: smoke is slim + leaves the system up (you keep poking it);
+// suite is exhaustive + cleans up after itself.
+run_aeo(mode: string) -> string {
+    declare()                          // the composition — always resolved
+
+    if mode == "check" {
+        return _mode_check()
+    }
+    if mode == "up" {
+        return _mode_up()
+    }
+    if mode == "smoke" {
+        return _mode_smoke()
+    }
+    if mode == "suite" {
+        return _mode_suite()
+    }
+    return "aeo: unknown AEO_MODE '${mode}' (check|up|smoke|suite)"
+}
+
+// CHECK — data-model assertions, in-process, no deploy (the default).
+_mode_check() -> string {
     fw = aeocha.init()
-    declare()
 
     aeocha.describe(fw, "nested system: bhyve_vm{ db(redis) ; app }") {
 
@@ -200,36 +239,134 @@ TREE
             }
         }
 
-        aeocha.describe("live deployment (AEO_VERIFY=1)") {
-            aeocha.it("app computes arithmetic over HTTP (2+2=4, 2+3=5, 40+2=42)") callback {
-                if _verify_on() == 0 {
-                    aeocha.assert_true(fw, 1, "skipped (set AEO_VERIFY=1 against a deployed system)")
-                } else {
-                    base = _base()
-                    aeocha.expect_http_get_body_eq(fw, "${base}/add/2/2", "4", "2 + 2 = 4")
-                    aeocha.expect_http_get_body_eq(fw, "${base}/add/2/3", "5", "2 + 3 = 5")
-                    aeocha.expect_http_get_body_eq(fw, "${base}/add/40/2", "42", "40 + 2 = 42")
-                }
-            }
-            aeocha.it("app serves from the db cache (poke redis, read it back)") callback {
-                if _verify_on() == 0 {
-                    aeocha.assert_true(fw, 1, "skipped (set AEO_VERIFY=1)")
-                } else {
-                    _redis_set(_ip(), "add:2:3", "CACHED99")
-                    aeocha.expect_http_get_body_eq(fw, "${_base()}/add/2/3", "CACHED99", "2+3 -> cached value")
-                }
-            }
-        }
     }
 
     aeocha.run_summary(fw)
+    return "check: data-model assertions complete"
+}
+
+// UP — deploy the composition and LEAVE IT STANDING. No checks. The system
+// outlives this process (bhyve/podman daemonize — not children of the spec), so
+// "leave up" is simply: deploy, return, don't tear down. (Per the
+// principles-of-containment: the spawned system persists; we just stop holding
+// it.)
+_mode_up() -> string {
+    rc = _aeo_up()
+    if rc != 0 {
+        return "up: FAILED (aeo up rc=${string.from_int(rc)})"
+    }
+    return "up: system stood up + left running (no checks)"
+}
+
+// SMOKE — the HSBC shape: deploy, then the SLIM post-deployment verification
+// (did it come up right?), and LEAVE IT STANDING. Slim + no-framework: a couple
+// of curl-and-compare probes returning pass/fail, not the full suite.
+_mode_smoke() -> string {
+    rc = _aeo_up()
+    if rc != 0 {
+        return "smoke: deploy FAILED (rc=${string.from_int(rc)}) — no point smoking"
+    }
+    // slim post-deploy probes (no aeocha — plain pass/fail, the lightest form).
+    p1 = _http_eq("${_base()}/add/2/2", "4")
+    p2 = _http_eq("${_base()}/add/40/2", "42")
+    if p1 == 1 {
+        if p2 == 1 {
+            return "smoke: PASS — deployed, post-deploy verification green, left STANDING"
+        }
+    }
+    return "smoke: FAIL — deployed but post-deploy verification did not pass (system left up for inspection)"
+}
+
+// SUITE — deploy, run the FULLER checks (aeocha, incl. the cache behaviour),
+// then TEAR DOWN. The CI shape: exhaustive + self-cleaning.
+_mode_suite() -> string {
+    rc = _aeo_up()
+    if rc != 0 {
+        return "suite: deploy FAILED (rc=${string.from_int(rc)})"
+    }
+    fw = aeocha.init()
+    aeocha.describe(fw, "live deployment (full suite)") {
+        aeocha.it("app computes arithmetic over HTTP (2+2=4, 2+3=5, 40+2=42)") callback {
+            base = _base()
+            aeocha.expect_http_get_body_eq(fw, "${base}/add/2/2", "4", "2 + 2 = 4")
+            aeocha.expect_http_get_body_eq(fw, "${base}/add/2/3", "5", "2 + 3 = 5")
+            aeocha.expect_http_get_body_eq(fw, "${base}/add/40/2", "42", "40 + 2 = 42")
+        }
+        aeocha.it("app serves from the db cache (poke redis, read it back)") callback {
+            _redis_set(_ip(), "add:2:3", "CACHED99")
+            aeocha.expect_http_get_body_eq(fw, "${_base()}/add/2/3", "CACHED99", "2+3 -> cached value")
+        }
+    }
+    aeocha.run_summary(fw)
+    _aeo_down()                          // CI shape: clean up after ourselves
+    return "suite: full checks ran, system TORN DOWN"
+}
+
+// main() — the lowered FALLBACK (for `ae run`). Reads AEO_MODE (default check),
+// delegates to the rich run_aeo() door, prints the summary.
+main() {
+    m = getenv("AEO_MODE")
+    if string.length(m) == 0 {
+        m = "check"
+    }
+    println(run_aeo(m))
 }
 
 // ---- helpers ----
 
-// 1 if AEO_VERIFY is set (the live deployment checks run), else 0.
-_verify_on() -> int {
-    if string.length(getenv("AEO_VERIFY")) > 0 {
+// shell out to `aeo up` the composition (deploy). Returns the exit code.
+_aeo_up() -> int {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "AEO_HOME=${_aeo_home()} ${_aeo_bin()} up ${_dsl()}")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    return status
+}
+_aeo_down() {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "AEO_HOME=${_aeo_home()} ${_aeo_bin()} down ${_dsl()}")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+}
+_aeo_bin() -> string {
+    b = getenv("AEO")
+    if string.length(b) == 0 {
+        return "/tmp/aeo"
+    }
+    return b
+}
+_aeo_home() -> string {
+    h = getenv("AEO_HOME")
+    if string.length(h) == 0 {
+        return "/home/paul/aeo"
+    }
+    return h
+}
+_dsl() -> string {
+    d = getenv("AEO_DSL")
+    if string.length(d) == 0 {
+        return "examples/nested_compose/module.ae"
+    }
+    return d
+}
+
+// slim no-framework HTTP probe: 1 if GET url body == want, else 0.
+_http_eq(url: string, want: string) -> int {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "curl -fsS --max-time 5 ${url}")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    if status != 0 {
+        return 0
+    }
+    if out == want {
+        return 1
+    }
+    // tolerate a trailing newline
+    if out == "${want}\n" {
         return 1
     }
     return 0
