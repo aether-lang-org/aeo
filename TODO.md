@@ -32,17 +32,21 @@ short-circuits the anchor.
       Alternatives to weigh first — a dedicated aeo bridge with its own
       default-deny, or per-tap filtering. (Captured in the next-steps doc.)
 
-### 2. rctl resource caps — go live (MEDIUM)
+### 2. rctl resource caps — LIVE (MEDIUM)
 `limit{}` grammar + lib/rctl + runner wiring built; `spec_rctl_rulegen` green
-(pure). Not enforced on the box yet.
-- [ ] Host prereq: add `kern.racct.enable=1` to `/boot/loader.conf` + **REBOOT**
-      (boot tunable; RACCT is in GENERIC). Maintenance-window decision.
-- [ ] Host prereq: grant `/usr/bin/rctl` in the `aeo-pf` sudoers drop-in.
-- [ ] Live validation: apply a cap, prove rctl DENIES the offending op
-      (e.g. maxproc → fork-bomb refused; memoryuse → balloon refused).
+(8, incl. the orchestrator-guard). Host prereqs DONE + live-validated 2026-06-25.
+- [x] Host prereq: `kern.racct.enable=1` in `/boot/loader.conf` + reboot — done.
+- [x] Host prereq: `/usr/bin/rctl` granted in the `aeo-pf` sudoers drop-in.
+- [x] Live: `jail:testjail:maxproc:deny=10` added/read-back/removed cleanly on
+      the box (RACCT on); orchestrator session untouched.
+- [x] **Never-cap-the-orchestrator guard** (lib/rctl `_subject_ok`): refuse
+      user/loginclass subjects; only jail/process (node-scoped). Found the hard
+      way — a `user:paul` vmem cap locked sshd out and needed a reboot.
+- [ ] Behavioral deny on a REAL node: stand a jail with a maxproc cap, prove a
+      fork-bomb inside it is refused (the live "it actually contains" proof).
 - [ ] Thicken: cap **bhyve-VM** nodes too (v0 caps jails only — needs the
-      hypervisor PID → `process:<pid>` targeting). Runner currently logs
-      "NOT enforced (kind=bhyve)" loudly rather than skipping silently.
+      hypervisor PID → `process:<pid>` targeting). Runner logs "NOT enforced
+      (kind=bhyve)" loudly rather than skipping silently.
 
 ### 3. Image attestation — supply-chain (HIGH for "impregnable")
 The `sign` grammar exists but nothing verifies an image before boot, so a

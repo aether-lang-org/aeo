@@ -23,8 +23,26 @@ exports ( rules_for, apply, remove )
 
 // rules_for(vm, subject) — one `subject:vm:RES:deny=AMT` rule per recorded cap.
 // compose stores caps as "memoryuse=2G, pcpu=150, maxproc=512"; map each to a
-// deny rule for the subject. Returns "" if the node declared no limits.
+// SAFETY INVARIANT (never-cap-the-orchestrator): aeo only ever targets a NODE's
+// own subject — `jail:<name>` or `process:<pid>` — both inherently scoped to the
+// contained node. It must NEVER emit a `user:`/`loginclass:` rule: those can hit
+// the orchestrator's own identity (the user running aeo over ssh) and starve the
+// control plane (a `user:<operator>:vmemoryuse:deny` blocks sshd's own forks ->
+// lockout). So the subject is whitelisted to node-scoped kinds; anything else is
+// refused at the source. The thing being contained and the thing doing the
+// containing are different principals — privilege separation, enforced here.
+_subject_ok(subject: string) -> int {
+    if subject == "jail" { return 1 }
+    if subject == "process" { return 1 }
+    return 0                              // user/loginclass/empty -> REFUSED
+}
+
+// deny rule for the subject. Returns "" if the node declared no limits — OR if
+// the subject is not node-scoped (the orchestrator-protection invariant).
 rules_for(vm: string, subject: string) -> string {
+    if _subject_ok(subject) == 0 {
+        return ""                        // refuse user:/loginclass: — see _subject_ok
+    }
     caps = get_rctl(vm)
     if string_length(caps) == 0 {
         return ""
@@ -59,7 +77,12 @@ rules_for(vm: string, subject: string) -> string {
 
 // apply(vm, subject) — add each rule via rctl. Returns "" on success, else the
 // first failing rule's error. FreeBSD + root; needs kern.racct.enable=1.
+// Refuses a non-node subject LOUDLY (not a silent no-op) so an orchestrator-
+// capping bug surfaces at once instead of starving the control plane.
 apply(vm: string, subject: string) -> string {
+    if _subject_ok(subject) == 0 {
+        return "aeo: REFUSED rctl subject '${subject}' for '${vm}' — only jail/process (node-scoped) allowed; user/loginclass could cap the orchestrator"
+    }
     rules = rules_for(vm, subject)
     if string_length(rules) == 0 {
         return ""
@@ -85,7 +108,13 @@ apply(vm: string, subject: string) -> string {
 
 // remove(vm, subject) — drop the node's rctl rules on teardown. rctl removal is
 // by a matching filter; `rctl -r subject:vm` clears every rule for that subject.
+// Same node-subject guard: never let a teardown remove() touch a user/loginclass
+// filter (it could clear an operator's own legitimate rules, or be a sign the
+// apply was wrong).
 remove(vm: string, subject: string) -> string {
+    if _subject_ok(subject) == 0 {
+        return "aeo: REFUSED rctl remove subject '${subject}' — only jail/process allowed"
+    }
     return _rctl("-r ${subject}:${vm}")
 }
 

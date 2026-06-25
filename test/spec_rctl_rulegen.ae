@@ -11,7 +11,7 @@
 
 import aeocha
 import compose (limit, limit_mem, limit_cpu, limit_maxproc, limit_openfiles, get_rctl)
-import rctl (rules_for)
+import rctl (rules_for, apply)
 import std.string (string_contains)
 import std.string   // bare: inlined aeocha calls bare exports unqualified
 
@@ -58,6 +58,29 @@ main() {
             aeocha.it("renders nothing (no caps -> no rules)") callback {
                 r = rules_for("unlimited_vm", "jail")
                 aeocha.assert_str_eq(fw, r, "", "no limit{} -> empty ruleset")
+            }
+        }
+
+        // SAFETY INVARIANT: aeo must NEVER cap a user/loginclass subject — those
+        // can hit the orchestrator's own identity and starve the control plane
+        // (a user:<operator>:vmemoryuse:deny blocks sshd forks -> lockout, found
+        // the hard way 2026-06-25). Only jail/process (node-scoped) are allowed.
+        aeocha.describe("never-cap-the-orchestrator guard") {
+            aeocha.it("rules_for REFUSES a user subject (empty, not a user: rule)") callback {
+                r = rules_for("db_vm", "user")
+                aeocha.assert_str_eq(fw, r, "", "user subject -> no rules emitted")
+            }
+            aeocha.it("rules_for REFUSES loginclass too") callback {
+                r = rules_for("db_vm", "loginclass")
+                aeocha.assert_str_eq(fw, r, "", "loginclass subject -> no rules")
+            }
+            aeocha.it("apply REFUSES a user subject LOUDLY (error, not silent no-op)") callback {
+                e = apply("db_vm", "user")
+                aeocha.assert_true(fw, _has(e, "REFUSED"), "apply returns a REFUSED error for user subject")
+            }
+            aeocha.it("jail + process subjects ARE allowed") callback {
+                aeocha.assert_true(fw, _has(rules_for("db_vm", "jail"), "jail:db_vm:"), "jail allowed")
+                aeocha.assert_true(fw, _has(rules_for("db_vm", "process"), "process:db_vm:"), "process allowed")
             }
         }
     }
