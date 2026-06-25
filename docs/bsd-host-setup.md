@@ -114,6 +114,31 @@ leaves no stale deny rules on its (now-reused) address.
 
 The `pfctl` calls go through `sudo -n` (the NOPASSWD pfctl in the sudoers above).
 
+### Resource caps (rctl — the exhaustion-DoS defense, the `limit{}` block)
+
+`aeo up` applies each node's `limit{ limit_mem/limit_cpu/limit_maxproc/... }`
+caps via FreeBSD `rctl` (lib/rctl), so a malicious or runaway node can't STARVE
+the host (fork bomb, memory balloon, fd gluttony) — rctl DENIES the offending op
+rather than leaving it to OOM roulette. Two host prerequisites:
+
+1. **Enable RACCT/RCTL** — it's a boot tunable (not runtime-settable), but RACCT
+   IS compiled into GENERIC. Add to `/boot/loader.conf` and REBOOT:
+   ```
+   kern.racct.enable=1
+   ```
+   (Verify after reboot: `sysctl kern.racct.enable` → `1`.)
+2. **Grant rctl** in the sudoers drop-in: add `/usr/bin/rctl` to a NOPASSWD line
+   (rctl is `/usr/bin/rctl` on FreeBSD 15).
+
+⚠️ Enabling RACCT needs a REBOOT — do it during a maintenance window, not with
+guests mid-deploy. Until both are done, `aeo up` records + logs the caps but
+they aren't enforced (an `rctl: RACCT disabled` error, surfaced as a non-fatal
+"caps NOT enforced" line — the node still comes up).
+
+v0 caps **jail** nodes (`jail:<name>` subject); bhyve-VM nodes (a hypervisor
+process) are a later thickening (PID targeting) — aeo says so loudly rather than
+silently skipping. `aeo down` removes the node's rules (`rctl -r jail:<name>`).
+
 ## 5. AMD Ryzen guest-boot fix (REQUIRED — patched image)
 
 Ubuntu Linux guests hang very early in boot under bhyve on this AMD Ryzen

@@ -50,6 +50,7 @@ exports (
     get_img_units, get_img_unit_body, get_img_realize,
     suspend, constrain, grant_fd, egress, ingress, ingress_from, deny_egress, deny_ingress, start,
     get_suspended, get_started, get_constraints, get_netpolicy, pf_rules_for,
+    limit, limit_mem, limit_vmem, limit_cpu, limit_maxproc, limit_openfiles, get_rctl,
     describe_tree, dns_hosts
 )
 
@@ -318,6 +319,41 @@ _net_add(vm: string, entry: string) {
 start(vm: string) {
     config.put("aeo.cmp.started.${vm}", "1")
 }
+
+// ---- limit{} — resource caps (FreeBSD rctl) -----------------------------
+//
+//     limit(db_vm) {
+//         limit_mem("2G")          // host memory the node may consume
+//         limit_cpu(150)           // % CPU (150 = 1.5 cores)
+//         limit_maxproc(512)       // fork-bomb ceiling
+//         limit_openfiles(4096)
+//     }
+//
+// Where constrain{} stops a node REACHING things (Capsicum fds + pf ports),
+// limit{} stops a node STARVING the host — exhaustion DoS (fork bomb, memory
+// balloon, fd/disk gluttony). Enforced via FreeBSD rctl, which denies the
+// offending op (not OOM-roulette). The composition stays substrate-agnostic:
+// it records the caps; lib/rctl renders them to `rctl` rules per subject
+// (a jail node -> jail:<name>; a bhyve VM -> the bhyve process) at apply time.
+// Requires kern.racct.enable=1 on the host (a boot tunable) — see
+// docs/bsd-host-setup.md. Off-FreeBSD / RACCT-off: recorded + asserted, not live.
+limit(vm: string) -> string {
+    return vm
+}
+limit_mem(_ctx: ptr, v: string)      { _rctl_add(_ctx, "memoryuse=${v}") }
+limit_vmem(_ctx: ptr, v: string)     { _rctl_add(_ctx, "vmemoryuse=${v}") }
+limit_cpu(_ctx: ptr, pct: int)       { _rctl_add(_ctx, "pcpu=${string_from_int(pct)}") }
+limit_maxproc(_ctx: ptr, n: int)     { _rctl_add(_ctx, "maxproc=${string_from_int(n)}") }
+limit_openfiles(_ctx: ptr, n: int)   { _rctl_add(_ctx, "openfiles=${string_from_int(n)}") }
+_rctl_add(vm: string, entry: string) {
+    prev = config.get("aeo.cmp.rctl.${vm}")
+    if string_length(prev) == 0 {
+        config.put("aeo.cmp.rctl.${vm}", entry)
+    } else {
+        config.put("aeo.cmp.rctl.${vm}", "${prev}, ${entry}")
+    }
+}
+get_rctl(vm: string) -> string { return config.get("aeo.cmp.rctl.${vm}") }
 
 // `expose(port)` — declare a port the resource serves that the host (and
 // the resource's dependents) should be able to reach. Substrate-agnostic

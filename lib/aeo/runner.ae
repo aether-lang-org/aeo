@@ -25,6 +25,7 @@ import driver_vm
 import compose
 import ipam
 import pf
+import rctl
 import resource (set_state, get_state, STATE_DOWN, STATE_BOOTING, STATE_UP, STATE_FAILED)
 import host (family, profile)
 import aeo_compose (aeo_orchestration)
@@ -339,6 +340,9 @@ run_up() -> int {
                     // without a netpolicy. Non-fatal: a pf failure is logged,
                     // not a teardown (the node is up; the operator sees the gap).
                     _enforce_netpolicy(nm)
+                    // Apply rctl resource caps (exhaustion-DoS defense), same
+                    // post-up, non-fatal, FreeBSD-only contract.
+                    _enforce_limits(nm)
                 }
             }
             i = i + 1
@@ -378,6 +382,33 @@ _enforce_netpolicy(nm: string) {
     }
 }
 
+// Apply a resource's rctl resource caps (the limit{} block), now that it's up.
+// FreeBSD-only + needs kern.racct.enable=1 (see docs/bsd-host-setup.md). No-op
+// if no limits declared. Subject: a jail node is jail:<name>; a bhyve VM is its
+// hypervisor PROCESS — v0 caps jails only (process-PID targeting is a later
+// thickening), and says so loudly rather than silently skipping a bhyve's caps.
+// Non-fatal: an rctl failure warns, doesn't tear down.
+_enforce_limits(nm: string) {
+    if compose.get_rctl(nm) == "" {
+        return
+    }
+    if host.family() != "bsd" {
+        println("aeo: [${nm}] limit{} declared but rctl is FreeBSD-only — NOT enforced on this host")
+        return
+    }
+    k = compose.get_kind(nm)
+    if k != "jail" {
+        println("aeo: [${nm}] limit{} declared but v0 rctl caps jails only (kind=${k}) — NOT enforced")
+        return
+    }
+    err = rctl.apply(nm, "jail")
+    if err != "" {
+        println("aeo: [${nm}] WARNING rctl caps NOT enforced: ${err}")
+    } else {
+        println("aeo: [${nm}] rctl resource caps applied (jail:${nm})")
+    }
+}
+
 // ---- teardown engine ----
 // Reverse declaration order: the last-declared (most-dependent) tier stops
 // first, the first-declared (its dependency) stops last.
@@ -392,6 +423,15 @@ run_down() {
         if compose.get_netpolicy(nm) != "" {
             if host.family() == "bsd" {
                 _fe = pf.flush(nm)
+            }
+        }
+        // Drop this node's rctl caps too (jail subject), so a torn-down node's
+        // limits don't linger. Best-effort, FreeBSD-only.
+        if compose.get_rctl(nm) != "" {
+            if host.family() == "bsd" {
+                if compose.get_kind(nm) == "jail" {
+                    _re = rctl.remove(nm, "jail")
+                }
             }
         }
         a = spawn(Resource())

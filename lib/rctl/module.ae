@@ -1,0 +1,104 @@
+// lib/rctl — render + apply the FreeBSD rctl rules that CAP a node's host
+// resource use (the limit{} block). Sibling of lib/pf: where pf stops a node
+// REACHING peers, rctl stops it STARVING the host (fork bomb, memory balloon,
+// fd/cpu gluttony) — an exhaustion-DoS defense. rctl DENIES the offending op,
+// so it's deterministic, not OOM-roulette.
+//
+//   rules_for(vm, subject) -> newline-joined `subject:vm:RES:deny=AMT` rules
+//                             from compose.get_rctl(vm). Pure; unit-tested.
+//   apply(vm, subject)     -> add each rule via `sudo -n /usr/bin/rctl -a`
+//                             (FreeBSD + root + kern.racct.enable=1).
+//   remove(vm, subject)    -> drop the node's rules on teardown.
+//
+// subject is "jail:<name>" for a jail node or "process:<pid>" for a bhyve VM's
+// hypervisor process — the runner/driver picks it (the composition stays
+// substrate-agnostic; it only records the caps).
+
+import std.os (run_capture)
+import std.list
+import std.string (string_length, string_char_at, string_substring, string_index_of)
+import compose (get_rctl)
+
+exports ( rules_for, apply, remove )
+
+// rules_for(vm, subject) — one `subject:vm:RES:deny=AMT` rule per recorded cap.
+// compose stores caps as "memoryuse=2G, pcpu=150, maxproc=512"; map each to a
+// deny rule for the subject. Returns "" if the node declared no limits.
+rules_for(vm: string, subject: string) -> string {
+    caps = get_rctl(vm)
+    if string_length(caps) == 0 {
+        return ""
+    }
+    out = ""
+    rest = caps
+    more = 1
+    while more == 1 {
+        idx = string_index_of(rest, ", ")
+        entry = rest
+        if idx >= 0 {
+            entry = string_substring(rest, 0, idx)
+            rest = string_substring(rest, idx + 2, string_length(rest))
+        } else {
+            more = 0
+        }
+        // entry = "RES=AMT" -> "subject:vm:RES:deny=AMT"
+        eq = string_index_of(entry, "=")
+        if eq >= 0 {
+            res = string_substring(entry, 0, eq)
+            amt = string_substring(entry, eq + 1, string_length(entry))
+            rule = "${subject}:${vm}:${res}:deny=${amt}"
+            if string_length(out) == 0 {
+                out = rule
+            } else {
+                out = "${out}\n${rule}"
+            }
+        }
+    }
+    return out
+}
+
+// apply(vm, subject) — add each rule via rctl. Returns "" on success, else the
+// first failing rule's error. FreeBSD + root; needs kern.racct.enable=1.
+apply(vm: string, subject: string) -> string {
+    rules = rules_for(vm, subject)
+    if string_length(rules) == 0 {
+        return ""
+    }
+    rest = rules
+    more = 1
+    while more == 1 {
+        nl = string_index_of(rest, "\n")
+        one = rest
+        if nl >= 0 {
+            one = string_substring(rest, 0, nl)
+            rest = string_substring(rest, nl + 1, string_length(rest))
+        } else {
+            more = 0
+        }
+        err = _rctl("-a ${one}")
+        if err != "" {
+            return "aeo: rctl add '${one}' failed: ${err}"
+        }
+    }
+    return ""
+}
+
+// remove(vm, subject) — drop the node's rctl rules on teardown. rctl removal is
+// by a matching filter; `rctl -r subject:vm` clears every rule for that subject.
+remove(vm: string, subject: string) -> string {
+    return _rctl("-r ${subject}:${vm}")
+}
+
+// `sudo -n /usr/bin/rctl <args>`. Returns "" on success, else the captured
+// stderr/stdout. (rctl is at /usr/bin/rctl on FreeBSD 15.)
+_rctl(args: string) -> string {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "sudo -n /usr/bin/rctl ${args}")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    if status != 0 {
+        return out
+    }
+    return ""
+}

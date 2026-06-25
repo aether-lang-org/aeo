@@ -1,0 +1,71 @@
+// spec_rctl_rulegen.ae — the limit{} block -> FreeBSD rctl rules (lib/rctl).
+// Pure rulegen: caps recorded by limit_mem/cpu/maxproc/... become deny rules
+// for a subject (jail:<name> or process:<pid>). The live `rctl -a` apply is
+// FreeBSD + root + kern.racct.enable=1 (exercised on the GhostBSD box); this
+// proves the RULE shape off-host.
+//
+//   sh test/run-spec.sh test/spec_rctl_rulegen.ae
+//
+// Where pf (spec_pf_rulegen) stops a node REACHING peers, rctl stops it
+// STARVING the host — the exhaustion-DoS half of containment.
+
+import aeocha
+import compose (limit, limit_mem, limit_cpu, limit_maxproc, limit_openfiles, get_rctl)
+import rctl (rules_for)
+import std.string (string_contains)
+import std.string   // bare: inlined aeocha calls bare exports unqualified
+
+main() {
+    fw = aeocha.init()
+
+    // A node with a full set of caps (the apex db_vm could carry these).
+    limit("db_vm") {
+        limit_mem("2G")
+        limit_cpu(150)
+        limit_maxproc(512)
+        limit_openfiles(4096)
+    }
+
+    aeocha.describe(fw, "limit{} -> rctl deny rules (exhaustion-DoS caps)") {
+
+        aeocha.describe("the caps are recorded") {
+            aeocha.it("get_rctl accumulates every limit_* setter") callback {
+                aeocha.assert_str_eq(fw, get_rctl("db_vm"),
+                    "memoryuse=2G, pcpu=150, maxproc=512, openfiles=4096",
+                    "all four caps recorded in order")
+            }
+        }
+
+        aeocha.describe("rendered as rctl rules for a jail subject") {
+            aeocha.it("each cap becomes jail:<vm>:RES:deny=AMT") callback {
+                r = rules_for("db_vm", "jail")
+                aeocha.assert_true(fw, _has(r, "jail:db_vm:memoryuse:deny=2G"), "memory cap")
+                aeocha.assert_true(fw, _has(r, "jail:db_vm:pcpu:deny=150"), "cpu cap (150% = 1.5 cores)")
+                aeocha.assert_true(fw, _has(r, "jail:db_vm:maxproc:deny=512"), "fork-bomb ceiling")
+                aeocha.assert_true(fw, _has(r, "jail:db_vm:openfiles:deny=4096"), "fd ceiling")
+            }
+        }
+
+        aeocha.describe("the subject is parameterized (bhyve VM = a process)") {
+            aeocha.it("renders for a process subject too") callback {
+                r = rules_for("db_vm", "process")
+                aeocha.assert_true(fw, _has(r, "process:db_vm:memoryuse:deny=2G"),
+                    "same caps, process subject — for a bhyve hypervisor process")
+            }
+        }
+
+        aeocha.describe("a node with no limits") {
+            aeocha.it("renders nothing (no caps -> no rules)") callback {
+                r = rules_for("unlimited_vm", "jail")
+                aeocha.assert_str_eq(fw, r, "", "no limit{} -> empty ruleset")
+            }
+        }
+    }
+
+    aeocha.run_summary(fw)
+}
+
+_has(hay: string, needle: string) -> int {
+    if string_contains(hay, needle) == 1 { return 1 }
+    return 0
+}
