@@ -72,14 +72,16 @@ resolve(system: string, rules: string) -> string {
 apply(system: string, vm: string, rules: string) -> string {
     resolved = resolve(system, rules)
     path = anchor_path(vm)
-    // Write the anchor file under sudo (it lives in /etc/pf.anchors, root-owned)
-    // via a sh redirect, matching the driver's self-sudo pattern. Then load it.
+    // The anchor dir is root-owned; ensure it exists (idempotent, fresh hosts).
+    _md = _sudo_mkdir(anchor_dir())
+    // Write the anchor file as root via `sudo -n /usr/bin/tee` (the granted
+    // NOPASSWD write primitive — see docs/bsd-host-setup.md sudoers). Then load.
     werr = _sudo_write(path, resolved)
     if werr != "" {
         return "aeo: writing pf anchor ${path}: ${werr}"
     }
-    // `sudo -n pfctl -a aeo/<vm> -f <file>` — same NOPASSWD pfctl the NAT setup
-    // uses (see docs/bsd-host-setup.md sudoers). -n: never prompt.
+    // `sudo -n /sbin/pfctl -a aeo/<vm> -f <file>` — FULL path so the path-specific
+    // NOPASSWD pfctl rule matches (a bare `pfctl` would not). -n: never prompt.
     out, status, err = _sudo_pfctl("-a ${anchor_name(vm)} -f ${path}")
     if status != 0 {
         return "aeo: pfctl load of anchor ${anchor_name(vm)} failed (exit ${_i(status)}): ${out}"
@@ -87,12 +89,25 @@ apply(system: string, vm: string, rules: string) -> string {
     return ""
 }
 
-// Write `content` to a root-owned `path` via `sudo tee` (the driver's idiom for
-// privileged file writes). Returns "" on success.
+anchor_dir() -> string { return "/etc/pf.anchors" }
+
+// `sudo -n /bin/mkdir -p <dir>` (granted). Best-effort; errors surface later as
+// the tee/pfctl failure if the dir really couldn't be made.
+_sudo_mkdir(dir: string) -> int {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "sudo -n /bin/mkdir -p ${dir}")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    return status
+}
+
+// Write `content` to a root-owned `path` via `sudo -n /usr/bin/tee` (granted).
+// Returns "" on success.
 _sudo_write(path: string, content: string) -> string {
     av = list_new()
     list_add(av, "-c")
-    list_add(av, "printf '%s\\n' ${_shq(content)} | sudo -n tee ${path} >/dev/null")
+    list_add(av, "printf '%s\\n' ${_shq(content)} | sudo -n /usr/bin/tee ${path} >/dev/null")
     out, status, err = run_capture("/bin/sh", av, null)
     list_free(av)
     if status != 0 {
@@ -101,11 +116,11 @@ _sudo_write(path: string, content: string) -> string {
     return ""
 }
 
-// `sudo -n pfctl <args>` via /bin/sh -c (args is a pre-built flag string).
+// `sudo -n /sbin/pfctl <args>` via /bin/sh -c (args is a pre-built flag string).
 _sudo_pfctl(args: string) -> {
     av = list_new()
     list_add(av, "-c")
-    list_add(av, "sudo -n pfctl ${args}")
+    list_add(av, "sudo -n /sbin/pfctl ${args}")
     out, status, err = run_capture("/bin/sh", av, null)
     list_free(av)
     return out, status, err

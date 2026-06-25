@@ -46,12 +46,17 @@ NOPASSWD sudo, scoped to the tools it needs:
 ```
 paul ALL=(ALL) NOPASSWD: /usr/local/sbin/vm, /usr/sbin/jail, /usr/sbin/jexec, /usr/sbin/jls, /sbin/ifconfig, /sbin/zfs, /sbin/zpool
 paul ALL=(ALL) NOPASSWD: /usr/bin/cu, /usr/sbin/kldload
-paul ALL=(ALL) NOPASSWD: /usr/sbin/tcpdump, /usr/sbin/pfctl, /usr/sbin/service, /usr/sbin/sysctl
+paul ALL=(ALL) NOPASSWD: /sbin/pfctl, /usr/sbin/tcpdump, /usr/sbin/service, /usr/sbin/sysctl
+paul ALL=(ALL) NOPASSWD: /usr/bin/tee, /bin/mkdir
 paul ALL=(ALL) NOPASSWD: /usr/bin/sed
 paul ALL=(ALL) NOPASSWD: /sbin/mdconfig, /sbin/mount, /sbin/umount, /usr/local/bin/fuse-ext2, /sbin/gpart, /usr/local/bin/qemu-img
 ```
 (tcpdump/pfctl/sysctl = NAT + diagnosis; sed/mdconfig/mount/fuse-ext2/
-qemu-img/gpart = offline image patching §5.)
+qemu-img/gpart = offline image patching §5. **pfctl is `/sbin/pfctl`** on
+FreeBSD 15 — NOT `/usr/sbin/pfctl`; a path mismatch makes `sudo -n pfctl` fail.
+tee + mkdir let `aeo up` write + load each VM's `/etc/pf.anchors/aeo-<vm>` —
+the netpolicy enforcement seam. **VERIFIED on the box 2026-06-25: write→load→
+read-back of a resolved deny-default ruleset round-trips through real pfctl.**)
 
 ## 4. Networking — NAT mode (REQUIRED on this box)
 
@@ -79,22 +84,33 @@ expects pf + dnsmasq done manually, which setup-nat.sh does.
 
 ### Per-VM pf anchor (the netpolicy enforcement seam — REQUIRED for confinement)
 
-`aeo up` now LOADS each VM's deny-default netpolicy (from `constrain{ egress /
+`aeo up` LOADS each VM's deny-default netpolicy (from `constrain{ egress /
 ingress_from / deny_egress }`) into a per-VM pf anchor `aeo/<vm>` (lib/pf —
-`pfctl -a aeo/<vm> -f /etc/pf.anchors/aeo-<vm>`). For those anchored rules to
-actually take effect, `/etc/pf.conf` MUST reference the anchor — add ONE line
-after the NAT rules:
+`pfctl -a aeo/<vm> -f /etc/pf.anchors/aeo-<vm>`). The write→load→read-back chain
+is VERIFIED against real pfctl on this box (2026-06-25). But two pf.conf changes
+are REQUIRED for the loaded rules to actually govern traffic:
 
-```
-anchor "aeo/*"
-```
+1. **Reference the anchor** — add `anchor "aeo/*"` to `/etc/pf.conf`.
+2. **Don't let a blanket pass override it.** The default `setup-nat.sh` pf.conf
+   ships `pass quick on vm-aeonat all` + `pass all`. The `quick` inter-VM pass
+   short-circuits — it passes ALL VM↔VM traffic BEFORE the anchor is consulted,
+   so confinement never engages. And the trailing non-quick `pass all` re-allows
+   whatever an anchor `block`ed (pf is last-match-wins). **Remove the blanket
+   `pass quick on vm-aeonat all`** and keep only the host-control-plane passes
+   (DHCP/DNS to 172.16.0.1, host→guest ssh), so un-whitelisted inter-VM flows
+   fall through to each VM's anchor deny.
 
-Without it, `aeo up` writes + loads the anchor (and logs success), but pf never
-consults it — the deny-default policy is silently inert. With it, a compromised
-node can only reach the peers/ports its `constrain{}` block whitelisted;
-everything else (incl. egress for a `deny_egress` node) is blocked at the host
-firewall. `aeo down` flushes the anchor (`pfctl -a aeo/<vm> -F rules`) so a
-torn-down VM leaves no stale deny rules on its (now-reused) address.
+⚠️ Editing live pf.conf can interrupt running guests' connectivity — parse-check
+first (`sudo pfctl -nf /etc/pf.conf.new`), apply when no deploy is mid-flight,
+and the host's own LAN reachability (192.168.0.57 on re0) is unaffected since the
+changes are scoped to the vm-aeonat switch.
+
+Without these, `aeo up` writes + loads the anchor (and logs success), but pf
+never enforces it — the deny-default policy is silently inert. With them, a
+compromised node can only reach the peers/ports its `constrain{}` block
+whitelisted; everything else (incl. egress for a `deny_egress` node) is blocked.
+`aeo down` flushes the anchor (`pfctl -a aeo/<vm> -F rules`) so a torn-down VM
+leaves no stale deny rules on its (now-reused) address.
 
 The `pfctl` calls go through `sudo -n` (the NOPASSWD pfctl in the sudoers above).
 
