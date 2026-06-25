@@ -73,6 +73,31 @@ The stock template otherwise is correct as-is: `loader="uefi"`, `graphics="yes"`
 `xhci_mouse="yes"`, `disk0_type="ahci-hd"`, `network0_type="e1000"`,
 `utctime="no"` (Windows expects localtime).
 
+### Host decision: GhostBSD/bhyve (not Bazzite/KVM)
+
+Paul has previously stood up Win11 Home on THIS SAME physical box under
+**Bazzite + its KVM/QEMU VMM**, with the OOBE local-account skip working. We're
+deliberately redoing it under **GhostBSD/bhyve** instead, because that's where
+ALL of aeo's containment lives (Capsicum/pf/rctl/jails) — a Bazzite/KVM guest
+would be confined by Linux mechanisms (cgroups/nftables/seccomp) aeo doesn't
+drive. The Bazzite success still de-risks the WINDOWS side: Home's OOBE skip is
+proven on this hardware, so the `autounattend.xml` fallback is likely unneeded.
+
+### ⚠️ TPM — the one thing that DIFFERS from the Bazzite/KVM experience
+
+Under Bazzite/KVM, Boxes/virt-manager auto-wires a **swtpm** (emulated TPM 2.0) +
+OVMF Secure Boot, so Win11's hardware check passed silently. **bhyve has no TPM by
+default**, so the installer will likely halt with "This PC can't run Windows 11."
+The fix (well-trodden) at the install screen:
+`Shift+F10` → `regedit` → create key `HKLM\SYSTEM\Setup\LabConfig` with DWORDs
+`BypassTPMCheck=1` and `BypassSecureBootCheck=1` (and `BypassRAMCheck=1` for good
+measure) → close, Back, continue. (If this bhyve build exposes `-l tpm`/swtpm we
+could pass a real TPM instead, but the LabConfig bypass is simplest.)
+
+Other Bazzite→bhyve differences (already handled by the stock template above):
+virtio disk/net under KVM → AHCI + e1000 under bhyve; libvirt NAT (virbr0) →
+the `aeonat` switch.
+
 ## First-boot runbook (ATTENDED — Paul, physically at the box)
 
 Paul is at the GhostBSD machine with kbd/mouse/display, so drive the installer on
