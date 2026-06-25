@@ -4,6 +4,26 @@ Tracks the remaining work to make the per-VM `constrain{}` netpolicy *actually
 confine* traffic on the GhostBSD box. The mechanism is built + proven; what's
 left is one deliberate, higher-blast-radius host change.
 
+## UPDATE 2026-06-25: bite-step APPLIED — confinement now armed
+
+The blanket `pass quick on vm-aeonat all` was REMOVED and the deny-default
+bite-step pf.conf applied live (verified: fresh ssh still passes, no blanket
+inter-VM pass remains, `anchor "aeo/*"` evaluates). Inter-VM traffic now falls
+through to each VM's anchor — a flow passes ONLY if a `constrain{}` whitelist
+permits it. **Critical fix during apply:** the naive bite config also dropped
+`pass all`, which was the ONLY thing permitting inbound ssh on re0 → would have
+locked the box out. The applied config carries an explicit
+`pass in quick on re0 proto tcp to port 22` + host-LAN passes, so management
+survives; deny-default applies ONLY to the vm-aeonat (guest) switch, never re0.
+
+Backups on the box (console rollback, since Paul has kbd/display there):
+- `/etc/pf.conf.aeo-bak`  → original NAT-only (pre-anchor)
+- `/etc/pf.conf.pre-bite` → anchor wired + blanket pass present (pre-bite)
+- Rollback: `sudo pfctl -f /etc/pf.conf.pre-bite` (or `.aeo-bak`)
+
+Remaining: the BEHAVIORAL acceptance test (deploy apex, prove allowed/denied
+flows) — now safe to run since console access makes any misstep recoverable.
+
 ## Where we are (verified live 2026-06-25, box `paul@192.168.0.57`)
 
 DONE and proven against real `pfctl` (FreeBSD 15, pf Enabled):

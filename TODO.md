@@ -12,25 +12,27 @@ malware and are impregnable to attack.* Two axes — stop a node REACHING things
 
 | Axis | Built | Live-proven | Notes |
 |---|---|---|---|
-| pf network policy | ✅ | ⚠️ chain proven, anchor wired | bite-step deferred |
-| rctl resource caps | ✅ | ⏳ pure-tested only | needs RACCT reboot + grant |
+| pf network policy | ✅ | ✅ bite-step APPLIED, deny-default armed | behavioral test pending |
+| rctl resource caps | ✅ | ✅ live + orchestrator-guarded | real-node deny proof pending |
 | Capsicum device grants | n/a | n/a | bhyve self-confines — no seam |
-| Image attestation | ❌ | — | `sign` grammar exists, unused |
+| Image attestation | ❌ | — | no grammar yet; built from scratch |
 | Audit trail | ❌ | — | nothing records node attempts |
 
-### 1. pf network policy — finish enforcement (HIGH)
-Built + chain-proven live; the `anchor "aeo/*"` line is wired into the box's
-`/etc/pf.conf`. **Not yet biting** — the blanket `pass quick on vm-aeonat all`
-short-circuits the anchor.
-- [ ] Apply the bite-step pf.conf (remove the blanket inter-VM pass). Procedure
-      + parse-checked config + rollback in `docs/pf-enforcement-next-steps.md`.
-      ⚠️ blast radius: do it when no guests are mid-deploy.
+### 1. pf network policy — ARMED (HIGH)
+Built, chain-proven, anchor wired, and the **bite-step is APPLIED live**
+(2026-06-25): blanket `pass quick on vm-aeonat all` removed, deny-default in
+effect on the guest switch, host ssh preserved via an explicit re0:22 pass.
+- [x] Apply the bite-step pf.conf (remove the blanket inter-VM pass). Done;
+      fresh ssh verified; backups + rollback in next-steps doc.
 - [ ] Behavioral acceptance test (the real proof): deploy the apex, confirm
       python_vm→db_vm:6379 ALLOWED, non-whitelisted port DENIED, a 3rd VM
       DENIED, db_vm egress (deny_egress) DENIED, host→guest ssh still works.
+      NOW SAFE to run — Paul has console (kbd/display) on the box, so any pf/rctl
+      misstep is recoverable; no more deferral for lockout fear.
 - [ ] **Open design question (Paul):** avoid global `/etc/pf.conf` entirely?
-      Alternatives to weigh first — a dedicated aeo bridge with its own
-      default-deny, or per-tap filtering. (Captured in the next-steps doc.)
+      Alternatives — a dedicated aeo bridge with its own default-deny, or
+      per-tap filtering. (Captured in the next-steps doc.) The current global
+      edit is minimal + reversible, but the question stands.
 
 ### 2. rctl resource caps — LIVE (MEDIUM)
 `limit{}` grammar + lib/rctl + runner wiring built; `spec_rctl_rulegen` green
@@ -49,13 +51,14 @@ short-circuits the anchor.
       (kind=bhyve)" loudly rather than skipping silently.
 
 ### 3. Image attestation — supply-chain (HIGH for "impregnable")
-The `sign` grammar exists but nothing verifies an image before boot, so a
-poisoned golden snapshot boots trusted.
-- [ ] Hash-pin the golden snapshot (record expected digest in the recipe).
+NO grammar yet (no `sign` setter exists — built from scratch). Nothing verifies
+an image before boot, so a poisoned golden snapshot boots trusted.
+- [ ] New grammar: pin an expected digest in the image recipe (e.g.
+      `attest("sha256:...")` on the golden snapshot / base image).
 - [ ] Verify-at-boot: the driver checks the image/snapshot digest before
       clone-and-boot; reject on mismatch/drift (fail-closed, loud).
-- [ ] Decide the trust root (operator-pinned hashes vs. a signing key) and wire
-      `sign` to it. Pure digest-compare half is unit-testable off-box.
+- [ ] Decide the trust root (operator-pinned hashes vs. a signing key). Pure
+      digest-compare half is unit-testable off-box.
 
 ### 4. Audit trail — forensics / "contain malware" observability (MEDIUM)
 Nothing records what a node ATTEMPTED — containment blocks but doesn't observe.
