@@ -77,6 +77,10 @@ Nothing records what a node ATTEMPTED — containment blocks but doesn't observe
 - [ ] aeo-agent: slices 2–4 (rewrite onto transport_http; container-build the
       Linux agent binary; driver push + init-aware TSR — systemd/OpenRC/sysvinit,
       see memory `aeo-agent-tsr-init-systems`). Slice 1 (lib/transport_http) done.
+- [ ] aeo-agent ON WINDOWS: the Bazzite→Chromebook→Win11 build/store/deploy
+      pipeline — `docs/aeo-agent-windows-pipeline.md`. Blockers: agent body is
+      Linux-bound (needs driver_windows/select arm), not on the conduit yet, and
+      the mingw cross-build is unproven (spike it first). Agent stays Aether.
 - [ ] Watch aether#878 (qualified-surface-on-any-import); when it lands, the
       aeocha-driven specs can drop their bare `import std.string`. (#870 already
       dropped from the demo.)
