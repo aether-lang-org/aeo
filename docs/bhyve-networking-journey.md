@@ -173,6 +173,18 @@ flakiness).
   root: pf + if_bridge don't compose cleanly for NAT or filtering on this box.
   Decision: deferred again — the staging workaround unblocks everything that
   matters; this is a multi-hour FreeBSD-networking dig, done on a live box.
+
+  **Kernel update ruled out (2026-06-25, later).** The box was running a STALE
+  kernel: `uname` = 15.0-RELEASE-**p2** while userland was **p8** (6 errata
+  levels apart — GhostBSD pkg-base kernel `GhostBSD-kernel-generic-26.1-R15.0p8`
+  installed but not booted). Hypothesis: an if_bridge/pf errata fix in p3–p8
+  might fix it for free. Rebooted into the matching p8 kernel
+  (`uname` now 15.0-RELEASE-p8) and re-tested guest egress: **STILL FAILS
+  identically** (guest pings gw .1 OK, 8.8.8.8/DNS/HTTPS all FAIL). So the bug is
+  NOT a stale-kernel artifact — it persists on current p8. Eliminates the
+  cheapest explanation; the remaining lead (if_bridge + NAT-reinjection, possibly
+  shared root with the inter-VM pf-delivery bug) stands, and a routed/epair
+  topology is the candidate fix for both.
 - **podman in the guest:** the bare patched image has none; the golden base
   (aeo-base) has podman baked in — clone it + patch-static-ip + load a
   staged image.
