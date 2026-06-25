@@ -12,11 +12,34 @@ malware and are impregnable to attack.* Two axes — stop a node REACHING things
 
 | Axis | Built | Live-proven | Notes |
 |---|---|---|---|
+| **jail nodes (driver_bsd)** | ✅ | ✅ **real jail boots+probes+contains, live** | the UNBLOCKED path — no bridge/NAT |
 | pf network policy | ✅ rulegen | ❌ inter-VM delivery BROKEN (if_bridge) | needs design rethink — see below |
 | rctl resource caps | ✅ | ✅ live + orchestrator-guarded | real-node deny proof pending |
 | Capsicum device grants | n/a | n/a | bhyve self-confines — no seam |
 | Image attestation | ❌ | — | no grammar yet; built from scratch |
 | Audit trail | ❌ | — | nothing records node attempts |
+
+### 0. jail nodes — LIVE-PROVEN (the unblocked containment path)
+Jails share the host network stack, so the bhyve bridge/NAT bug DOESN'T apply —
+this is where aeo's containment is both strongest and now demonstrated live.
+Validated 2026-06-25 on the box:
+- [x] Populated a jail root (`/zroot/jails/aeo-rj` + `/rescue/{sh,test,ls}`).
+- [x] Booted a REAL jail via the exact `driver_bsd` command sequence:
+      `jail -c name=aeo-rj path=... host.hostname=aeo-rj persist` → jail CREATED.
+- [x] Probed: `jls` shows JID + hostname (driver_bsd.probe path).
+- [x] In-jail exec: `jexec aeo-rj /rescue/test -d /` passed; `ls /` shows ONLY
+      the jail's own root (dev, rescue) — NOT the host's — i.e. contained.
+- [x] Closed the loop: aeo's `jail_create_argv` emits EXACTLY the command that
+      worked live (byte-for-byte), and `smoke_bsd` (driver pure-logic) passes.
+- [ ] Un-park `test/real_jail.ae` into `test/` — BUT it shells `jail`/`jls`
+      directly (driver doesn't self-sudo), so the binary needs to run as root;
+      `sudo <arbitrary-binary>` isn't in the NOPASSWD grants. Either: add a narrow
+      grant, run it from a root shell, or make driver_bsd self-sudo like driver_vm
+      does. (Proven via argv-match + live commands meanwhile.)
+- [ ] Apply rctl caps + Capsicum to a live jail node end-to-end (both already
+      target jails; combine with the above for a fully-contained jail node).
+- [ ] A jail-based apex example (the silly_addition_cache DSL already declares a
+      `jail("db")` path) — orchestrate a real jail tree via `aeo up`, no bhyve.
 
 ### 1. pf network policy — inter-VM delivery BROKEN, needs design rethink (HIGH)
 Rulegen (lib/pf, lib/compose) is correct + unit-tested. The bite-step pf.conf was
