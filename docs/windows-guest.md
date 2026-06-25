@@ -47,36 +47,65 @@ regardless of guest OS; the contained does not confine itself."
 Box has room: zroot **267 GB free** (VMs use ~7.5 GB), **31 GB RAM** (1 GB
 committed). Allocate ~40 GB disk, 8 GB RAM, 2–4 vCPU for the Win11 VM.
 
-## bhyve specifics for a Windows guest (likely gotchas, UNVERIFIED)
+## bhyve specifics for a Windows guest — ALL PREREQS PRESENT (verified 2026-06-25)
 
-Windows needs different device models than our Linux template:
-- **UEFI bootrom** (have it — bhyve-firmware) + likely a **GOP/framebuffer +
-  VNC** so you can SEE the installer (Linux guests run headless; Windows OOBE
-  needs a display). vm-bhyve: a `graphics="yes"` + `vnc` template.
-- **Disk:** AHCI (`ahci-hd`) or NVMe — Windows has no virtio-blk driver out of
-  the box (would need virtio drivers slipstreamed). Start with AHCI.
-- **NIC:** `e1000` (Windows has a built-in driver); virtio-net needs the
-  Fedora virtio-win drivers injected. Start with e1000.
-- A `windows` guest template for vm-bhyve (vs the `linux-nat` one) — TBD.
+The box has everything; nothing to install. Verified on `paul@192.168.0.57`:
+- **UEFI bootrom** ✅ `bhyve-firmware` installed, `BHYVE_UEFI.fd` present.
+- **VNC framebuffer** (`fbuf`) ✅ + **USB tablet** (`xhci`/`tablet`) ✅ — bhyve
+  supports both, so the installer is visible + the mouse works.
+- **AHCI disk** (`ahci-hd`) ✅, **NVMe** ✅ — start with AHCI (no virtio-blk in
+  Windows OOB).
+- **e1000 NIC** ✅ (Windows has the driver built in) — virtio-net is also present
+  for later driver-slipstreaming.
+- **vm-bhyve 1.7.3** ✅ ships a stock **`windows.conf`** template (the known-good
+  config) at `/usr/local/share/examples/vm-bhyve/windows.conf`.
+- **ISO datastore** ✅ `/zroot/vm/.iso/` exists (empty, ready for the Win11 ISO).
 
-## First-boot runbook (ATTENDED — Paul)
+### ⚠️ Two gotchas in the stock windows.conf
+1. **`network0_switch="public"` → change to `aeonat`.** `public` puts the guest
+   on the LAN bridge, which the upstream LAN switch's MAC-per-port limit REJECTS
+   (the exact reason NAT exists — see bhyve-networking-journey.md). The guest
+   must be on the private `aeonat` NAT switch (172.16.0.x) like every other node.
+2. The template's `graphics_listen` is commented out — fine, since **Paul is
+   physically at the box** (local kbd/mouse/display); no VNC-over-LAN needed.
 
-1. Get a Win11 ISO onto the box (~6 GB; space is fine).
-2. Create the VM with a Windows-shaped template (UEFI + VNC + AHCI + e1000),
-   ~40 GB disk, boot the ISO, connect via VNC.
+The stock template otherwise is correct as-is: `loader="uefi"`, `graphics="yes"`,
+`xhci_mouse="yes"`, `disk0_type="ahci-hd"`, `network0_type="e1000"`,
+`utctime="no"` (Windows expects localtime).
+
+## First-boot runbook (ATTENDED — Paul, physically at the box)
+
+Paul is at the GhostBSD machine with kbd/mouse/display, so drive the installer on
+the box's local display — NO VNC-over-LAN needed. `vm console` / the bhyve fbuf
+shows on the attached monitor.
+
+1. Copy a Win11 ISO into `/zroot/vm/.iso/` (~6 GB; 267 GB free).
+2. Create + install from the stock windows template, on the NAT switch:
+   ```
+   sudo vm create -t windows -s 40G win11
+   sudo vm set win11 network0_switch=aeonat   # ← override 'public' (LAN-switch rejects it)
+   sudo vm set win11 memory=8G                 # template default is 2G; bump it
+   sudo vm install win11 <iso-name>.iso
+   sudo vm console win11                        # opens the display on the local monitor
+   ```
 3. Install Win11 Home. **Skip the product key** ("I don't have a product key" —
    runs unlicensed/eval, fine for a test VM). MS-account/local-account at OOBE is
    the fiddly 24H2 bit; an `autounattend.xml` is the deterministic fix if the
    in-OOBE skips don't work, but for a first pass just get THROUGH OOBE.
-4. **Enable the OpenSSH Server** (built in):
+4. **Enable the OpenSSH Server** (built in) — in an admin PowerShell:
    `Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0`
    then `Start-Service sshd; Set-Service -Name sshd -StartupType Automatic`.
 5. **Add Paul's pubkey** to `C:\ProgramData\ssh\administrators_authorized_keys`
-   (admin-key path on Windows; perms matter — owner Administrators/SYSTEM only).
-6. Confirm `ssh paul@<win-guest-ip>` works from the host with key auth.
-7. Give the guest a known static IP on the NAT switch (avoid the .50 clash the
-   Linux clones hit — pick e.g. .60).
-8. Tell Claude → snapshot it as the Windows golden.
+   (admin-key path on Windows; perms matter — owner Administrators/SYSTEM only,
+   no inherited ACLs).
+6. From the host: `ssh paul@<win-guest-ip>` works with key auth (the bootstrap
+   channel for pushing the Aether agent .exe later).
+7. Give the guest a known static IP on the NAT switch — pick **.60** (aeo-base is
+   .50, testpeer .51; avoid the clash the Linux clones hit). Set it inside
+   Windows (network adapter → manual IPv4 172.16.0.60/24, gw 172.16.0.1, dns
+   172.16.0.1).
+8. Tell Claude → snapshot it as the Windows golden (`zfs snapshot
+   zroot/vm/win11@golden`, via the granted zfs).
 
 ## aeo-side work (AFTER the snapshot exists)
 
