@@ -36,10 +36,19 @@ Validated 2026-06-25 on the box:
       `sudo <arbitrary-binary>` isn't in the NOPASSWD grants. Either: add a narrow
       grant, run it from a root shell, or make driver_bsd self-sudo like driver_vm
       does. (Proven via argv-match + live commands meanwhile.)
-- [ ] Apply rctl caps + Capsicum to a live jail node end-to-end (both already
-      target jails; combine with the above for a fully-contained jail node).
-- [ ] A jail-based apex example (the silly_addition_cache DSL already declares a
-      `jail("db")` path) — orchestrate a real jail tree via `aeo up`, no bhyve.
+- [x] Apply rctl caps to a live jail node end-to-end: booted db+app jails on the
+      box, applied the demo's exact rules (jail:db:memoryuse:deny=512M, maxproc
+      32; jail:app:maxproc 128), kernel accepted, read back, cleaned up. The
+      jail-boundary + rctl axes BOTH live on real nodes.
+- [x] **A jail-based apex example** — `examples/silly_addition_jails.ae`, the
+      sibling of silly_addition_cache.ae: two rctl-capped jails (db <- app),
+      all-in-one (check/up/suite). check 3/3 standalone; both build doors green;
+      live suite assertions (jls running + `jexec ls /` shows only the jail root,
+      not /home) validated on the box.
+- [ ] Capsicum-in-jail on the live node (spec_capsicum_jail_selfreport proves the
+      mechanism; combine with the demo for the full three-axis showcase).
+- [ ] Run the jail demo's `up`/`suite` via real `aeo up` once driver_bsd can run
+      privileged (self-sudo or a root grant) — same blocker as real_jail.ae.
 
 ### 1. pf network policy — inter-VM delivery BROKEN, needs design rethink (HIGH)
 Rulegen (lib/pf, lib/compose) is correct + unit-tested. The bite-step pf.conf was
