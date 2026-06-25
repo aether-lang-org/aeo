@@ -145,6 +145,34 @@ flakiness).
   artifacts from the host (build the image on a machine with podman ->
   `podman save` tar -> scp into the guest -> `podman load`). Fix the pf
   reverse path later.
+
+  **Deep-dive 2026-06-25 (ruled OUT, still unsolved).** A fresh investigation
+  narrowed it hard but did not crack it. Established facts:
+  - Outbound works end-to-end: `tcpdump re0` shows the guest ping leave as
+    `192.168.0.57 > 8.8.8.8` AND the reply `8.8.8.8 > 192.168.0.57` arrive back
+    at re0.
+  - pf has a CORRECT bidirectional NAT state:
+    `icmp 192.168.0.57:p (172.16.0.50:9) -> 8.8.8.8:8`, `state-mismatch: 0`.
+  - Host↔guest is perfect: route `172.16.0.0/24 -> vm-aeonat` exists, host pings
+    .50 at 0.1ms, guest pings the gw .1.
+  - `tcpdump vm-aeonat` shows the guest's request go OUT but **no reply ever
+    returns onto vm-aeonat** — the de-NAT'd reply vanishes between re0-inbound
+    and vm-aeonat-outbound.
+  Ruled out (tested, none fixed it): the pf RULES (the original NAT-only
+  `pf.conf.aeo-bak` with `pass all` fails IDENTICALLY — so the bite-step did NOT
+  cause this; it's pre-existing); `scrub in all` (removed, no change);
+  `net.inet.ip.fastforwarding` (doesn't exist on FreeBSD 15); re0 NIC offloads
+  TSO/LRO/RXCSUM/TXCSUM (disabled, no change). `pflog0` isn't created so pf-drop
+  logging wasn't available.
+  Remaining hypothesis: a FreeBSD-15 **if_bridge + NAT-reinjection** interaction
+  — the de-NAT'd packet isn't re-routed onto the bridge member. Next leads (NOT
+  yet tried): enable a `pflog` interface + `block log` to see the actual drop;
+  test `route-to`/`reply-to`; try NAT on the bridge vs re0; or a non-bridge
+  (epair/routed) topology — which is ALSO the leading fix for the inter-VM pf
+  delivery bug (see pf-enforcement-next-steps.md), so both problems may share a
+  root: pf + if_bridge don't compose cleanly for NAT or filtering on this box.
+  Decision: deferred again — the staging workaround unblocks everything that
+  matters; this is a multi-hour FreeBSD-networking dig, done on a live box.
 - **podman in the guest:** the bare patched image has none; the golden base
   (aeo-base) has podman baked in — clone it + patch-static-ip + load a
   staged image.
