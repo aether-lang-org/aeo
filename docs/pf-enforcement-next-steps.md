@@ -1,8 +1,56 @@
 # pf netpolicy enforcement — status & next steps
 
 Tracks the remaining work to make the per-VM `constrain{}` netpolicy *actually
-confine* traffic on the GhostBSD box. The mechanism is built + proven; what's
-left is one deliberate, higher-blast-radius host change.
+confine* traffic on the GhostBSD box.
+
+## ⚠️ UPDATE 2026-06-25 (behavioral test): the design is INCOMPLETE for inter-VM
+
+A live two-guest behavioral test (aeo-base .50 + a cloned testpeer .51, probing
+guest→guest from INSIDE .51) found that the pf-anchor inter-VM confinement does
+**not** work as built. Two compounding findings:
+
+1. **pf does not filter bridge traffic by default.** `net.link.bridge.pfil_member`
+   was `0`, so inter-VM packets are L2-bridged on `vm-aeonat` and NEVER traverse
+   pf — the anchor's block rules showed `Packets: 0` despite live traffic. So
+   everything we'd "proven" (anchor loads, normalizes, is referenced) was
+   necessary-but-not-sufficient: the rules sat in a path the traffic skips.
+
+2. **With `pfil_member=1`, deny-default works but the whitelist PASS can't
+   complete a connection.** Enabling member filtering made the blocks fire
+   (`Packets: 9`) and non-whitelisted ports correctly BLOCK. But the *allowed*
+   flow (`.51→.50:6379`) also blocked — even though the forward SYN's pass rule
+   matched (`Packets: 3, States: 1`). The if_bridge per-member model evaluates
+   each packet on BOTH tap interfaces; stateful return-path matching across two
+   members is fragile, so the SYN-ACK is dropped and the handshake never
+   completes. Net: `pfil_member=1` + the bite-step = ALL inter-VM denied,
+   including legitimate whitelisted flows.
+
+**Reverted to known-good** (`pfil_member=0`, anchor flushed) — inter-VM works,
+ssh mgmt intact. The headline "deny-default with whitelist holes" is NOT yet
+achievable with the current anchor-on-shared-bridge design.
+
+### What this means — the design needs rethinking (ties to Paul's open question)
+The "avoid global /etc/pf.conf" question is now the LEADING option, because the
+shared-bridge + member-pfil approach has a fundamental return-path problem.
+Candidates to evaluate before more live poking:
+- **Per-VM epair + its own bridge** (not one shared vm-aeonat): each VM on a
+  point-to-point link the host routes between, so pf filters at L3 (routed, not
+  bridged) — `keep state` works normally, no dual-member evaluation.
+- **`pass` rules with explicit per-tap `on <if>` + matching reply rules**, or
+  `set state-policy if-bound` tuning — may fix the return path but is brittle.
+- **pf `block`/`pass` on the bridge interface itself** (`pfil_bridge=1`) instead
+  of members — evaluates once, not per-member; needs its own test.
+- Drive confinement at the **guest** (the resident aeo-agent + guest-side
+  firewall) rather than host pf — depth-agnostic, sidesteps if_bridge entirely.
+
+This is a genuine architecture fork, not a config tweak. The pure rulegen
+(lib/pf, lib/compose) is still correct and unit-tested; what's wrong is the
+host *delivery* mechanism for those rules on a bridged switch.
+
+---
+
+(Original notes below — the anchor-wiring mechanics are still accurate; it's the
+inter-VM *enforcement path* that the test invalidated.)
 
 ## UPDATE 2026-06-25: bite-step APPLIED — confinement now armed
 

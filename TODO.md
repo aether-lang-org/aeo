@@ -12,27 +12,28 @@ malware and are impregnable to attack.* Two axes — stop a node REACHING things
 
 | Axis | Built | Live-proven | Notes |
 |---|---|---|---|
-| pf network policy | ✅ | ✅ bite-step APPLIED, deny-default armed | behavioral test pending |
+| pf network policy | ✅ rulegen | ❌ inter-VM delivery BROKEN (if_bridge) | needs design rethink — see below |
 | rctl resource caps | ✅ | ✅ live + orchestrator-guarded | real-node deny proof pending |
 | Capsicum device grants | n/a | n/a | bhyve self-confines — no seam |
 | Image attestation | ❌ | — | no grammar yet; built from scratch |
 | Audit trail | ❌ | — | nothing records node attempts |
 
-### 1. pf network policy — ARMED (HIGH)
-Built, chain-proven, anchor wired, and the **bite-step is APPLIED live**
-(2026-06-25): blanket `pass quick on vm-aeonat all` removed, deny-default in
-effect on the guest switch, host ssh preserved via an explicit re0:22 pass.
-- [x] Apply the bite-step pf.conf (remove the blanket inter-VM pass). Done;
-      fresh ssh verified; backups + rollback in next-steps doc.
-- [ ] Behavioral acceptance test (the real proof): deploy the apex, confirm
-      python_vm→db_vm:6379 ALLOWED, non-whitelisted port DENIED, a 3rd VM
-      DENIED, db_vm egress (deny_egress) DENIED, host→guest ssh still works.
-      NOW SAFE to run — Paul has console (kbd/display) on the box, so any pf/rctl
-      misstep is recoverable; no more deferral for lockout fear.
-- [ ] **Open design question (Paul):** avoid global `/etc/pf.conf` entirely?
-      Alternatives — a dedicated aeo bridge with its own default-deny, or
-      per-tap filtering. (Captured in the next-steps doc.) The current global
-      edit is minimal + reversible, but the question stands.
+### 1. pf network policy — inter-VM delivery BROKEN, needs design rethink (HIGH)
+Rulegen (lib/pf, lib/compose) is correct + unit-tested. The bite-step pf.conf was
+applied and host mgmt preserved. BUT the live two-guest behavioral test
+(2026-06-25) proved the inter-VM *enforcement path* does not work on the shared
+bridge — full writeup in `docs/pf-enforcement-next-steps.md`:
+- [x] Behavioral acceptance test RUN — and it FAILED honestly. Found: (a) pf
+      doesn't filter bridge traffic by default (`pfil_member=0` → anchor never
+      sees inter-VM packets); (b) with `pfil_member=1`, deny-default works but the
+      whitelist PASS can't complete a handshake (if_bridge per-member dual
+      evaluation drops the stateful return path). Reverted to known-good.
+- [ ] **DECIDE the delivery architecture** (this is the fork): per-VM epair +
+      routed L3 (pf filters normally, no bridge), vs `pfil_bridge=1` (filter once
+      on the bridge), vs guest-side firewall via the resident agent. See doc.
+- [ ] Re-run the 4 assertions once a working delivery is chosen (the test harness
+      + two guests aeo-base/.50 + testpeer/.51 are proven and reusable).
+- [x] Lockout-safety: Paul has console (kbd/display); pf/rctl missteps recoverable.
 
 ### 2. rctl resource caps — LIVE (MEDIUM)
 `limit{}` grammar + lib/rctl + runner wiring built; `spec_rctl_rulegen` green
