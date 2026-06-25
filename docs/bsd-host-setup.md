@@ -77,6 +77,27 @@ touches the LAN switch). `sudo sh test/setup-nat.sh --check` shows state.
 Note: vm-bhyve's *internal* NAT is disabled on FreeBSD — it warns and
 expects pf + dnsmasq done manually, which setup-nat.sh does.
 
+### Per-VM pf anchor (the netpolicy enforcement seam — REQUIRED for confinement)
+
+`aeo up` now LOADS each VM's deny-default netpolicy (from `constrain{ egress /
+ingress_from / deny_egress }`) into a per-VM pf anchor `aeo/<vm>` (lib/pf —
+`pfctl -a aeo/<vm> -f /etc/pf.anchors/aeo-<vm>`). For those anchored rules to
+actually take effect, `/etc/pf.conf` MUST reference the anchor — add ONE line
+after the NAT rules:
+
+```
+anchor "aeo/*"
+```
+
+Without it, `aeo up` writes + loads the anchor (and logs success), but pf never
+consults it — the deny-default policy is silently inert. With it, a compromised
+node can only reach the peers/ports its `constrain{}` block whitelisted;
+everything else (incl. egress for a `deny_egress` node) is blocked at the host
+firewall. `aeo down` flushes the anchor (`pfctl -a aeo/<vm> -F rules`) so a
+torn-down VM leaves no stale deny rules on its (now-reused) address.
+
+The `pfctl` calls go through `sudo -n` (the NOPASSWD pfctl in the sudoers above).
+
 ## 5. AMD Ryzen guest-boot fix (REQUIRED — patched image)
 
 Ubuntu Linux guests hang very early in boot under bhyve on this AMD Ryzen

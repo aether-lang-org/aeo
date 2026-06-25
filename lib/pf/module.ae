@@ -1,0 +1,184 @@
+// lib/pf — resolve + apply the pf ruleset that ENFORCES a VM's netpolicy.
+//
+// compose.pf_rules_for(vm) emits deny-default whitelist rules with $<name>
+// TOKENS (the VM's own name and its peers), kept IP-agnostic on purpose (the
+// composition never names addresses). This module is the ENFORCEMENT seam: it
+// substitutes each $<name> with the ipam-resolved IP for that node, then writes
+// the ruleset into a per-VM pf ANCHOR and loads it with `pfctl`. So `aeo up`
+// turns the proven model (spec_pf_rulegen) into a LIVE deny-default firewall —
+// without it, the policy was generated + verified but never applied.
+//
+//   resolve(system, rules) -> rules with every $<name> replaced by its IP
+//                             (pure; the unit-tested half — no root, no pfctl)
+//   apply(system, vm, rules) -> resolve, write /etc/pf.anchors/aeo-<vm>, and
+//                             `pfctl -a aeo/<vm> -f <file>` (FreeBSD; needs root)
+//
+// Per-VM anchor (aeo/<vm>) so each VM's rules are independent — loading one VM's
+// policy never flushes another's, and `aeo down` flushes just that anchor.
+
+import std.os (run_capture)
+import std.list
+import std.string (string_length, string_char_at, string_substring, string_from_char)
+import std.fs (write_atomic)
+import ipam
+
+exports ( resolve, apply, flush, anchor_name, anchor_path )
+
+// resolve(system, rules) — replace every $<name> token in `rules` with the
+// ipam IP for (system, name). A token is `$` followed by [A-Za-z0-9_]+ (the
+// resource-name charset compose uses). Unknown names resolve via ipam's sticky
+// binding — the SAME address the driver booted them at — so the firewall and
+// the boot agree. Pure string work + ipam reads: unit-testable off FreeBSD.
+resolve(system: string, rules: string) -> string {
+    out = ""
+    n = string_length(rules)
+    i = 0
+    while i < n {
+        c = string_char_at(rules, i)
+        if c == 36 {                       // '$' begins a token
+            // scan the contiguous name chars after '$'
+            end = i + 1
+            scanning = 1
+            while scanning == 1 {
+                if end >= n {
+                    scanning = 0
+                } else {
+                    if _is_name_char(string_char_at(rules, end)) == 1 {
+                        end = end + 1
+                    } else {
+                        scanning = 0
+                    }
+                }
+            }
+            name = string_substring(rules, i + 1, end)
+            ip = ipam.resolve_ip(system, name)
+            if string_length(ip) == 0 {
+                out = "${out}$${name}"        // unresolved -> leave the token
+            } else {
+                out = "${out}${ip}"
+            }
+            i = end
+        } else {
+            out = "${out}${string_from_char(c)}"
+            i = i + 1
+        }
+    }
+    return out
+}
+
+// apply(system, vm, rules) — resolve tokens, write the anchor file, load it via
+// pfctl into anchor aeo/<vm>. Returns "" on success, an error string otherwise.
+// FreeBSD + root (pfctl). The runner calls this AFTER the VM has its IP.
+apply(system: string, vm: string, rules: string) -> string {
+    resolved = resolve(system, rules)
+    path = anchor_path(vm)
+    // Write the anchor file under sudo (it lives in /etc/pf.anchors, root-owned)
+    // via a sh redirect, matching the driver's self-sudo pattern. Then load it.
+    werr = _sudo_write(path, resolved)
+    if werr != "" {
+        return "aeo: writing pf anchor ${path}: ${werr}"
+    }
+    // `sudo -n pfctl -a aeo/<vm> -f <file>` — same NOPASSWD pfctl the NAT setup
+    // uses (see docs/bsd-host-setup.md sudoers). -n: never prompt.
+    out, status, err = _sudo_pfctl("-a ${anchor_name(vm)} -f ${path}")
+    if status != 0 {
+        return "aeo: pfctl load of anchor ${anchor_name(vm)} failed (exit ${_i(status)}): ${out}"
+    }
+    return ""
+}
+
+// Write `content` to a root-owned `path` via `sudo tee` (the driver's idiom for
+// privileged file writes). Returns "" on success.
+_sudo_write(path: string, content: string) -> string {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "printf '%s\\n' ${_shq(content)} | sudo -n tee ${path} >/dev/null")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    if status != 0 {
+        return "sudo tee exit ${_i(status)}: ${out}"
+    }
+    return ""
+}
+
+// `sudo -n pfctl <args>` via /bin/sh -c (args is a pre-built flag string).
+_sudo_pfctl(args: string) -> {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "sudo -n pfctl ${args}")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    return out, status, err
+}
+
+// minimal single-quote shell-quote (wrap + escape embedded quotes).
+_shq(s: string) -> string {
+    return "'${_esc_squote(s)}'"
+}
+_esc_squote(s: string) -> string {
+    out = ""
+    n = string_length(s)
+    i = 0
+    while i < n {
+        c = string_char_at(s, i)
+        if c == 39 {                       // ' -> '\''
+            out = "${out}'\\''"
+        } else {
+            out = "${out}${string_from_char(c)}"
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// flush(vm) — drop the VM's pf rules on teardown: `pfctl -a aeo/<vm> -F rules`.
+// Returns "" on success. FreeBSD + root. So `aeo down` leaves no stale deny
+// rules referencing a torn-down VM's (now reusable) address.
+flush(vm: string) -> string {
+    out, status, err = _sudo_pfctl("-a ${anchor_name(vm)} -F rules")
+    if status != 0 {
+        return "aeo: pfctl flush of anchor ${anchor_name(vm)} failed (exit ${_i(status)}): ${out}"
+    }
+    return ""
+}
+
+anchor_name(vm: string) -> string { return "aeo/${vm}" }
+anchor_path(vm: string) -> string { return "/etc/pf.anchors/aeo-${vm}" }
+
+// --- helpers ---
+
+// name char: [A-Za-z0-9_] (the compose resource-name charset).
+_is_name_char(c: int) -> int {
+    if c >= 48 { if c <= 57 { return 1 } }     // 0-9
+    if c >= 65 { if c <= 90 { return 1 } }     // A-Z
+    if c >= 97 { if c <= 122 { return 1 } }    // a-z
+    if c == 95 { return 1 }                     // _
+    return 0
+}
+
+_i(n: int) -> string {
+    if n == 0 { return "0" }
+    v = n
+    neg = 0
+    if v < 0 { neg = 1 v = 0 - v }
+    s = ""
+    while v > 0 {
+        d = v - (v / 10) * 10
+        s = "${_d(d)}${s}"
+        v = v / 10
+    }
+    if neg == 1 { return "-${s}" }
+    return s
+}
+_d(x: int) -> string {
+    if x == 1 { return "1" }
+    if x == 2 { return "2" }
+    if x == 3 { return "3" }
+    if x == 4 { return "4" }
+    if x == 5 { return "5" }
+    if x == 6 { return "6" }
+    if x == 7 { return "7" }
+    if x == 8 { return "8" }
+    if x == 9 { return "9" }
+    return "0"
+}

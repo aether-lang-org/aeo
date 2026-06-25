@@ -24,6 +24,7 @@ import driver_bsd
 import driver_vm
 import compose
 import ipam
+import pf
 import resource (set_state, get_state, STATE_DOWN, STATE_BOOTING, STATE_UP, STATE_FAILED)
 import host (family, profile)
 import aeo_compose (aeo_orchestration)
@@ -331,6 +332,13 @@ run_up() -> int {
                     if st != STATE_UP() {
                         return 0
                     }
+                    // ENFORCEMENT SEAM: the VM is up + has its ipam IP, so its
+                    // peers (declared by name in the netpolicy) are resolvable.
+                    // Now LOAD the deny-default pf policy compose generated +
+                    // verified — turning the model live. No-op for resources
+                    // without a netpolicy. Non-fatal: a pf failure is logged,
+                    // not a teardown (the node is up; the operator sees the gap).
+                    _enforce_netpolicy(nm)
                 }
             }
             i = i + 1
@@ -347,6 +355,29 @@ run_up() -> int {
     return 1
 }
 
+// Load a resource's deny-default pf policy into its own anchor, now that it's up
+// and addressable. pf is FreeBSD-only, so skip elsewhere (the netpolicy is still
+// generated + asserted by spec_pf_rulegen/spec_pf_enforce; only the live load is
+// BSD). A no-op if the resource declared no netpolicy. Non-fatal by design:
+// a pfctl failure logs loudly but doesn't tear the (already-up) node down — the
+// operator sees an explicit "policy NOT enforced" line rather than a silent gap.
+_enforce_netpolicy(nm: string) {
+    if compose.get_netpolicy(nm) == "" {
+        return
+    }
+    if host.family() != "bsd" {
+        println("aeo: [${nm}] netpolicy declared but pf is FreeBSD-only — NOT enforced on this host")
+        return
+    }
+    rules = compose.pf_rules_for(nm)
+    err = pf.apply(compose.get_system(nm), nm, rules)
+    if err != "" {
+        println("aeo: [${nm}] WARNING pf policy NOT enforced: ${err}")
+    } else {
+        println("aeo: [${nm}] pf deny-default policy loaded (anchor ${pf.anchor_name(nm)})")
+    }
+}
+
 // ---- teardown engine ----
 // Reverse declaration order: the last-declared (most-dependent) tier stops
 // first, the first-declared (its dependency) stops last.
@@ -355,6 +386,14 @@ run_down() {
     i = n - 1
     while i >= 0 {
         nm = compose.name_at(i)
+        // Drop this VM's pf anchor BEFORE halting it, so no stale deny rules
+        // outlive the node (its address returns to the ipam pool). FreeBSD-only
+        // + best-effort: a flush failure doesn't block teardown.
+        if compose.get_netpolicy(nm) != "" {
+            if host.family() == "bsd" {
+                _fe = pf.flush(nm)
+            }
+        }
         a = spawn(Resource())
         a ! Configure { in_name: nm, in_kind: compose.get_kind(nm) }
         a ! Halt {}
