@@ -2,19 +2,33 @@
 
 Goal: orchestrate a Win11 bhyve guest the same way aeo does Linux guests —
 boot + contain it (host-side, OS-agnostic), then deploy the Python service into
-it. Chosen approach: **drive Windows over SSH** (the OpenSSH Server that ships
-*with* Windows), so the deploy path mirrors the Linux ssh path; no Aether agent
-inside Windows (there's no Aether→Windows toolchain).
+it.
 
-## Why SSH, not an in-guest aeo-agent
+## CORRECTION (2026-06-25): Aether DOES target Windows — the agent stays Aether
 
-The Aether `aeo-agent` can't be compiled for Windows (Aether emits C; no Windows
-target). And an agent can't install its own runtime — something must already be
-in the snapshot. OpenSSH Server is BUILT IN to Windows, so enabling it is the
-minimal bootstrap: aeo then ssh's in and runs commands (install Python, run the
-service) per-deploy — the "agent installs Python" idea, realized as aeo's own
-ssh-driven commands rather than a resident binary. Same seam as Linux
-(`driver_vm.guest_container_up` ssh's in), different in-guest commands.
+An earlier draft of this doc claimed "no Aether→Windows toolchain" and pivoted to
+an ssh-shim. **That was wrong.** Aether has first-class Windows support:
+`select(linux:…, windows:…)` compiles to `#ifdef _WIN32` (docs/named-args-and-
+select.md lists "Windows, MinGW, MSYS2"; examples use `-lws2_32`, `C:\…` paths),
+and aetherc emits C compiled by gcc/clang — so **mingw-w64 produces a native
+Windows `.exe`** (docs/bootstrap-from-source.md: "On Windows, build under MSYS2
+… mingw-w64-x86_64-gcc"). So the REAL aeo-agent (Aether, sharing protocol /
+transport_http / drivers) runs natively in a Win11 guest as a mingw-built .exe —
+same agent, same conduit, every platform. No ssh-shim, no Python-as-the-agent.
+
+The two real obstacles are narrower than "Aether can't":
+1. **The agent body is Linux-bound, not the language.** bin/aeo-agent.ae
+   `import driver_linux` + calls podman. Windows needs a driver_windows (or
+   `select()`-based) path that runs the workload natively (install Python via
+   winget, launch `python app.py`) instead of podman. A code change.
+2. **Need a mingw cross-build** (FreeBSD host → Windows .exe). Extends the
+   "build the Linux agent in a container" plan: a toolchain image with
+   mingw-w64-gcc cross-compiles the agent's emitted C to a .exe. Known pattern;
+   pipeline to be confirmed.
+
+OpenSSH (built into Windows) is still the right ZERO-INSTALL bootstrap to PUSH
+the agent .exe in the first time (and as a fallback deploy channel) — but the
+agent it pushes is the Aether one, not a shim.
 
 ## Containment is already OS-agnostic (no work needed)
 
@@ -66,11 +80,19 @@ Windows needs different device models than our Linux template:
 
 ## aeo-side work (AFTER the snapshot exists)
 
+The agent stays Aether; OpenSSH is the bootstrap channel to push it + a fallback.
+
 - [ ] Snapshot the attended Win11 VM as a golden (zfs snapshot, like aeo-base).
-- [ ] A Windows deploy path in the driver: detect a Windows guest, ssh in, and
-      run Windows commands — install Python (winget/python.org silent), write
-      the app, launch it — instead of the Linux podman path. Parallels
-      `guest_container_up`; a `guest_winsvc_up` sibling.
+- [ ] **driver_windows / `select()` agent path**: give aeo-agent a Windows arm
+      that runs the workload natively (winget-install Python, write the app,
+      launch `python app.py`) instead of `driver_linux`/podman. This is the agent
+      *body* change — the language already targets Windows.
+- [ ] **mingw cross-build** of the agent: a toolchain image with mingw-w64-gcc
+      compiles the agent's emitted C → `aeo-agent.exe` on the FreeBSD host.
+- [ ] **Push over OpenSSH**: the driver scp's `aeo-agent.exe` into the guest and
+      starts it (a scheduled task / service for TSR — the Windows analog of the
+      systemd/OpenRC init-aware push, see memory aeo-agent-tsr-init-systems).
+      OpenSSH also stays as a no-agent fallback deploy channel.
 - [ ] Image-recipe / guest_image kind for Windows (the recipe model assumes
       cloud-init/netplan/systemd — Windows uses none; a different realizer).
 - [ ] Re-validate containment against the Win11 guest once pf inter-VM delivery
