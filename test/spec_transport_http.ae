@@ -19,7 +19,10 @@ import aeocha
 import transport_http (default_port, set_serve_token, token_ok, queue_push, recv_one, queue_pending)
 import protocol (encode_boot, encode_halt, verb_of, token_of, arg1_of)
 import std.string (string_from_int)
-import std.string   // bare form too: aeocha (inlined) calls string.X — aether#870
+import std.string   // bare form too: inlined aeocha calls the bare export `copy`
+                    // unqualified, which needs std.string's bare surface in this
+                    // unit. (NOT aether#870 — that qualified-surface bug is fixed
+                    // in ae 0.309; this is aeocha's own bare-name use.)
 
 main() {
     fw = aeocha.init()

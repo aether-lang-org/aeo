@@ -49,13 +49,7 @@ import compose (system, bhyve_vm, container)
 import compose (image, entrypoint, cpus, memory, guest_image, network, ssh_key, health, expose, depends)
 import compose (suspend, constrain, grant_fd, egress, ingress, ingress_from, deny_egress, start)
 import compose (get_suspended, get_started, get_constraints, get_netpolicy, describe_tree)
-// Two std.string surfaces, intentionally: the NAMED form (string_concat, …) is
-// what THIS file's code calls — and the only form available when `aeo up` inlines
-// this module into the runner (lib/ imports std.string named). The BARE form is
-// required because the aeocha framework (inlined in the verifying modes) calls
-// string.equals/string.length/… ; Aether lets both coexist in one unit.
 import std.string (string_length, string_from_int, string_concat)
-import std.string
 import std.os (getenv, run_capture)
 import std.list
 import ipam
