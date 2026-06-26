@@ -61,7 +61,7 @@ aeo_orchestration() {
             cpus(2)
             memory("2G")
             image(_db_image())
-            nic("tap0")
+            nic(_nic("AEO_DB_NIC"))      // "" -> rootless user-mode net (see _nic)
         }
 
         // app tier — the /add service VM, depends on db_vm (starts after it).
@@ -69,7 +69,7 @@ aeo_orchestration() {
             cpus(2)
             memory("2G")
             image(_app_image())
-            nic("tap1")
+            nic(_nic("AEO_APP_NIC"))
             depends("db_vm")    // dependency-ordered bring-up
         }
     }
@@ -108,12 +108,14 @@ _mode_check() -> string {
                 aeocha.assert_str_eq(fw, describe_tree(), want, "resolved kvm tree snapshot")
             }
 
-            aeocha.it("each VM names its image, size, and NIC") callback {
+            aeocha.it("each VM names its image + size; NIC tracks AEO_*_NIC") callback {
                 aeocha.assert_str_eq(fw, get_image("db_vm"), _db_image(), "db_vm image")
                 aeocha.assert_str_eq(fw, string_from_int(get_cpus("db_vm")), "2", "db_vm cpus")
                 aeocha.assert_str_eq(fw, get_memory("db_vm"), "2G", "db_vm memory")
-                aeocha.assert_str_eq(fw, get_nic("db_vm"), "tap0", "db_vm nic")
-                aeocha.assert_str_eq(fw, get_nic("app_vm"), "tap1", "app_vm nic (its own)")
+                // nic defaults to "" -> rootless user-mode net (driver maps to
+                // -nic user); AEO_DB_NIC/AEO_APP_NIC override with a tap name.
+                aeocha.assert_str_eq(fw, get_nic("db_vm"), _nic("AEO_DB_NIC"), "db_vm nic (env or user-mode)")
+                aeocha.assert_str_eq(fw, get_nic("app_vm"), _nic("AEO_APP_NIC"), "app_vm nic (its own)")
             }
 
             aeocha.it("app_vm depends on db_vm (ordering edge)") callback {
@@ -214,6 +216,18 @@ _app_image() -> string {
     v = getenv("AEO_APP_IMAGE")
     if string_length(v) == 0 {
         return "/var/lib/aeo/app.qcow2"
+    }
+    return v
+}
+
+// VM NIC — a tap name (e.g. "tap0") for the privileged/bridged path, or "" for
+// ROOTLESS user-mode networking (the driver maps "" -> `-nic user`, SLIRP — no
+// tap, no root). Default "": a tap needs CAP_NET_ADMIN, which an unprivileged
+// host (Bazzite) lacks. Set AEO_DB_NIC/AEO_APP_NIC=tapN for the bridged path.
+_nic(key: string) -> string {
+    v = getenv(key)
+    if string_length(v) == 0 {
+        return ""
     }
     return v
 }

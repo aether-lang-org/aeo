@@ -117,9 +117,17 @@ qemu_argv(res_name: string, image: string, cpus: int, mem: string, tap: string, 
     list_add(av, "-daemonize")
     list_add(av, "-pidfile")
     list_add(av, pidfile)
+    // Networking: a tap (nic("tapN")) needs root/CAP_NET_ADMIN to create the
+    // device — for ROOTLESS qemu (e.g. an unprivileged Bazzite user) that fails
+    // with "could not configure /dev/net/tun: Operation not permitted". When no
+    // tap is given, fall back to `-nic user` (SLIRP user-mode): no tap, no root,
+    // NAT'd egress + host->guest via hostfwd. tap is the privileged/bridged path.
     if string_length(tap) > 0 {
         list_add(av, "-nic")
         list_add(av, "tap,ifname=${tap},script=no")
+    } else {
+        list_add(av, "-nic")
+        list_add(av, "user")
     }
     return av
 }
