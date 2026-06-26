@@ -9,7 +9,7 @@
 //     └─ app  (container) — python /add service ──depends──► db
 //
 // vs the grid siblings:
-//   silly_addition_cache.ae  = +VMM+podman (bhyve VM with a container inside)
+//   silly_addition_bhyve_podman.ae  = +VMM+podman (bhyve VM with a container inside)
 //   silly_addition_kvm.ae    = +VMM-podman (bare KVM VMs)
 //   silly_addition_jails.ae  = the FreeBSD host-native isolation (jails + rctl)
 //   THIS one                 = -VMM+podman (host containers — the Linux jails-peer)

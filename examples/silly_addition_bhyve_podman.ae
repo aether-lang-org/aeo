@@ -1,4 +1,4 @@
-// examples/silly_addition_cache.ae — THE all-in-one apex demo: a self-contained
+// examples/silly_addition_bhyve_podman.ae — THE all-in-one apex demo: a self-contained
 // composition that BOTH declares a two-tier system AND verifies it, off a single
 // file. A shop writes thousands of these, each standing alone — composition +
 // the four operational modes, nothing imported from a sibling spec.
@@ -19,9 +19,9 @@
 // registered at `aeo up` time (lib/images/ubuntu_24_04_minimal_podman.ae).
 //
 // TWO doors into this one file:
-//   - `aeo up examples/silly_addition_cache.ae` — the front-door imports it as
+//   - `aeo up examples/silly_addition_bhyve_podman.ae` — the front-door imports it as
 //     the aeo_compose module and calls aeo_orchestration() (ignores main()).
-//   - `ae run examples/silly_addition_cache.ae` (AEO_MODE=check|up|smoke|suite)
+//   - `ae run examples/silly_addition_bhyve_podman.ae` (AEO_MODE=check|up|smoke|suite)
 //     — runs main() → the rich run_aeo() door, asserting/deploying in place.
 //
 // MULTI-MODE (env AEO_MODE) — one artifact, four behaviours off ONE composition:
@@ -31,8 +31,8 @@
 //   suite  — `aeo up` + the FULLER aeocha checks, then TEAR DOWN. CI shape.
 //
 // Run the verifying modes (aeocha on the include path):
-//   AETHER_INCLUDE_PATH=$HOME/scm/aeocha ae run examples/silly_addition_cache.ae
-//   AEO_MODE=smoke AETHER_INCLUDE_PATH=... ae run examples/silly_addition_cache.ae
+//   AETHER_INCLUDE_PATH=$HOME/scm/aeocha ae run examples/silly_addition_bhyve_podman.ae
+//   AEO_MODE=smoke AETHER_INCLUDE_PATH=... ae run examples/silly_addition_bhyve_podman.ae
 //   AEO_MODE=up ...   /   AEO_MODE=suite ...
 // Deploy modes shell out to `aeo up <this file>`; override binary/home/dsl via
 // AEO / AEO_HOME / AEO_DSL.
@@ -353,7 +353,7 @@ _aeo_home() -> string {
 _dsl() -> string {
     d = getenv("AEO_DSL")
     if string_length(d) == 0 {
-        return "examples/silly_addition_cache.ae"
+        return "examples/silly_addition_bhyve_podman.ae"
     }
     return d
 }

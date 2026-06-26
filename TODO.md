@@ -46,7 +46,7 @@ Validated 2026-06-25 on the box:
       32; jail:app:maxproc 128), kernel accepted, read back, cleaned up. The
       jail-boundary + rctl axes BOTH live on real nodes.
 - [x] **A jail-based apex example** — `examples/silly_addition_jails.ae`, the
-      sibling of silly_addition_cache.ae: two rctl-capped jails (db <- app),
+      sibling of silly_addition_bhyve_podman.ae: two rctl-capped jails (db <- app),
       all-in-one (check/up/suite). check 3/3 standalone; both build doors green;
       live suite assertions (jls running + `jexec ls /` shows only the jail root,
       not /home) validated on the box.

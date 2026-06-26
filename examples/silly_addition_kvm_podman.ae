@@ -1,8 +1,8 @@
 // examples/silly_addition_kvm_podman.ae — the +VMM+podman cell on LINUX: KVM VMs
 // EACH RUNNING A PODMAN CONTAINER inside. The direct Linux analog of
-// silly_addition_cache.ae (which does the same with bhyve on FreeBSD). Completes
+// silly_addition_bhyve_podman.ae (which does the same with bhyve on FreeBSD). Completes
 // the substrate grid:
-//   silly_addition_cache.ae      = +VMM+podman (FreeBSD: bhyve VM + container)
+//   silly_addition_bhyve_podman.ae      = +VMM+podman (FreeBSD: bhyve VM + container)
 //   silly_addition_kvm.ae        = +VMM-podman (Linux:   bare KVM VMs)
 //   silly_addition_containers.ae = -VMM+podman (Linux:   host containers)
 //   THIS one                     = +VMM+podman (Linux:   KVM VM + container)

@@ -1,4 +1,4 @@
-// examples/silly_addition_jails.ae — the JAIL sibling of silly_addition_cache.ae.
+// examples/silly_addition_jails.ae — the JAIL sibling of silly_addition_bhyve_podman.ae.
 // Same all-in-one shape (one self-contained file: composition + the four
 // operational modes), but the nodes are FreeBSD JAILS, not bhyve VMs. This is
 // the UNBLOCKED containment path: jails share the host network stack, so the
@@ -19,7 +19,7 @@
 //   - (Capsicum self-confinement inside the jail is the workload's job — the
 //     boundary contains regardless; see spec_capsicum_jail_selfreport.ae.)
 //
-// vs the bhyve sibling (silly_addition_cache.ae): that one shows per-VM Capsicum
+// vs the bhyve sibling (silly_addition_bhyve_podman.ae): that one shows per-VM Capsicum
 // fd grants + pf port policy across SEPARATE network stacks. THIS one shows the
 // resource-exhaustion axis + the jail boundary on a SHARED stack — simpler, and
 // the parts that are actually live-enforced today.
@@ -33,7 +33,7 @@
 //     → run_aeo(); check is the default (data-model only, runs anywhere).
 //
 // SIBLING NOTE: this shares its mode scaffold (run_aeo/_mode_*/the _aeo_* helpers)
-// with examples/silly_addition_cache.ae by DESIGN, not by accident. These demos
+// with examples/silly_addition_bhyve_podman.ae by DESIGN, not by accident. These demos
 // are deliberately SELF-CONTAINED — a shop copies ONE file and it works, so each
 // repeats the boilerplate the way every standalone program repeats its own
 // main(). Do NOT factor the shared scaffold into a common module: that would

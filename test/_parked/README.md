@@ -6,7 +6,7 @@ Everything that runs unprivileged — including the container-tier specs that
 boot real podman/docker nodes — has been **revived into `test/`**. Revive any
 remaining item with `git mv test/_parked/<x> test/`.
 
-The apex showcase is the all-in-one demo **`examples/silly_addition_cache.ae`**
+The apex showcase is the all-in-one demo **`examples/silly_addition_bhyve_podman.ae`**
 (`system { bhyve_vm{ db(redis) } ; bhyve_vm{ app } }`), which both declares the
 two-tier system AND self-verifies it via its check/up/smoke/suite modes — that
 is the integration-class showcase. The `test/` specs cover the tech *underneath*

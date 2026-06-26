@@ -1,7 +1,7 @@
 // examples/silly_addition_kvm.ae — the LINUX/KVM sibling of the FreeBSD demos.
 // Same all-in-one shape (one self-contained file: composition + operational
 // modes), but the nodes are KVM/qemu VMs on a LINUX host (e.g. Bazzite) — the
-// direct analog of silly_addition_cache.ae's bhyve VMs. This showcases aeo's
+// direct analog of silly_addition_bhyve_podman.ae's bhyve VMs. This showcases aeo's
 // VMM arm (driver_vm's kvm/qemu path) the way the bhyve demo showcases bhyve.
 //
 //   system("silly_addition_kvm")  (on a Linux/KVM host)
@@ -22,7 +22,7 @@
 //     mirrored here (Linux confinement — cgroups/nftables/seccomp — is a separate
 //     future driver concern).
 //
-// vs the FreeBSD siblings: silly_addition_cache.ae = bhyve VMs + in-guest
+// vs the FreeBSD siblings: silly_addition_bhyve_podman.ae = bhyve VMs + in-guest
 // containers + Capsicum/pf; silly_addition_jails.ae = jails + rctl. THIS one is
 // the Linux VMM analog — KVM VMs, dependency-ordered, on the host that actually
 // has qemu/KVM.
