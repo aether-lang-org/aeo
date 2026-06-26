@@ -43,6 +43,13 @@
 //     ipam-resolved IP, builds+runs both containers over ssh.
 //   - FRONTIER: aeo reaches into the guest over ssh today; the cleaner end-state
 //     hands each VM's resident AEO-AGENT the instructions. See docs/aeo-agent.md.
+//
+// SIBLING NOTE: examples/silly_addition_jails.ae is the JAIL counterpart; it
+// shares this file's mode scaffold (run_aeo/_mode_*/the _aeo_* helpers) by
+// DESIGN. These demos are deliberately SELF-CONTAINED — a shop copies ONE file
+// and it works — so each repeats the boilerplate like any standalone program
+// repeats its own main(). Do NOT factor the shared scaffold into a common
+// module: that breaks the single-file property that is the whole point.
 
 import aeocha
 import compose (system, bhyve_vm, container)

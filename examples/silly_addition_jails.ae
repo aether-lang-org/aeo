@@ -31,6 +31,15 @@
 //     jail/jls directly).
 //   - `ae run examples/silly_addition_jails.ae` (AEO_MODE=check|up|suite) — main()
 //     → run_aeo(); check is the default (data-model only, runs anywhere).
+//
+// SIBLING NOTE: this shares its mode scaffold (run_aeo/_mode_*/the _aeo_* helpers)
+// with examples/silly_addition_cache.ae by DESIGN, not by accident. These demos
+// are deliberately SELF-CONTAINED — a shop copies ONE file and it works, so each
+// repeats the boilerplate the way every standalone program repeats its own
+// main(). Do NOT factor the shared scaffold into a common module: that would
+// break the single-file property that is the whole point. The parts that differ
+// (the aeo_orchestration() composition + the check assertions) are what each
+// demo is actually about.
 
 import aeocha
 import compose (system, jail)

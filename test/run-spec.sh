@@ -30,10 +30,14 @@ OS="$(uname -s)"
 
 run_one() {
     echo "### $1"
-    # The Capsicum/containment specs are FreeBSD-only by construction: their C
-    # helper (test/capfd.c) uses FreeBSD-only errnos (ECAPMODE/ENOTCAPABLE) and
-    # they enforce against a real Capsicum kernel. They won't even C-compile off
-    # FreeBSD, so SKIP them there rather than report a spurious failure.
+    # The Capsicum/containment specs are FreeBSD-only. Two flavours:
+    #  - C-helper specs (bhyve_model, breakout) use test/capfd.c, whose FreeBSD
+    #    errnos (ECAPMODE/ENOTCAPABLE) won't even C-compile off FreeBSD.
+    #  - SELF-REPORT specs (jail/bhyvevm) drive a python3 harness that spawns a
+    #    self-confining probe inside a jail/VM (test/capharness.py + capprobe.py)
+    #    — no C helper; they need python3 + sudo jail/jexec + the harness staged
+    #    to /tmp. (jail self-report is RUNNABLE on this box, verified 2026-06-26.)
+    # Off FreeBSD, skip all of them.
     extra=""
     case "$1" in
         *spec_capsicum_*|*spec_containment_*)
@@ -41,7 +45,15 @@ run_one() {
                 echo "  (skipped — FreeBSD-only: Capsicum kernel + BSD errnos)"
                 return
             fi
-            extra="--extra $ROOT/test/capfd.c"
+            ;;
+    esac
+    case "$1" in
+        *spec_capsicum_bhyve_model*|*spec_capsicum_breakout*)
+            extra="--extra $ROOT/test/capfd.c" ;;
+        *spec_capsicum_jail_selfreport*|*spec_capsicum_bhyvevm_selfreport*)
+            # stage the python harness the spec shells to /tmp.
+            cp "$ROOT/test/capharness.py" "$ROOT/test/capprobe.py" /tmp/ 2>/dev/null || true
+            cp "$ROOT/test/capharness_freebsd.py" "$ROOT/test/capprobe_freebsd.c" /tmp/ 2>/dev/null || true
             ;;
     esac
     # build-then-run, not `ae run`: `ae run` caches by content and can serve a
