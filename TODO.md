@@ -126,8 +126,13 @@ no HA — those cross the "aeo is not a platform" line). Config-is-code intact.
       touching the tree (Proxmox per-VM stop/start). Per-kind driver_exec()
       dispatch + driver_{bsd,vm}.exec_capture(); clean error handling (unknown/
       missing node/cmd). Built + dispatch-tested here; live on box.
-- [ ] Maybe: backup hooks (`zfs send` a snapshot to a file/remote); a
-      `snapshot{}` retention policy. Defer — thickenings, not core.
+- [x] **backup + prune** — `aeo backup <compose.ae> <tag> [dir]` zfs-sends each
+      node's @tag snapshot to a portable `<dir>/<node>-<tag>.zfs` stream
+      (restore = `zfs receive`); `aeo prune <compose.ae> [keep]` keeps the N
+      newest-by-CREATION snapshots per node, destroys older. Composable verbs
+      (operator snapshots, then backups/prunes). Backup surfaces failures + cleans
+      up partial artifacts (no false success). backup_file path unit-tested
+      (spec_snapshot, 8); live zfs send/destroy box-validated later.
 - [ ] NOT doing (against the grain, design-doc line): web UI, clustering/multi-
       host default, live migration, HA. A `driver_proxmox` (orchestrate a Proxmox
       host as a substrate) is the aeo-shaped alternative if that itch returns.

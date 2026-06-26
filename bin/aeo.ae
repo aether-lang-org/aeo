@@ -80,6 +80,14 @@ main() {
             exec_node = aether_args_get(3)   // reuse the node slot
         }
     }
+    // backup: aeo backup <compose.ae> <tag> [dir]   (tag=arg3 already; dir=arg4)
+    // prune:  aeo prune  <compose.ae> [keep]         (keep=arg3 already as `tag`)
+    backup_dir = ""
+    if cmd == "backup" {
+        if argc >= 5 {
+            backup_dir = aether_args_get(4)
+        }
+    }
 
     // Accept the flag spelling `--dry-run` as well as the subcommand
     // `dry-run`; normalize to the subcommand the runner understands.
@@ -99,8 +107,12 @@ main() {
                         if cmd != "rollback" {
                             if cmd != "exec" {
                                 if cmd != "restart" {
-                                    println("aeo: unknown subcommand '${cmd}' (want up|down|status|dry-run|snapshot|rollback|exec|restart)")
-                                    exit(2)
+                                    if cmd != "backup" {
+                                        if cmd != "prune" {
+                                            println("aeo: unknown subcommand '${cmd}' (want up|down|status|dry-run|snapshot|rollback|exec|restart|backup|prune)")
+                                            exit(2)
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -199,6 +211,18 @@ main() {
     }
     if cmd == "restart" {
         _ = _setenv("AEO_NODE", exec_node)
+    }
+    // backup: AEO_TAG (the tag arg, already set above) + the output dir.
+    if cmd == "backup" {
+        if backup_dir != "" {
+            _ = _setenv("AEO_BACKUP_DIR", backup_dir)
+        }
+    }
+    // prune: the keep-count rides in the `tag` slot (arg3) -> AEO_KEEP.
+    if cmd == "prune" {
+        if tag != "" {
+            _ = _setenv("AEO_KEEP", tag)
+        }
     }
     rav = list_new()
     code, outcome = run_supervised(bin, rav, null, 1, 1, 0, 1)

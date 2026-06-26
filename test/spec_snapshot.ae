@@ -7,7 +7,7 @@
 //   sh test/run-spec.sh test/spec_snapshot.ae
 
 import aeocha
-import snapshot (dataset_for, snap_name)
+import snapshot (dataset_for, snap_name, backup_file)
 import std.string (string_from_int)
 import std.string   // bare too: inlined aeocha calls bare exports unqualified
 
@@ -45,6 +45,17 @@ main() {
                 ds = dataset_for("python_vm", "bhyve", "")
                 aeocha.assert_str_eq(fw, snap_name(ds, "clean"),
                     "zroot/vm/python_vm@clean", "vm python_vm, tag clean")
+            }
+        }
+
+        aeocha.describe("backup_file names the zfs-send artifact") {
+            aeocha.it("forms <dir>/<node>-<tag>.zfs") callback {
+                aeocha.assert_str_eq(fw, backup_file("/backups", "db", "nightly"),
+                    "/backups/db-nightly.zfs", "the portable backup stream path")
+            }
+            aeocha.it("each node gets its own file under the dir") callback {
+                aeocha.assert_str_eq(fw, backup_file("/b", "app", "v1"),
+                    "/b/app-v1.zfs", "app's artifact, distinct from db's")
             }
         }
     }

@@ -726,6 +726,55 @@ run_rollback(tag: string) {
     }
 }
 
+// run_backup(tag, dir) — `zfs send` each node's @tag snapshot to a portable
+// file under `dir`. The operator snapshots first (`aeo snapshot`), then backs up
+// (composable). Per node; non-fatal. Restore is `zfs receive < <file>`.
+run_backup(tag: string, dir: string) {
+    n = compose.count()
+    println("aeo: backup @${tag} -> ${dir}")
+    i = 0
+    while i < n {
+        nm = compose.name_at(i)
+        k = compose.get_kind(nm)
+        ds = snapshot.dataset_for(nm, k, compose.get_dataset(nm))
+        if ds == "" {
+            println("  ${nm} [${k}] — no dataset, skipped")
+        } else {
+            err = snapshot.backup(nm, k, compose.get_dataset(nm), tag, dir)
+            if err != "" {
+                println("  ${nm} [${k}] FAILED: ${err}")
+            } else {
+                println("  ${nm} [${k}] -> ${snapshot.backup_file(dir, nm, tag)}")
+            }
+        }
+        i = i + 1
+    }
+}
+
+// run_prune(keep) — retention: keep the `keep` most-recent snapshots per node,
+// destroy older (by creation time). Per node; non-fatal.
+run_prune(keep: int) {
+    n = compose.count()
+    println("aeo: prune (keep ${string_from_int(keep)} newest per node)")
+    i = 0
+    while i < n {
+        nm = compose.name_at(i)
+        k = compose.get_kind(nm)
+        ds = snapshot.dataset_for(nm, k, compose.get_dataset(nm))
+        if ds == "" {
+            println("  ${nm} [${k}] — no dataset, skipped")
+        } else {
+            err = snapshot.prune(nm, k, compose.get_dataset(nm), keep)
+            if err != "" {
+                println("  ${nm} [${k}] FAILED: ${err}")
+            } else {
+                println("  ${nm} [${k}] pruned (kept ${string_from_int(keep)})")
+            }
+        }
+        i = i + 1
+    }
+}
+
 // run_exec — `aeo exec <compose.ae> <node> <cmd>`: run cmd IN one node, print its
 // stdout. The per-node operability primitive. Node + cmd come from AEO_NODE /
 // AEO_EXEC_CMD (the front-door sets them). Errors loudly if the node isn't in the
@@ -980,6 +1029,14 @@ main() {
         run_restart()
         return
     }
+    if cmd == "backup" {
+        run_backup(_tag(), _backup_dir())
+        return
+    }
+    if cmd == "prune" {
+        run_prune(_keep())
+        return
+    }
 
     // Fast-fail host gating before any bring-up or teardown touches a
     // resource. Applies to up, down, and dry-run alike — dry-run is the
@@ -1014,8 +1071,8 @@ main() {
     println("aeo: stack up")
 }
 
-// The snapshot/rollback tag (AEO_TAG, set by the front-door from the CLI arg).
-// Defaults to "snap" so a bare `aeo snapshot` still works.
+// The snapshot/rollback/backup tag (AEO_TAG, set by the front-door from the CLI
+// arg). Defaults to "snap" so a bare `aeo snapshot` still works.
 _tag() -> string {
     t = config.get("AEO_TAG")
     if t == "" {
@@ -1025,6 +1082,39 @@ _tag() -> string {
         return "snap"
     }
     return t
+}
+
+// Backup output dir (AEO_BACKUP_DIR). Default /var/backups/aeo.
+_backup_dir() -> string {
+    d = _envc("AEO_BACKUP_DIR")
+    if d == "" {
+        return "/var/backups/aeo"
+    }
+    return d
+}
+
+// Retention keep-count (AEO_KEEP). Default 3.
+_keep() -> int {
+    v = _envc("AEO_KEEP")
+    if v == "" {
+        return 3
+    }
+    return _atoi_simple(v)
+}
+_atoi_simple(s: string) -> int {
+    n = string_length(s)
+    acc = 0
+    i = 0
+    while i < n {
+        c = string_char_at(s, i)
+        if c >= 48 {
+            if c <= 57 {
+                acc = acc * 10 + (c - 48)
+            }
+        }
+        i = i + 1
+    }
+    return acc
 }
 
 import std.os (os_getenv)
