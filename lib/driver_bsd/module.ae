@@ -31,7 +31,7 @@ import std.string (string_length, string_char_at, string_from_char)
 
 exports (
     name,
-    up, down, probe,
+    up, down, probe, exec_capture,
     jls_running_argv, jail_create_argv, jail_remove_argv,
     zfs_create_argv, jexec_health_argv, mountpoint_for
 )
@@ -185,6 +185,22 @@ probe(res_name: string, health: string, _unused: string) -> int {
         return 1
     }
     return 0
+}
+
+// exec_capture — run `cmd` inside the jail via jexec, return its stdout ("" on
+// any failure). The per-node operability primitive (`aeo exec <jail> <cmd>`);
+// reuses jexec_health_argv (jexec NAME /bin/sh -c CMD) + the self-sudo path.
+exec_capture(res_name: string, cmd: string) -> string {
+    av = jexec_health_argv(res_name, cmd)
+    out, status, err = _sudo_run("/usr/sbin/jexec", av)
+    list_free(av)
+    if err != "" {
+        return ""
+    }
+    if status != 0 {
+        return ""
+    }
+    return out
 }
 
 // --- privilege: self-sudo (like driver_vm) ---------------------------------

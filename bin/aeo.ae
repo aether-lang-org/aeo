@@ -39,11 +39,14 @@ extern exit(code: int)
 
 main() {
     argc = aether_args_count()
-    // argv[0] is the program; parse [subcmd] <compose.ae> [tag].
-    // tag is the optional 3rd positional for snapshot/rollback (default "snap").
+    // argv[0] is the program; parse [subcmd] <compose.ae> [arg3] [cmd...].
+    // arg3 is the snapshot/rollback TAG, or `--json` (status), or the NODE (exec).
+    // For exec, args 4.. are the command, space-joined.
     cmd = "up"
     compose_path = ""
     tag = ""
+    exec_node = ""
+    exec_cmd = ""
     if argc == 2 {
         compose_path = aether_args_get(1)
     } else {
@@ -52,7 +55,29 @@ main() {
             compose_path = aether_args_get(2)
         }
         if argc >= 4 {
-            tag = aether_args_get(3)      // aeo snapshot <compose.ae> <tag>
+            tag = aether_args_get(3)      // aeo snapshot <compose.ae> <tag> / status --json
+        }
+    }
+    // exec: aeo exec <compose.ae> <node> <cmd...>   (node = arg3, cmd = arg4..)
+    // restart: aeo restart <compose.ae> <node>      (node = arg3)
+    if cmd == "exec" {
+        if argc >= 4 {
+            exec_node = aether_args_get(3)
+        }
+        j = 4
+        while j < argc {
+            piece = aether_args_get(j)
+            if exec_cmd == "" {
+                exec_cmd = piece
+            } else {
+                exec_cmd = "${exec_cmd} ${piece}"
+            }
+            j = j + 1
+        }
+    }
+    if cmd == "restart" {
+        if argc >= 4 {
+            exec_node = aether_args_get(3)   // reuse the node slot
         }
     }
 
@@ -63,7 +88,7 @@ main() {
     }
 
     if compose_path == "" {
-        println("usage: aeo [up|down|status|dry-run|snapshot|rollback] <compose.ae> [tag]")
+        println("usage: aeo [up|down|status|dry-run|snapshot|rollback|exec] <compose.ae> [tag|node cmd...]")
         exit(2)
     }
     if cmd != "up" {
@@ -72,8 +97,12 @@ main() {
                 if cmd != "dry-run" {
                     if cmd != "snapshot" {
                         if cmd != "rollback" {
-                            println("aeo: unknown subcommand '${cmd}' (want up|down|status|dry-run|snapshot|rollback)")
-                            exit(2)
+                            if cmd != "exec" {
+                                if cmd != "restart" {
+                                    println("aeo: unknown subcommand '${cmd}' (want up|down|status|dry-run|snapshot|rollback|exec|restart)")
+                                    exit(2)
+                                }
+                            }
                         }
                     }
                 }
@@ -162,6 +191,14 @@ main() {
         if tag != "" {
             _ = _setenv("AEO_TAG", tag)
         }
+    }
+    // exec/restart: the target node (exec also passes the command).
+    if cmd == "exec" {
+        _ = _setenv("AEO_NODE", exec_node)
+        _ = _setenv("AEO_EXEC_CMD", exec_cmd)
+    }
+    if cmd == "restart" {
+        _ = _setenv("AEO_NODE", exec_node)
     }
     rav = list_new()
     code, outcome = run_supervised(bin, rav, null, 1, 1, 0, 1)

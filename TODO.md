@@ -120,9 +120,14 @@ no HA — those cross the "aeo is not a platform" line). Config-is-code intact.
       Validated through a real JSON parser on both demos (paths/<-/= chars
       escape cleanly). The Proxmox-API value without the web server: pipe to jq/
       a dashboard/a CI gate.
+- [x] **per-node lifecycle** — `aeo exec <compose.ae> <node> <cmd>` runs a command
+      IN one node (jail=jexec, bhyve=ssh, container=podman-exec, nested=ssh-to-host
+      +podman); `aeo restart <compose.ae> <node>` down+ups a SINGLE node without
+      touching the tree (Proxmox per-VM stop/start). Per-kind driver_exec()
+      dispatch + driver_{bsd,vm}.exec_capture(); clean error handling (unknown/
+      missing node/cmd). Built + dispatch-tested here; live on box.
 - [ ] Maybe: backup hooks (`zfs send` a snapshot to a file/remote); a
-      `snapshot{}` retention policy; per-node lifecycle (`aeo restart/exec
-      <node>`). Defer — thickenings, not core.
+      `snapshot{}` retention policy. Defer — thickenings, not core.
 - [ ] NOT doing (against the grain, design-doc line): web UI, clustering/multi-
       host default, live migration, HA. A `driver_proxmox` (orchestrate a Proxmox
       host as a substrate) is the aeo-shaped alternative if that itch returns.

@@ -255,6 +255,39 @@ driver_up(nm: string, k: string) -> string {
     return "aeo: kind '${k}' has no up() driver on this host"
 }
 
+// driver_exec(nm, k, cmd) — run a command IN a single node, return its stdout
+// ("" on failure). The per-node operability primitive (`aeo exec <node> <cmd>`),
+// routed per kind exactly like driver_up:
+//   jail              -> jexec (driver_bsd)
+//   bhyve             -> ssh into the guest (driver_vm)
+//   container in a VM -> ssh into its host VM, podman exec there
+//   container/docker/lxc on the host -> podman/docker exec (driver_linux)
+driver_exec(nm: string, k: string, cmd: string) -> string {
+    if k == "jail" {
+        return driver_bsd.exec_capture(nm, cmd)
+    }
+    if k == "bhyve" {
+        gip = ipam.resolve_ip(compose.get_system(nm), nm)
+        return driver_vm.exec_capture(nm, gip, cmd)
+    }
+    if k == "container" {
+        host = compose.get_host(nm)
+        if host != "" {
+            // nested: ssh into the host VM and podman-exec the container there.
+            hip = ipam.resolve_ip(compose.get_system(host), host)
+            return driver_vm.exec_capture(host, hip, "podman exec ${nm} ${cmd}")
+        }
+        return driver_linux.exec_capture(nm, cmd, "")
+    }
+    if k == "docker" {
+        return driver_linux.exec_capture(nm, cmd, "docker")
+    }
+    if k == "lxc" {
+        return driver_linux.exec_capture(nm, cmd, "")
+    }
+    return ""
+}
+
 driver_down(nm: string, k: string) -> string {
     if k == "jail" {
         return driver_bsd.down(nm)
@@ -693,6 +726,92 @@ run_rollback(tag: string) {
     }
 }
 
+// run_exec — `aeo exec <compose.ae> <node> <cmd>`: run cmd IN one node, print its
+// stdout. The per-node operability primitive. Node + cmd come from AEO_NODE /
+// AEO_EXEC_CMD (the front-door sets them). Errors loudly if the node isn't in the
+// composition; prints whatever the node returned (empty if it failed/unreachable).
+run_exec() {
+    node = _envc("AEO_NODE")
+    cmd = _envc("AEO_EXEC_CMD")
+    if node == "" {
+        println("aeo: exec needs a node (usage: aeo exec <compose.ae> <node> <cmd>)")
+        return
+    }
+    if cmd == "" {
+        println("aeo: exec needs a command")
+        return
+    }
+    // verify the node is declared.
+    n = compose.count()
+    found = 0
+    k = ""
+    i = 0
+    while i < n {
+        if compose.name_at(i) == node {
+            found = 1
+            k = compose.get_kind(node)
+        }
+        i = i + 1
+    }
+    if found == 0 {
+        println("aeo: no node '${node}' in this composition")
+        return
+    }
+    out = driver_exec(node, k, cmd)
+    println(out)
+}
+
+// run_restart — `aeo restart <compose.ae> <node>`: down then up a SINGLE node,
+// without touching the rest of the tree (Proxmox's per-VM stop/start). Reuses
+// driver_down + driver_up. Node from AEO_NODE.
+run_restart() {
+    node = _envc("AEO_NODE")
+    if node == "" {
+        println("aeo: restart needs a node (usage: aeo restart <compose.ae> <node>)")
+        return
+    }
+    n = compose.count()
+    found = 0
+    k = ""
+    i = 0
+    while i < n {
+        if compose.name_at(i) == node {
+            found = 1
+            k = compose.get_kind(node)
+        }
+        i = i + 1
+    }
+    if found == 0 {
+        println("aeo: no node '${node}' in this composition")
+        return
+    }
+    println("aeo: restart ${node} [${k}]")
+    de = driver_down(node, k)
+    if de != "" {
+        println("  down: ${de}")
+    }
+    ue = driver_up(node, k)
+    if ue != "" {
+        println("  up FAILED: ${ue}")
+    } else {
+        println("  ${node} restarted")
+    }
+}
+
+// env read with config-bridge fallback (matches _tag's pattern). Guards the
+// getenv-returns-null footgun: os_getenv returns null (not "") when unset, and
+// null != "" — so normalize a zero-length result to "".
+_envc(key: string) -> string {
+    v = config.get(key)
+    if string_length(v) == 0 {
+        v = os_getenv(key)
+    }
+    if string_length(v) == 0 {
+        return ""
+    }
+    return v
+}
+
 // Host-gating preflight (design § Host adaptation rule 2): every declared
 // kind is checked against the host family BEFORE any resource is touched.
 // A kind the host can't run is a fast, loud error at composition-eval
@@ -851,6 +970,14 @@ main() {
     }
     if cmd == "rollback" {
         run_rollback(_tag())
+        return
+    }
+    if cmd == "exec" {
+        run_exec()
+        return
+    }
+    if cmd == "restart" {
+        run_restart()
         return
     }
 

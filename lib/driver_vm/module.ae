@@ -34,7 +34,7 @@ import std.string (string_length, string_char_at, string_substring, string_conta
 
 exports (
     name,
-    up, bhyve_up, guest_container_up, down, probe,
+    up, bhyve_up, guest_container_up, exec_capture, down, probe,
     bhyve_argv, qemu_argv, bhyvectl_destroy_argv,
     pidfile_for, bootrom_path
 )
@@ -314,6 +314,28 @@ guest_container_up(host_vm: string, host_ip: string, name: string, dockerfile: s
         return "aeo: building/running container '${name}' inside guest '${host_vm}' (${ip}) failed: ${out}"
     }
     return ""
+}
+
+// exec_capture — run `cmd` inside a bhyve guest over ssh, return its stdout ("" on
+// any failure / unreachable guest). The VM arm of `aeo exec <node> <cmd>`; reuses
+// the same ssh-in path guest_container_up uses (resolved IP + the guest key).
+exec_capture(host_vm: string, host_ip: string, cmd: string) -> string {
+    ip = _guest_ip(host_vm, host_ip)
+    if ip == "" {
+        return ""
+    }
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "ssh -i ${_guest_key()} -o StrictHostKeyChecking=no -o ConnectTimeout=10 ubuntu@${ip} ${_shquote(cmd)}")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    if err != "" {
+        return ""
+    }
+    if status != 0 {
+        return ""
+    }
+    return out
 }
 
 // The guest VM's IP. Prefers the cloud-init static IP convention
