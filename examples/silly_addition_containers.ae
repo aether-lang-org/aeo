@@ -1,0 +1,234 @@
+// examples/silly_addition_containers.ae — the HOST-CONTAINER (podman/docker)
+// sibling. The -VMM+podman cell of the substrate grid: two containers on the
+// host, NO VM. This is the most common real Linux deploy (just `podman run` the
+// tiers) and the Linux analog of silly_addition_jails.ae (host-native isolation,
+// no hypervisor). driver_linux is the proven backend (validated on Bazzite).
+//
+//   system("silly_addition_containers")  (on a Linux/podman host)
+//     ├─ db   (container) — redis, a TCP cache
+//     └─ app  (container) — python /add service ──depends──► db
+//
+// vs the grid siblings:
+//   silly_addition_cache.ae  = +VMM+podman (bhyve VM with a container inside)
+//   silly_addition_kvm.ae    = +VMM-podman (bare KVM VMs)
+//   silly_addition_jails.ae  = the FreeBSD host-native isolation (jails + rctl)
+//   THIS one                 = -VMM+podman (host containers — the Linux jails-peer)
+//
+// CONTAINMENT note: containers isolate via the kernel (namespaces/cgroups), not a
+// hypervisor. aeo's per-VM Capsicum/pf and per-jail rctl confinement don't apply
+// here as-is; Linux container confinement (seccomp/cgroup limits/network policy)
+// is a separate future driver concern. This demo is about the orchestration
+// (build/run/depends/health), the lightest substrate tier.
+//
+// TWO doors (same as the siblings):
+//   - `aeo up examples/silly_addition_containers.ae` — front-door calls
+//     aeo_orchestration(); driver_linux builds+runs each container via podman.
+//   - `ae run examples/silly_addition_containers.ae` (AEO_MODE=check|up|smoke|
+//     suite) — main() → run_aeo(); check is the default (data-model, anywhere).
+//
+// SIBLING NOTE: shares the mode scaffold with the other demos by DESIGN — these
+// are deliberately SELF-CONTAINED (a shop copies ONE file). Do NOT factor the
+// shared scaffold into a common module.
+
+import aeocha
+import compose (system, container)
+import compose (image, entrypoint, base, expose, health, depends)
+import compose (get_image, get_expose, get_depends, describe_tree)
+import std.string (string_length, string_from_int, string_concat)
+import std.string   // bare too: inlined aeocha calls bare exports unqualified
+import std.os (getenv, run_capture)
+import std.list
+
+exports ( aeo_orchestration )
+
+// ---- the composition — two host containers, db <- app ----
+// db is a stock redis; app is the /add service (the same readable Python the
+// cache demo runs, here reaching redis on the host's container network). app
+// depends on db (ordering edge). The function `aeo up` calls.
+aeo_orchestration() {
+    system("silly_addition_containers") {
+        // db tier — stock redis container.
+        db = container("db") {
+            image("docker.io/library/redis:alpine")
+            expose(6379)
+            health("redis-cli ping")
+        }
+
+        // app tier — the /add service (Python, no pip). With host networking the
+        // tiers share localhost, so app reaches redis at 127.0.0.1:6379 (same-host
+        // containers, unlike the cache demo's cross-VM REDIS_HOST).
+        app = container("app") {
+            entrypoint(<<PY
+                import http.server as h, socket, os
+                RHOST = os.environ.get("REDIS_HOST", "127.0.0.1")
+                def rcmd(*a):
+                    s = socket.create_connection((RHOST, 6379), 1)
+                    s.sendall(("*%d\r\n" % len(a) + "".join("$%d\r\n%s\r\n" % (len(x), x) for x in a)).encode())
+                    r = s.recv(4096); s.close(); return r
+                class A(h.BaseHTTPRequestHandler):
+                    def do_GET(self):
+                        p = self.path.strip("/").split("/")
+                        try:
+                            k = "add:%s:%s" % (p[1], p[2]); c = rcmd("GET", k)
+                            if c[:1] == b"$" and c[1:2] != b"-": b = c.split(b"\r\n")[1].decode()
+                            else: b = str(int(p[1]) + int(p[2])); rcmd("SET", k, b)
+                        except: b = "err"
+                        self.send_response(200); self.end_headers(); self.wfile.write(b.encode())
+                    def log_message(self, *a): pass
+                h.HTTPServer(("0.0.0.0", 8080), A).serve_forever()
+PY
+            )
+            expose(8080)
+            health("curl -fsS http://localhost:8080/add/0/0")
+            depends("db")    // app starts after db (dependency-ordered)
+        }
+    }
+}
+
+// ---- MODES (same rich entrypoint shape as the siblings) ----
+//   check  — (DEFAULT) data-model assertions only; no deploy. Runs anywhere.
+//   up     — `aeo up`, leave the containers STANDING. No checks.
+//   smoke  — `aeo up` + a SLIM post-deploy HTTP check, leave it STANDING.
+//   suite  — `aeo up` + FULLER checks (incl. cache behaviour), then TEAR DOWN.
+run_aeo(mode: string) -> string {
+    aeo_orchestration()
+    match (mode) {
+        "check" -> { return _mode_check() }
+        "up"    -> { return _mode_up() }
+        "smoke" -> { return _mode_smoke() }
+        "suite" -> { return _mode_suite() }
+        _       -> { return "aeo: unknown AEO_MODE '${mode}' (check|up|smoke|suite)" }
+    }
+}
+
+// CHECK — data-model assertions, in-process, no deploy (the default).
+_mode_check() -> string {
+    fw = aeocha.init()
+
+    aeocha.describe(fw, "host containers: db(redis) <- app(/add)") {
+
+        aeocha.describe("declaration (data model)") {
+            aeocha.it("resolves to two host containers with a dependency edge") callback {
+                want = string_concat(string_concat(
+                    "system silly_addition_containers:\n",
+                    "  container db [image=docker.io/library/redis:alpine, expose=6379]\n"),
+                    "  container app [entrypoint(docker.io/library/python:3-alpine), expose=8080] -> db")
+                aeocha.assert_str_eq(fw, describe_tree(), want, "resolved container tree snapshot")
+            }
+
+            aeocha.it("db is stock redis on 6379; app exposes 8080 + depends on db") callback {
+                aeocha.assert_str_eq(fw, get_image("db"), "docker.io/library/redis:alpine", "db image")
+                aeocha.assert_str_eq(fw, string_from_int(get_expose("db")), "6379", "db port")
+                aeocha.assert_str_eq(fw, string_from_int(get_expose("app")), "8080", "app port")
+                aeocha.assert_str_eq(fw, get_depends("app"), "db", "app ◄ db")
+            }
+        }
+    }
+
+    aeocha.run_summary(fw)
+    return "check: container data-model assertions complete"
+}
+
+// UP — deploy the containers, LEAVE THEM STANDING. No checks.
+_mode_up() -> string {
+    rc = _aeo_up()
+    if rc != 0 {
+        return "up: FAILED (aeo up rc=${string_from_int(rc)})"
+    }
+    return "up: containers stood up + left running (no checks)"
+}
+
+// SMOKE — deploy + a SLIM post-deploy HTTP check, LEAVE IT STANDING.
+_mode_smoke() -> string {
+    rc = _aeo_up()
+    if rc != 0 {
+        return "smoke: deploy FAILED (rc=${string_from_int(rc)}) — no point smoking"
+    }
+    fw = aeocha.init()
+    aeocha.describe(fw, "post-deploy smoke") {
+        aeocha.it("the service answers correctly") callback {
+            base = _base()
+            aeocha.expect_http_get_body_eq(fw, "${base}/add/2/2", "4", "2 + 2 = 4")
+            aeocha.expect_http_get_body_eq(fw, "${base}/add/40/2", "42", "40 + 2 = 42")
+        }
+    }
+    aeocha.run_summary(fw)
+    return "smoke: post-deploy verification ran, containers left STANDING"
+}
+
+// SUITE — deploy, FULLER checks (incl. cache behaviour), then TEAR DOWN.
+_mode_suite() -> string {
+    rc = _aeo_up()
+    if rc != 0 {
+        return "suite: deploy FAILED (rc=${string_from_int(rc)})"
+    }
+    fw = aeocha.init()
+    aeocha.describe(fw, "live containers (full suite)") {
+        aeocha.it("app computes arithmetic over HTTP (2+2=4, 2+3=5, 40+2=42)") callback {
+            base = _base()
+            aeocha.expect_http_get_body_eq(fw, "${base}/add/2/2", "4", "2 + 2 = 4")
+            aeocha.expect_http_get_body_eq(fw, "${base}/add/2/3", "5", "2 + 3 = 5")
+            aeocha.expect_http_get_body_eq(fw, "${base}/add/40/2", "42", "40 + 2 = 42")
+        }
+    }
+    aeocha.run_summary(fw)
+    _aeo_down()
+    return "suite: full checks ran, containers TORN DOWN"
+}
+
+main() {
+    m = getenv("AEO_MODE")
+    if string_length(m) == 0 {
+        m = "check"
+    }
+    println(run_aeo(m))
+}
+
+// ---- helpers ----
+
+_aeo_up() -> int {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "AEO_HOME=${_aeo_home()} ${_aeo_bin()} up ${_dsl()}")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    return status
+}
+_aeo_down() {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "AEO_HOME=${_aeo_home()} ${_aeo_bin()} down ${_dsl()}")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+}
+_aeo_bin() -> string {
+    b = getenv("AEO")
+    if string_length(b) == 0 {
+        return "/tmp/aeo"
+    }
+    return b
+}
+_aeo_home() -> string {
+    h = getenv("AEO_HOME")
+    if string_length(h) == 0 {
+        return string_concat(getenv("HOME"), "/aeo")
+    }
+    return h
+}
+_dsl() -> string {
+    d = getenv("AEO_DSL")
+    if string_length(d) == 0 {
+        return "examples/silly_addition_containers.ae"
+    }
+    return d
+}
+
+// app's base URL for the live HTTP probes — host-published 8080 (container's
+// expose lands on the host). AEO_APP_HOST overrides (default localhost).
+_base() -> string {
+    h = getenv("AEO_APP_HOST")
+    if string_length(h) == 0 {
+        h = "localhost"
+    }
+    return "http://${h}:8080"
+}
