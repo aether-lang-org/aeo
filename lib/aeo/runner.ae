@@ -482,6 +482,10 @@ _await_down(nm: string, secs: int) {
 // truth about an already-running stack even though each invocation is a
 // fresh process with empty in-memory state.
 _status() {
+    if _status_json_on() == 1 {
+        _status_json()
+        return
+    }
     sys = compose.syscount()
     n = compose.count()
     println("aeo: ${sys} system(s), ${n} resource(s) declared")
@@ -552,6 +556,83 @@ _oneline(s: string) -> string {
             }
         } else {
             out = "${out}${string_from_char(c)}"
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// `aeo status --json` toggle — the front-door sets AEO_STATUS_JSON=1.
+_status_json_on() -> int {
+    v = config.get("AEO_STATUS_JSON")
+    if v == "" {
+        v = os_getenv("AEO_STATUS_JSON")
+    }
+    if v == "1" {
+        return 1
+    }
+    return 0
+}
+
+// JSON status — a flat array of node objects, machine-readable for tooling.
+// The Proxmox-API value without the web server: pipe `aeo status --json` into
+// jq, a dashboard, a CI gate. Same data as the human view; only the format
+// differs. Hand-built (the fields are known strings) with JSON escaping.
+_status_json() {
+    n = compose.count()
+    out = "["
+    i = 0
+    while i < n {
+        nm = compose.name_at(i)
+        k = compose.get_kind(nm)
+        live = driver_probe(nm, k, "")
+        st = "down"
+        if live == 1 {
+            st = "up"
+        }
+        // object fields — name, kind, system, host, depends, state always; the
+        // optional confinement/addr fields included as "" when unset (stable
+        // shape for consumers > omitting keys).
+        obj = "{"
+        obj = "${obj}\"name\":\"${_jq(nm)}\","
+        obj = "${obj}\"kind\":\"${_jq(k)}\","
+        obj = "${obj}\"system\":\"${_jq(compose.get_system(nm))}\","
+        obj = "${obj}\"host\":\"${_jq(compose.get_host(nm))}\","
+        obj = "${obj}\"depends\":\"${_jq(compose.get_depends(nm))}\","
+        obj = "${obj}\"state\":\"${st}\","
+        obj = "${obj}\"ip\":\"${_jq(compose.get_ip(nm))}\","
+        obj = "${obj}\"caps\":\"${_jq(compose.get_rctl(nm))}\","
+        obj = "${obj}\"netpolicy\":\"${_jq(compose.get_netpolicy(nm))}\","
+        obj = "${obj}\"grants\":\"${_jq(compose.get_constraints(nm))}\""
+        obj = "${obj}}"
+        if i == 0 {
+            out = "${out}${obj}"
+        } else {
+            out = "${out},${obj}"
+        }
+        i = i + 1
+    }
+    out = "${out}]"
+    println(out)
+}
+
+// Minimal JSON string escape: backslash and double-quote (the chars that break
+// a JSON string). aeo's status values are paths/policies — no control chars
+// expected, so these two cover it.
+_jq(s: string) -> string {
+    out = ""
+    n = string_length(s)
+    i = 0
+    while i < n {
+        c = string_char_at(s, i)
+        if c == 34 {                       // "
+            out = "${out}\\\""
+        } else {
+            if c == 92 {                   // backslash
+                out = "${out}\\\\"
+            } else {
+                out = "${out}${string_from_char(c)}"
+            }
         }
         i = i + 1
     }

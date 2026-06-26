@@ -111,8 +111,14 @@ no HA — those cross the "aeo is not a platform" line). Config-is-code intact.
       / Capsicum grants / snapshots, only where set. Live state still driver-probed.
 - [ ] Live-validate snapshot/rollback on the box (zfs snapshot a jail, roll it
       back) once it's back from the storm.
-- [ ] Maybe: `aeo status --json` for tooling; backup hooks (`zfs send`); a
-      `snapshot{}` retention policy. Defer — these are thickenings, not core.
+- [x] **`aeo status --json`** — machine-readable status (flat array of node
+      objects: name/kind/system/host/depends/state/ip/caps/netpolicy/grants).
+      Validated through a real JSON parser on both demos (paths/<-/= chars
+      escape cleanly). The Proxmox-API value without the web server: pipe to jq/
+      a dashboard/a CI gate.
+- [ ] Maybe: backup hooks (`zfs send` a snapshot to a file/remote); a
+      `snapshot{}` retention policy; per-node lifecycle (`aeo restart/exec
+      <node>`). Defer — thickenings, not core.
 - [ ] NOT doing (against the grain, design-doc line): web UI, clustering/multi-
       host default, live migration, HA. A `driver_proxmox` (orchestrate a Proxmox
       host as a substrate) is the aeo-shaped alternative if that itch returns.

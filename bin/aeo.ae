@@ -155,9 +155,13 @@ main() {
     // process group + forward signals + reap the group: a Ctrl-C during
     // bring-up forwards to the whole tree.
     _ = _setenv("AEO_CMD", cmd)
-    // snapshot/rollback tag (the optional 3rd arg) — the runner reads AEO_TAG.
-    if tag != "" {
-        _ = _setenv("AEO_TAG", tag)
+    // The optional 3rd arg: snapshot/rollback TAG, or `--json` for status output.
+    if tag == "--json" {
+        _ = _setenv("AEO_STATUS_JSON", "1")   // `aeo status <compose.ae> --json`
+    } else {
+        if tag != "" {
+            _ = _setenv("AEO_TAG", tag)
+        }
     }
     rav = list_new()
     code, outcome = run_supervised(bin, rav, null, 1, 1, 0, 1)
