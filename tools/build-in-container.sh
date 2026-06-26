@@ -22,19 +22,28 @@
 set -eu
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-TC="${AEO_TC_IMAGE:-localhost/aeb-toolchain:fresh}"
+# Default to the LATEST upstream aether-builder (ae 0.322+). Build/refresh it from
+# current aether source: `podman build -t aether-builder:latest -f
+# aether/tools/docker/Dockerfile aether/` (see docs/build-in-container.md). An old
+# image (e.g. aeb-toolchain:fresh @ ae 0.257) may build aeo by luck but risks
+# failing on newer syntax — aeo targets ae >= 0.295.
+TC="${AEO_TC_IMAGE:-localhost/aether-builder:latest}"
 OUT="$ROOT/out"
 mkdir -p "$OUT"
 
 run_ae() {
     # run a shell line inside the toolchain container with aeo bind-mounted at
     # /work and out at /out. $1 = the `cd /work && ...` command.
+    # --entrypoint /bin/sh: the upstream aether-builder image has an ENTRYPOINT
+    # (build-entry.sh) that would intercept our command; override it to a plain
+    # shell. (Older aeb-toolchain images had no entrypoint; this is harmless there.)
     podman run --rm \
+        --entrypoint /bin/sh \
         -v "$ROOT:/work:Z" \
         -v "$OUT:/out:Z" \
         ${AEOCHA_MOUNT:-} \
         "$TC" \
-        sh -c "$1"
+        -c "$1"
 }
 
 echo "== building aeo (front-door) =="
