@@ -32,7 +32,7 @@
 
 import aeocha
 import compose (system, container)
-import compose (image, entrypoint, base, expose, health, depends)
+import compose (image, entrypoint, base, expose, health, depends, env)
 import compose (get_image, get_expose, get_depends, describe_tree)
 import std.string (string_length, string_from_int, string_concat)
 import std.string   // bare too: inlined aeocha calls bare exports unqualified
@@ -79,7 +79,13 @@ aeo_orchestration() {
 PY
             )
             expose(8080)
-            health("curl -fsS http://localhost:8080/add/0/0")
+            // On the shared aeo-<system> network, app reaches the db CONTAINER
+            // by name — so REDIS_HOST=db (not 127.0.0.1, which is app's own
+            // localhost). The app reads REDIS_HOST.
+            env("REDIS_HOST", "db")
+            // Health via PYTHON (always in the app container) — NOT curl, which
+            // python:3-alpine doesn't ship. Probes the service's own HTTP.
+            health("python -c \"import urllib.request as u; u.urlopen('http://localhost:8080/add/0/0').read()\"")
             depends("db")    // app starts after db (dependency-ordered)
         }
     }

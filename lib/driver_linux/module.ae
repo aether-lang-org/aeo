@@ -21,13 +21,13 @@
 
 import std.os (run_capture, os_which)
 import std.list
-import std.string (string_length, string_contains, string_char_at, string_substring)
+import std.string (string_length, string_contains, string_char_at, string_substring, string_index_of)
 import std.fs (write_atomic)
 
 exports (
     name, engine_resolve,
-    up, down, probe, exec_capture, build, built_tag,
-    ps_running_argv, run_argv, stop_argv, rm_argv, exec_health_argv,
+    up, up_net, network_ensure, down, probe, exec_capture, build, build_entrypoint, built_tag,
+    ps_running_argv, run_argv, run_argv_net, stop_argv, rm_argv, exec_health_argv,
     build_argv
 )
 
@@ -70,12 +70,25 @@ ps_running_argv(res_name: string) -> ptr {
 // non-empty runs under `/bin/sh -c`. `expose` > 0 publishes PORT:PORT so the
 // host can reach the service (the expose() declaration's container realization).
 run_argv(res_name: string, image: string, cmd: string, expose: int) -> ptr {
+    return run_argv_net(res_name, image, cmd, expose, "", "")
+}
+
+// run_argv_net — like run_argv, plus a shared `net` (so peers resolve by name)
+// and `env` ("K=V,K=V" pairs). net "" -> default network; env "" -> none.
+run_argv_net(res_name: string, image: string, cmd: string, expose: int, net: string, env: string) -> ptr {
     av = list_new()
     list_add(av, "run")
     list_add(av, "-d")
     list_add(av, "--replace")
     list_add(av, "--name")
     list_add(av, res_name)
+    if string_length(net) > 0 {
+        list_add(av, "--network")
+        list_add(av, net)
+    }
+    if string_length(env) > 0 {
+        _add_env_args(av, env)
+    }
     if expose > 0 {
         list_add(av, "-p")
         list_add(av, "${_itoa(expose)}:${_itoa(expose)}")
@@ -87,6 +100,45 @@ run_argv(res_name: string, image: string, cmd: string, expose: int) -> ptr {
         list_add(av, cmd)
     }
     return av
+}
+
+// split "K=V,K=V" and append `-e K=V` for each to the argv list.
+_add_env_args(av: ptr, env: string) {
+    rest = env
+    more = 1
+    while more == 1 {
+        idx = string_index_of(rest, ",")
+        one = rest
+        if idx >= 0 {
+            one = string_substring(rest, 0, idx)
+            rest = string_substring(rest, idx + 1, string_length(rest))
+        } else {
+            more = 0
+        }
+        if string_length(one) > 0 {
+            list_add(av, "-e")
+            list_add(av, one)
+        }
+    }
+}
+
+// network_ensure(net, engine_pref) — create the shared podman/docker network if
+// absent (idempotent: an existing network is success). Containers on the same
+// network resolve each other by name. Returns "" on success.
+network_ensure(net: string, engine_pref: string) -> string {
+    eng = engine_resolve(engine_pref)
+    if eng == "" {
+        return "aeo: no container engine for network '${net}'"
+    }
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "${eng} network exists ${net} 2>/dev/null || ${eng} network create ${net} >/dev/null 2>&1")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    if status != 0 {
+        return "aeo: network create '${net}' failed: ${out}"
+    }
+    return ""
 }
 
 // `<engine> stop -t 5 NAME`
@@ -126,6 +178,12 @@ exec_health_argv(res_name: string, health: string) -> ptr {
 // error message. `image` is required; `cmd` "" = image default; `expose`
 // > 0 publishes that port to the host; `engine_pref` "" = auto-select.
 up(res_name: string, image: string, cmd: string, expose: int, engine_pref: string) -> string {
+    return up_net(res_name, image, cmd, expose, "", "", engine_pref)
+}
+
+// up_net — like up, plus a shared `net` (peers resolve by name) and `env`
+// ("K=V,K=V"). Used for the host-container path so app can reach db by name.
+up_net(res_name: string, image: string, cmd: string, expose: int, net: string, env: string, engine_pref: string) -> string {
     eng = engine_resolve(engine_pref)
     if eng == "" {
         return "aeo: no container engine found (need podman or docker on PATH)"
@@ -137,7 +195,7 @@ up(res_name: string, image: string, cmd: string, expose: int, engine_pref: strin
     if probe(res_name, "", engine_pref) == 1 {
         return ""
     }
-    av = run_argv(res_name, image, cmd, expose)
+    av = run_argv_net(res_name, image, cmd, expose, net, env)
     out, status, err = run_capture(eng, av, null)
     list_free(av)
     if err != "" {
@@ -279,6 +337,46 @@ build(res_name: string, text: string, engine_pref: string) -> string {
     }
     tag = built_tag(res_name)
     av = build_argv(tag, dfpath, dfdir)
+    out, status, err = run_capture(eng, av, null)
+    list_free(av)
+    if err != "" {
+        return "aeo: image build spawn failed for '${res_name}': ${err}"
+    }
+    if status != 0 {
+        return "aeo: image build failed for '${res_name}' (exit ${status}): ${out}"
+    }
+    return ""
+}
+
+// build_entrypoint — build a host container image from an entrypoint() Python
+// source: write app.py + a COPY-based Dockerfile (FROM base; COPY app.py; CMD
+// python /app.py) into the build context, then build. The host-container peer of
+// driver_vm.guest_container_up's entrypoint path. base "" -> python:3-alpine.
+// Returns "" on success else the error.
+build_entrypoint(res_name: string, py: string, base: string, engine_pref: string) -> string {
+    eng = engine_resolve(engine_pref)
+    if eng == "" {
+        return "aeo: no container engine found (need podman or docker)"
+    }
+    b = base
+    if string_length(b) == 0 {
+        b = "docker.io/library/python:3-alpine"
+    }
+    dfdir = "/tmp/aeo-build-${res_name}"
+    _ = _mkdir(dfdir)
+    // app.py written verbatim (no escaping); the Dockerfile just COPYs it —
+    // builds on every podman, unlike a RUN heredoc.
+    perr = write_atomic("${dfdir}/app.py", py, string_length(py))
+    if perr != "" {
+        return "aeo: cannot write app.py for '${res_name}': ${perr}"
+    }
+    df = "FROM ${b}\nCOPY app.py /app.py\nCMD [\"python\", \"/app.py\"]"
+    derr = write_atomic("${dfdir}/Dockerfile", df, string_length(df))
+    if derr != "" {
+        return "aeo: cannot write Dockerfile for '${res_name}': ${derr}"
+    }
+    tag = built_tag(res_name)
+    av = build_argv(tag, "${dfdir}/Dockerfile", dfdir)
     out, status, err = run_capture(eng, av, null)
     list_free(av)
     if err != "" {

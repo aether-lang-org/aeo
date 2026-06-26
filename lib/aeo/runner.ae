@@ -116,6 +116,18 @@ _poll_to_up(nm: string, k: string, interval_ms: int, budget: int) {
 // dockerfile(), build that and use the built tag; otherwise use image().
 // Returns (image_or_tag, build_err). build_err "" means ok.
 _container_image(nm: string, engine_pref: string) -> string {
+    // Three shapes, same precedence as the VM-nested path (guest_container_up):
+    //   entrypoint() — synthesize a COPY-based image from the Python source.
+    //   dockerfile() — build the operator's inline Dockerfile.
+    //   image()      — a stock image ref, run as-is.
+    ep = compose.get_entrypoint(nm)
+    if ep != "" {
+        eerr = driver_linux.build_entrypoint(nm, ep, compose.get_base(nm), engine_pref)
+        if eerr != "" {
+            return "ERR:${eerr}"
+        }
+        return driver_linux.built_tag(nm)
+    }
     df = compose.get_dockerfile(nm)
     if df == "" {
         return compose.get_image(nm)
@@ -230,7 +242,12 @@ driver_up(nm: string, k: string) -> string {
         if string_starts_err(img) == 1 {
             return _strip_err(img)
         }
-        return driver_linux.up(nm, img, compose.get_command(nm), compose.get_expose(nm), "")
+        // HOST container: put it on a per-system shared network so peers resolve
+        // each other BY NAME (app -> db:6379). env() pairs (e.g. REDIS_HOST=db)
+        // are injected so the workload reaches its dependency's container.
+        net = "aeo-${compose.get_system(nm)}"
+        _ne = driver_linux.network_ensure(net, "")
+        return driver_linux.up_net(nm, img, compose.get_command(nm), compose.get_expose(nm), net, compose.get_env(nm), "")
     }
     if k == "jail" {
         return driver_bsd.up(nm, compose.get_dataset(nm), "", compose.get_ip(nm), compose.get_command(nm))

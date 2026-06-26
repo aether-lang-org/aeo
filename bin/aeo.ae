@@ -96,7 +96,7 @@ main() {
     }
 
     if compose_path == "" {
-        println("usage: aeo [up|down|status|dry-run|snapshot|rollback|exec] <compose.ae> [tag|node cmd...]")
+        println("usage: aeo [up|down|status|dry-run|snapshot|rollback|exec|restart|backup|prune] <compose.ae> [tag|node cmd...]")
         exit(2)
     }
     if cmd != "up" {
@@ -132,7 +132,14 @@ main() {
     // Clear it first: staging into a leftover dir from a prior run would
     // mix compositions (the previous operator's aeo_compose module + a
     // cached aeo-run binary would leak into this run). Start clean.
-    work = "/tmp/aeo-build"
+    // AEO_WORK overrides the staging dir (default /tmp/aeo-build). On an
+    // immutable host where `ae` is a container-shim, point this at a dir the
+    // shim can bind-mount with SELinux relabel (:Z) — /tmp itself can't be
+    // relabeled, but a project subdir can. See docs/build-in-container.md.
+    work = getenv("AEO_WORK")
+    if work == "" {
+        work = "/tmp/aeo-build"
+    }
     _ = _rmrf(work)
     _ = mkdir_p(work)
     libdst = string_concat(work, "/lib")

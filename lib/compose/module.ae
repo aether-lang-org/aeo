@@ -34,7 +34,7 @@ exports (
     bhyve_vm, freebsd_vm, get_flavor, kvm_vm,
     resource,
     container, docker, lxc, kvm, jail, bhyve,
-    image, command, dockerfile, health, dataset, ip, depends,
+    image, command, dockerfile, health, dataset, ip, depends, env, get_env,
     cpus, memory, nic, expose,
     guest_image, network, ssh_key,
     health_interval, health_budget,
@@ -206,6 +206,19 @@ base(_ctx: ptr, image: string)      { config.put("aeo.cmp.base.${_ctx}", image) 
 health(_ctx: ptr, v: string)  { config.put("aeo.cmp.health.${_ctx}", v) }
 dataset(_ctx: ptr, v: string) { config.put("aeo.cmp.dataset.${_ctx}", v) }
 ip(_ctx: ptr, v: string)      { config.put("aeo.cmp.ip.${_ctx}", v) }
+// env(KEY, VAL) — an environment variable the container runs with. Accumulates
+// "K=V" pairs (comma-joined). On a shared aeo network, peers resolve by name, so
+// e.g. env("REDIS_HOST", "db") lets the app reach the db CONTAINER by name.
+env(_ctx: ptr, k: string, v: string) {
+    prev = config.get("aeo.cmp.env.${_ctx}")
+    entry = "${k}=${v}"
+    if string_length(prev) == 0 {
+        config.put("aeo.cmp.env.${_ctx}", entry)
+    } else {
+        config.put("aeo.cmp.env.${_ctx}", "${prev},${entry}")
+    }
+}
+get_env(nm: string) -> string { return config.get("aeo.cmp.env.${nm}") }
 
 // --- Capsicum (BSD-only) — two-phase confinement of the bhyve HYPERVISOR ---
 // Capsicum is a FreeBSD-kernel facility; it can only confine FreeBSD-native
