@@ -26,6 +26,7 @@ import compose
 import ipam
 import pf
 import rctl
+import snapshot
 import resource (set_state, get_state, STATE_DOWN, STATE_BOOTING, STATE_UP, STATE_FAILED)
 import host (family, profile)
 import aeo_compose (aeo_orchestration)
@@ -510,6 +511,60 @@ _status() {
     }
 }
 
+// run_snapshot(tag) — snapshot every node's ZFS dataset at @tag (the
+// Proxmox-style point-in-time). Per node: resolve its dataset (jail=declared,
+// bhyve=zroot/vm/<name>), `zfs snapshot <ds>@<tag>`. Dataset-less kinds
+// (container) are skipped. Reports per node; non-fatal (one node's failure
+// doesn't abort the rest).
+run_snapshot(tag: string) {
+    n = compose.count()
+    println("aeo: snapshot @${tag}")
+    i = 0
+    while i < n {
+        nm = compose.name_at(i)
+        k = compose.get_kind(nm)
+        ds = snapshot.dataset_for(nm, k, compose.get_dataset(nm))
+        if ds == "" {
+            println("  ${nm} [${k}] — no dataset, skipped")
+        } else {
+            err = snapshot.snapshot(nm, k, compose.get_dataset(nm), tag)
+            if err != "" {
+                println("  ${nm} [${k}] FAILED: ${err}")
+            } else {
+                println("  ${nm} [${k}] snapped ${ds}@${tag}")
+            }
+        }
+        i = i + 1
+    }
+}
+
+// run_rollback(tag) — restore every node's dataset to its @tag snapshot
+// (`zfs rollback -r`). REVERSE declaration order, so a dependency is rolled back
+// after its dependents (mirrors teardown ordering). Each node should be DOWN
+// first (rolling back a live jail/VM's dataset under it is unsafe); we warn but
+// don't enforce — the operator runs `aeo down` then `aeo rollback`.
+run_rollback(tag: string) {
+    n = compose.count()
+    println("aeo: rollback @${tag} (reverse order)")
+    i = n - 1
+    while i >= 0 {
+        nm = compose.name_at(i)
+        k = compose.get_kind(nm)
+        ds = snapshot.dataset_for(nm, k, compose.get_dataset(nm))
+        if ds == "" {
+            println("  ${nm} [${k}] — no dataset, skipped")
+        } else {
+            err = snapshot.rollback(nm, k, compose.get_dataset(nm), tag)
+            if err != "" {
+                println("  ${nm} [${k}] FAILED: ${err}")
+            } else {
+                println("  ${nm} [${k}] rolled back to ${ds}@${tag}")
+            }
+        }
+        i = i - 1
+    }
+}
+
 // Host-gating preflight (design § Host adaptation rule 2): every declared
 // kind is checked against the host family BEFORE any resource is touched.
 // A kind the host can't run is a fast, loud error at composition-eval
@@ -659,6 +714,18 @@ main() {
         return
     }
 
+    // snapshot / rollback — ZFS point-in-time over each node's dataset. The tag
+    // comes from AEO_TAG (the front-door sets it from the CLI arg); default
+    // "snap" if unset. Dataset ops, not bring-up — run before the host gate.
+    if cmd == "snapshot" {
+        run_snapshot(_tag())
+        return
+    }
+    if cmd == "rollback" {
+        run_rollback(_tag())
+        return
+    }
+
     // Fast-fail host gating before any bring-up or teardown touches a
     // resource. Applies to up, down, and dry-run alike — dry-run is the
     // operator's pre-flight check, so it MUST surface the same gating.
@@ -690,6 +757,19 @@ main() {
         exit(1)
     }
     println("aeo: stack up")
+}
+
+// The snapshot/rollback tag (AEO_TAG, set by the front-door from the CLI arg).
+// Defaults to "snap" so a bare `aeo snapshot` still works.
+_tag() -> string {
+    t = config.get("AEO_TAG")
+    if t == "" {
+        t = os_getenv("AEO_TAG")
+    }
+    if t == "" {
+        return "snap"
+    }
+    return t
 }
 
 import std.os (os_getenv)

@@ -1,0 +1,93 @@
+// lib/snapshot — point-in-time ZFS snapshot + rollback of a node's dataset.
+//
+// The Proxmox-style operability feature, on aeo's grain: aeo already manages the
+// ZFS datasets behind every node (a jail's `dataset(...)`, a bhyve VM's
+// /zroot/vm/<name>), so snapshot/rollback is a thin, honest layer over `zfs
+// snapshot` / `zfs rollback` — no new state, no daemon. The PURE half (which
+// dataset a node maps to, and the exact zfs argv) is unit-tested here; the live
+// `zfs` calls are FreeBSD + the granted sudo, validated on the box.
+//
+//   dataset_for(name, kind, declared) -> the ZFS dataset behind the node
+//   snap_name(node, tag)              -> "<dataset>@<tag>" (the snapshot id)
+//   snapshot(name, kind, declared, tag) -> `zfs snapshot <ds>@<tag>`  ("" ok)
+//   rollback(name, kind, declared, tag) -> `zfs rollback -r <ds>@<tag>` ("" ok)
+//   list_snaps(name, kind, declared)    -> the node's snapshots (newline list)
+//
+// `declared` is compose.get_dataset(name) — set for jails, "" for bhyve VMs
+// (which derive their dataset from the VM name by convention).
+
+import std.os (run_capture)
+import std.list
+import std.string (string_length)
+
+exports ( dataset_for, snap_name, snapshot, rollback, list_snaps )
+
+// dataset_for(name, kind, declared) — the ZFS dataset a node lives on.
+//   jail  : the declared dataset (dataset("zroot/jails/db")).
+//   bhyve : /zroot/vm/<name> by vm-bhyve convention -> dataset zroot/vm/<name>.
+//   else  : "" (kind has no aeo-managed dataset to snapshot).
+dataset_for(name: string, kind: string, declared: string) -> string {
+    if kind == "jail" {
+        return declared                  // operator-declared dataset
+    }
+    if kind == "bhyve" {
+        return "zroot/vm/${name}"        // vm-bhyve convention
+    }
+    return ""
+}
+
+// snap_name(dataset, tag) -> "<dataset>@<tag>" (the zfs snapshot identifier).
+snap_name(dataset: string, tag: string) -> string {
+    return "${dataset}@${tag}"
+}
+
+// snapshot — `sudo -n zfs snapshot <ds>@<tag>`. Returns "" on success, else the
+// error. A no-op-success ("") if the kind has no dataset (nothing to snapshot).
+snapshot(name: string, kind: string, declared: string, tag: string) -> string {
+    ds = dataset_for(name, kind, declared)
+    if string_length(ds) == 0 {
+        return ""                        // no dataset for this kind — skip
+    }
+    return _zfs("snapshot ${snap_name(ds, tag)}")
+}
+
+// rollback — `sudo -n zfs rollback -r <ds>@<tag>`. -r destroys any snapshots
+// NEWER than the target (zfs requires this to roll back past them); aeo's tags
+// are operator-chosen restore points, so -r is the intended "restore to here".
+rollback(name: string, kind: string, declared: string, tag: string) -> string {
+    ds = dataset_for(name, kind, declared)
+    if string_length(ds) == 0 {
+        return ""
+    }
+    return _zfs("rollback -r ${snap_name(ds, tag)}")
+}
+
+// list_snaps — the node's snapshots, newline-separated (name TAGs only, sorted).
+// Returns "" if none / no dataset.
+list_snaps(name: string, kind: string, declared: string) -> string {
+    ds = dataset_for(name, kind, declared)
+    if string_length(ds) == 0 {
+        return ""
+    }
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "sudo -n /sbin/zfs list -t snapshot -o name -H 2>/dev/null | grep '^${ds}@' | sort")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    return out
+}
+
+// `sudo -n /sbin/zfs <args>` via /bin/sh -c. Returns "" on success, else the
+// captured stderr/stdout. (zfs is at /sbin/zfs on FreeBSD; the box's sudoers
+// grants /sbin/zfs.)
+_zfs(args: string) -> string {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "sudo -n /sbin/zfs ${args}")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    if status != 0 {
+        return out
+    }
+    return ""
+}

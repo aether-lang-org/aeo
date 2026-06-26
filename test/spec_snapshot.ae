@@ -1,0 +1,53 @@
+// spec_snapshot.ae — the PURE half of lib/snapshot (dataset resolution + the
+// zfs snapshot identifier). The Proxmox-style snapshot/rollback feature on aeo's
+// grain: it snapshots the ZFS dataset aeo already manages per node. The live
+// `zfs snapshot`/`rollback` calls are FreeBSD+sudo (box-validated); this proves
+// the node->dataset mapping + the @tag naming off-host.
+//
+//   sh test/run-spec.sh test/spec_snapshot.ae
+
+import aeocha
+import snapshot (dataset_for, snap_name)
+import std.string (string_from_int)
+import std.string   // bare too: inlined aeocha calls bare exports unqualified
+
+main() {
+    fw = aeocha.init()
+
+    aeocha.describe(fw, "snapshot: node -> ZFS dataset + @tag identifier") {
+
+        aeocha.describe("dataset_for resolves a node's dataset by kind") {
+            aeocha.it("a jail uses its DECLARED dataset") callback {
+                aeocha.assert_str_eq(fw, dataset_for("db", "jail", "zroot/jails/db"),
+                    "zroot/jails/db", "jail -> the dataset() it declared")
+            }
+            aeocha.it("a bhyve VM derives zroot/vm/<name> by convention") callback {
+                aeocha.assert_str_eq(fw, dataset_for("db_vm", "bhyve", ""),
+                    "zroot/vm/db_vm", "bhyve -> /zroot/vm/<name> (vm-bhyve layout)")
+            }
+            aeocha.it("a dataset-less kind (container) returns empty (nothing to snap)") callback {
+                aeocha.assert_str_eq(fw, dataset_for("app", "container", ""),
+                    "", "container has no aeo-managed dataset")
+            }
+        }
+
+        aeocha.describe("snap_name builds the zfs snapshot identifier") {
+            aeocha.it("forms <dataset>@<tag>") callback {
+                aeocha.assert_str_eq(fw, snap_name("zroot/jails/db", "before-upgrade"),
+                    "zroot/jails/db@before-upgrade", "the @tag snapshot id")
+            }
+            aeocha.it("composes with dataset_for end-to-end (jail)") callback {
+                ds = dataset_for("db", "jail", "zroot/jails/db")
+                aeocha.assert_str_eq(fw, snap_name(ds, "v1"),
+                    "zroot/jails/db@v1", "jail db, tag v1")
+            }
+            aeocha.it("composes for a bhyve VM too") callback {
+                ds = dataset_for("python_vm", "bhyve", "")
+                aeocha.assert_str_eq(fw, snap_name(ds, "clean"),
+                    "zroot/vm/python_vm@clean", "vm python_vm, tag clean")
+            }
+        }
+    }
+
+    aeocha.run_summary(fw)
+}
