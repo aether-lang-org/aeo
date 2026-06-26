@@ -16,6 +16,7 @@ malware and are impregnable to attack.* Two axes — stop a node REACHING things
 | pf network policy | ✅ rulegen | ❌ inter-VM delivery BROKEN (if_bridge) | needs design rethink — see below |
 | rctl resource caps | ✅ | ✅ live + orchestrator-guarded | real-node deny proof pending |
 | Capsicum device grants | n/a | n/a | bhyve self-confines — no seam |
+| **Linux container confinement** | ❌ | — | seccomp/cgroups/netpolicy — the Linux peer of Capsicum+rctl+pf; NOT applied yet |
 | Image attestation | ❌ | — | no grammar yet; built from scratch |
 | Audit trail | ❌ | — | nothing records node attempts |
 
@@ -104,6 +105,29 @@ Nothing records what a node ATTEMPTED — containment blocks but doesn't observe
       the Capsicum branch design — wire aeo as a consumer.
 - [ ] Per-node connection logging on the deny-default pf (which flows were
       refused), so a compromised node's probing is visible, not just stopped.
+
+### 5. Linux container confinement — seccomp / cgroups / netpolicy (the Linux peer)
+The FreeBSD containment axes (Capsicum fd grants, rctl caps, pf netpolicy) DON'T
+apply to Linux host containers as-is — flagged in the new -VMM+podman demos
+(silly_addition_containers.ae, silly_addition_kvm_podman.ae) as "a separate
+future driver concern." Containers isolate via the KERNEL (namespaces/cgroups),
+so the confinement primitives are different but the GOAL is identical: contain
+malware, stop exhaustion, deny-default network. The Linux analogs:
+- [ ] **cgroup resource caps** (the rctl peer): podman `--memory`, `--cpus`,
+      `--pids-limit` (fork-bomb ceiling) wired from the existing `limit{}`
+      grammar — so limit{} enforces on BOTH substrates (rctl on jails/VMs,
+      cgroups on containers). driver_linux is the seam; proven on Bazzite.
+- [ ] **seccomp / cap-drop** (the Capsicum peer): podman `--security-opt
+      seccomp=<profile>`, `--cap-drop=ALL`, `--read-only`, `--no-new-privileges`
+      from a `constrain{}`-style block — deny syscalls/capabilities a node
+      doesn't need (a compromised container can't escalate).
+- [ ] **container network policy** (the pf peer): podman `--network` isolation +
+      a deny-default between containers (only declared depends()/expose() flows
+      pass). Cleaner than the FreeBSD pf+if_bridge mess — podman networks are
+      routed/NAT'd, not bridged, so it MAY sidestep the inter-VM bug entirely.
+- [ ] Decide grammar reuse: ideally limit{} (caps) + constrain{} (confinement)
+      map to BOTH FreeBSD and Linux drivers, so a composition's confinement is
+      substrate-portable. The driver picks rctl/Capsicum vs cgroups/seccomp.
 
 ## Operability (Proxmox-inspired, within-reach — Paul 2026-06-26)
 Make aeo OPERABLE like Proxmox without becoming a platform (no web UI, no daemon,
