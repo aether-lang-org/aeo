@@ -507,8 +507,55 @@ _status() {
         } else {
             println("  ${nm} [${k}] ◄ ${dep} ${loc} state=${st}")
         }
+        _status_detail(nm, k)
         i = i + 1
     }
+}
+
+// Per-node detail line(s) for `aeo status` — the Proxmox-rich part: surface what
+// aeo already knows but didn't show. Each fact prints only if SET, so a plain
+// node stays a one-liner. ip / caps (rctl) / confinement (pf netpolicy or
+// Capsicum grants) / snapshots available.
+_status_detail(nm: string, k: string) {
+    ip = compose.get_ip(nm)
+    if ip != "" {
+        println("      ip:    ${ip}")
+    }
+    caps = compose.get_rctl(nm)
+    if caps != "" {
+        println("      caps:  ${caps}")          // rctl resource limits
+    }
+    np = compose.get_netpolicy(nm)
+    if np != "" {
+        println("      net:   ${np}")            // pf deny-default policy
+    }
+    grants = compose.get_constraints(nm)
+    if grants != "" {
+        println("      grant: ${grants}")        // Capsicum fd grants
+    }
+    snaps = snapshot.list_snaps(nm, k, compose.get_dataset(nm))
+    if snaps != "" {
+        println("      snaps: ${_oneline(snaps)}")
+    }
+}
+
+// Collapse a newline-separated list to a comma-joined one-liner for status.
+_oneline(s: string) -> string {
+    out = ""
+    n = string_length(s)
+    i = 0
+    while i < n {
+        c = string_char_at(s, i)
+        if c == 10 {
+            if i + 1 < n {
+                out = "${out}, "
+            }
+        } else {
+            out = "${out}${string_from_char(c)}"
+        }
+        i = i + 1
+    }
+    return out
 }
 
 // run_snapshot(tag) — snapshot every node's ZFS dataset at @tag (the

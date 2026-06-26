@@ -101,6 +101,22 @@ Nothing records what a node ATTEMPTED — containment blocks but doesn't observe
 - [ ] Per-node connection logging on the deny-default pf (which flows were
       refused), so a compromised node's probing is visible, not just stopped.
 
+## Operability (Proxmox-inspired, within-reach — Paul 2026-06-26)
+Make aeo OPERABLE like Proxmox without becoming a platform (no web UI, no daemon,
+no HA — those cross the "aeo is not a platform" line). Config-is-code intact.
+- [x] **snapshot/rollback** — `aeo snapshot|rollback <compose.ae> [tag]` over each
+      node's ZFS dataset (lib/snapshot; jail=declared dataset, bhyve=zroot/vm/<n>).
+      Pure logic spec'd (spec_snapshot, 6); live zfs box-validated later.
+- [x] **enriched `aeo status`** — per node now shows ip / rctl caps / pf netpolicy
+      / Capsicum grants / snapshots, only where set. Live state still driver-probed.
+- [ ] Live-validate snapshot/rollback on the box (zfs snapshot a jail, roll it
+      back) once it's back from the storm.
+- [ ] Maybe: `aeo status --json` for tooling; backup hooks (`zfs send`); a
+      `snapshot{}` retention policy. Defer — these are thickenings, not core.
+- [ ] NOT doing (against the grain, design-doc line): web UI, clustering/multi-
+      host default, live migration, HA. A `driver_proxmox` (orchestrate a Proxmox
+      host as a substrate) is the aeo-shaped alternative if that itch returns.
+
 ## Cross-cutting / smaller
 
 - [ ] **Behavioral end-to-end on the box**: one session that does the pf
