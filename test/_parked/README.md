@@ -17,9 +17,10 @@ it module-by-module (compose/ipam/host/driver_linux/driver_bsd/capsicum).
 - `real_bhyve.ae` — boots an ACTUAL bhyve VM via the driver, checks it's alive
   at the hypervisor level, tears it down. Root + a UEFI bootrom/disk image.
   Provision: `sudo sh setup-bhyve.sh`; run: `sudo /tmp/real_bhyve`.
-- `real_jail.ae` — boots an ACTUAL jail via the driver against a minimal root,
-  probes liveness with a real jexec health check, tears it down. Root + a
-  populated jail root (see `../setup-jail-root.sh`).
+
+(`real_jail.ae` was REVIVED into `test/` 2026-06-26 — driver_bsd now self-sudos,
+so it no longer needs the binary to run as root; it runs unprivileged + a
+populated jail root via `../setup-jail-root.sh`.)
 
 ## Scripts (superseded; kept as historical reference)
 

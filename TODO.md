@@ -31,11 +31,15 @@ Validated 2026-06-25 on the box:
       the jail's own root (dev, rescue) — NOT the host's — i.e. contained.
 - [x] Closed the loop: aeo's `jail_create_argv` emits EXACTLY the command that
       worked live (byte-for-byte), and `smoke_bsd` (driver pure-logic) passes.
-- [ ] Un-park `test/real_jail.ae` into `test/` — BUT it shells `jail`/`jls`
-      directly (driver doesn't self-sudo), so the binary needs to run as root;
-      `sudo <arbitrary-binary>` isn't in the NOPASSWD grants. Either: add a narrow
-      grant, run it from a root shell, or make driver_bsd self-sudo like driver_vm
-      does. (Proven via argv-match + live commands meanwhile.)
+- [x] **driver_bsd self-sudo** — jail/jls/jexec/zfs now run via `sh -c "sudo -n
+      <prog> <squoted-args>"` (a `_sudo_run` helper, like driver_vm), so the aeo
+      binary no longer needs to be root. Paths match the box sudoers exactly
+      (/usr/sbin/jail family + /sbin/zfs). smoke_bsd green; argv builders
+      unchanged (the tested pure surface).
+- [x] **Un-parked `test/real_jail.ae`** into `test/` — now a normal spec (runs
+      unprivileged; the sudo is inside the driver). Builds + fails gracefully off
+      FreeBSD; runs for real on the box (needs a populated jail root via
+      setup-jail-root.sh). Box-validate when it's back.
 - [x] Apply rctl caps to a live jail node end-to-end: booted db+app jails on the
       box, applied the demo's exact rules (jail:db:memoryuse:deny=512M, maxproc
       32; jail:app:maxproc 128), kernel accepted, read back, cleaned up. The

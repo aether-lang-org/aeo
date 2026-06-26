@@ -27,7 +27,7 @@
 
 import std.os (run_capture)
 import std.list
-import std.string (string_length)
+import std.string (string_length, string_char_at, string_from_char)
 
 exports (
     name,
@@ -126,12 +126,12 @@ up(res_name: string, dataset: string, root: string, ip: string, start_cmd: strin
     // Ensure the dataset exists (ignore "already exists" failure).
     if string_length(dataset) > 0 {
         zav = zfs_create_argv(dataset)
-        _zo, _zs, _ze = run_capture("/sbin/zfs", zav, null)
+        _zo, _zs, _ze = _sudo_run("/sbin/zfs", zav)
         list_free(zav)
     }
     // Create + start the jail.
     cav = jail_create_argv(res_name, jail_root, ip, start_cmd)
-    out, status, err = run_capture("/usr/sbin/jail", cav, null)
+    out, status, err = _sudo_run("/usr/sbin/jail", cav)
     list_free(cav)
     if err != "" {
         return "aeo: jail spawn failed for '${res_name}': ${err}"
@@ -148,7 +148,7 @@ down(res_name: string) -> string {
         return ""
     }
     rav = jail_remove_argv(res_name)
-    out, status, err = run_capture("/usr/sbin/jail", rav, null)
+    out, status, err = _sudo_run("/usr/sbin/jail", rav)
     list_free(rav)
     if err != "" {
         return "aeo: jail teardown spawn failed for '${res_name}': ${err}"
@@ -164,7 +164,7 @@ down(res_name: string) -> string {
 // same reason as driver_linux.probe.
 probe(res_name: string, health: string, _unused: string) -> int {
     jav = jls_running_argv(res_name)
-    out, status, err = run_capture("/usr/sbin/jls", jav, null)
+    out, status, err = _sudo_run("/usr/sbin/jls", jav)
     list_free(jav)
     if err != "" {
         return 0
@@ -176,7 +176,7 @@ probe(res_name: string, health: string, _unused: string) -> int {
         return 1
     }
     hav = jexec_health_argv(res_name, health)
-    hout, hstatus, herr = run_capture("/usr/sbin/jexec", hav, null)
+    hout, hstatus, herr = _sudo_run("/usr/sbin/jexec", hav)
     list_free(hav)
     if herr != "" {
         return 0
@@ -186,3 +186,51 @@ probe(res_name: string, health: string, _unused: string) -> int {
     }
     return 0
 }
+
+// --- privilege: self-sudo (like driver_vm) ---------------------------------
+//
+// jail/jls/jexec/zfs need root. Rather than require the whole aeo binary to run
+// as root (sudo <arbitrary-binary> isn't NOPASSWD-grantable), each privileged op
+// self-sudos: `sh -c "sudo -n <prog> <args>"`, matching driver_vm. The full
+// paths (/usr/sbin/jail etc.) are the exact ones the operator's sudoers grants
+// NOPASSWD (see docs/bsd-host-setup.md). This is what un-parks real_jail.ae +
+// lets the jail demo run via real `aeo up` unprivileged.
+//
+// argv is single-quoted per element so args with spaces (a jail's exec.start=...
+// or a jexec health command) survive the shell. Returns (out, status, err) like
+// run_capture, so the call sites are a drop-in swap.
+_sudo_run(prog: string, argv: ptr) -> {
+    cmd = "sudo -n ${prog}"
+    n = list_size(argv)
+    i = 0
+    while i < n {
+        a = list_get(argv, i)
+        astr = "${a}"                      // ptr -> string (list stores strings)
+        cmd = "${cmd} ${_squote(astr)}"
+        i = i + 1
+    }
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, cmd)
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    return out, status, err
+}
+
+// single-quote a shell arg: wrap in '...' and escape any embedded ' as '\''.
+_squote(s: string) -> string {
+    out = "'"
+    n = string_length(s)
+    i = 0
+    while i < n {
+        c = string_char_at(s, i)
+        if c == 39 {                       // '
+            out = "${out}'\\''"
+        } else {
+            out = "${out}${_chr(c)}"
+        }
+        i = i + 1
+    }
+    return "${out}'"
+}
+_chr(c: int) -> string { return string_from_char(c) }
