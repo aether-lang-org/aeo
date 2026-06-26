@@ -161,6 +161,28 @@ no HA — those cross the "aeo is not a platform" line). Config-is-code intact.
       host default, live migration, HA. A `driver_proxmox` (orchestrate a Proxmox
       host as a substrate) is the aeo-shaped alternative if that itch returns.
 
+## Resource-kind coverage (which `kind`s are real vs demo'd)
+
+aeo's grammar exposes 6 kinds + a flavor. Demo'd: container/jail/bhyve/kvm. Gaps:
+- [ ] **`lxc` is a MISNOMER today** — the runner routes `lxc` to driver_linux
+      (podman), NOT real LXC. Investigated 2026-06-26: build a real driver_lxc
+      (lxc-create/start/info/attach/destroy). BLOCKED on the host: rootless LXC on
+      Bazzite (atomic, ae-shim user) does not boot a container — idmap/storage +
+      the "container uid can't x-access /home" ACL wall + cgroup delegation; and
+      `sudo` needs a password for the bazzite user, so rootful LXC is untestable
+      via the current access. Either: get a host where rootless-LXC works (or a
+      sudo grant), OR honestly rename/document `lxc` as "= podman container".
+      The lxc-* tools (lxc-create/start/attach, busybox/download templates) ARE
+      installed; it's purely the rootless env that blocks.
+- [ ] **`docker` kind** — thin: same as container but pins the docker engine. No
+      demo; arguably container covers it. Low priority.
+- [ ] **`freebsd_vm`** — a bhyve VM with a FreeBSD GUEST (flavor "freebsd"); the
+      bhyve demos run Linux guests. A real cell (FreeBSD-native VM / jails-in-VM),
+      trivially close to the bhyve demo. No demo yet.
+- [ ] **Nesting depth** — the demo grid is flat (1-level: container-in-VM). aeo's
+      design is RECURSIVE (the tree-of-nodes / aeo-agent recursion). No demo of
+      jail-in-VM, VM-in-VM, or 3+ tier.
+
 ## Cross-cutting / smaller
 
 - [ ] **Behavioral end-to-end on the box**: one session that does the pf
