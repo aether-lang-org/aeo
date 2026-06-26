@@ -1,0 +1,237 @@
+// examples/silly_addition_kvm.ae — the LINUX/KVM sibling of the FreeBSD demos.
+// Same all-in-one shape (one self-contained file: composition + operational
+// modes), but the nodes are KVM/qemu VMs on a LINUX host (e.g. Bazzite) — the
+// direct analog of silly_addition_cache.ae's bhyve VMs. This showcases aeo's
+// VMM arm (driver_vm's kvm/qemu path) the way the bhyve demo showcases bhyve.
+//
+//   system("silly_addition_kvm")  (on a Linux/KVM host)
+//     ├─ db_vm   (kvm VM) — boots a disk image; the cache/store tier
+//     └─ app_vm  (kvm VM) — the /add service ──depends──► db_vm
+//
+// WHAT'S REAL vs the FRONTIER (honest — the kvm arm is lower-level than bhyve):
+//   - REAL: the data model + gating + dependency ordering (check resolves the
+//     full tree). `aeo up` boots each VM via
+//     `qemu-system-x86_64 -enable-kvm -drive file=<image>,if=virtio
+//      -display none -daemonize -pidfile ... [-nic tap,...]`.
+//   - FRONTIER: unlike the bhyve arm (which PROVISIONS via vm-bhyve + cloud-init
+//     from the guest declaration), the kvm arm boots an EXISTING disk image() as-
+//     is — it does not yet fetch/build the image, seed an ssh key, or wire NAT.
+//     So the operator provides ready qcow2/raw images (image()) and a tap (nic());
+//     the in-VM workload (redis, the /add service) is baked into those images.
+//     The bhyve demo's per-VM Capsicum/pf confinement is FreeBSD-only and not
+//     mirrored here (Linux confinement — cgroups/nftables/seccomp — is a separate
+//     future driver concern).
+//
+// vs the FreeBSD siblings: silly_addition_cache.ae = bhyve VMs + in-guest
+// containers + Capsicum/pf; silly_addition_jails.ae = jails + rctl. THIS one is
+// the Linux VMM analog — KVM VMs, dependency-ordered, on the host that actually
+// has qemu/KVM.
+//
+// TWO doors (same as the siblings):
+//   - `aeo up examples/silly_addition_kvm.ae` — front-door calls
+//     aeo_orchestration() (needs qemu + the disk images present).
+//   - `ae run examples/silly_addition_kvm.ae` (AEO_MODE=check|up|suite) — main()
+//     → run_aeo(); check is the default (data-model only, runs anywhere).
+//
+// SIBLING NOTE: shares the mode scaffold (run_aeo/_mode_*/the _aeo_* helpers)
+// with the FreeBSD demos by DESIGN — these are deliberately SELF-CONTAINED (a
+// shop copies ONE file). Do NOT factor the shared scaffold into a common module.
+
+import aeocha
+import compose (system, kvm_vm)
+import compose (cpus, memory, image, nic, depends)
+import compose (get_image, get_cpus, get_memory, get_nic, get_depends, describe_tree)
+import std.string (string_length, string_from_int, string_concat, string_char_at, string_substring)
+import std.string   // bare too: inlined aeocha calls bare exports unqualified
+import std.os (getenv, run_capture)
+import std.list
+import ipam
+
+exports ( aeo_orchestration )
+
+// ---- the composition — two KVM VMs, db_vm <- app_vm ----
+// Each boots a disk image() the operator prepared (the kvm arm doesn't provision
+// — it runs the image as-is). app_vm depends on db_vm (ordering edge). Image
+// paths are SWAPPABLE via AEO_DB_IMAGE / AEO_APP_IMAGE; defaults under
+// /var/lib/aeo. The function `aeo up` calls.
+aeo_orchestration() {
+    system("silly_addition_kvm") {
+        // db tier — the cache/store VM (boots the db disk image).
+        db_vm = kvm_vm("db_vm") {
+            cpus(2)
+            memory("2G")
+            image(_db_image())
+            nic("tap0")
+        }
+
+        // app tier — the /add service VM, depends on db_vm (starts after it).
+        app_vm = kvm_vm("app_vm") {
+            cpus(2)
+            memory("2G")
+            image(_app_image())
+            nic("tap1")
+            depends("db_vm")    // dependency-ordered bring-up
+        }
+    }
+}
+
+// ---- MODES (same rich entrypoint shape as the siblings) ----
+//   check  — (DEFAULT) data-model assertions only; no deploy. Runs anywhere.
+//   up     — `aeo up`, leave the VMs STANDING. No checks. (Linux + qemu/KVM.)
+//   suite  — `aeo up`, verify the VMs are live (pidfile/process), then TEAR DOWN.
+run_aeo(mode: string) -> string {
+    aeo_orchestration()
+    match (mode) {
+        "check" -> { return _mode_check() }
+        "up"    -> { return _mode_up() }
+        "suite" -> { return _mode_suite() }
+        _       -> { return "aeo: unknown AEO_MODE '${mode}' (check|up|suite)" }
+    }
+}
+
+// CHECK — data-model assertions, in-process, no deploy (the default).
+_mode_check() -> string {
+    fw = aeocha.init()
+
+    aeocha.describe(fw, "kvm system: db_vm <- app_vm (the Linux VMM analog)") {
+
+        aeocha.describe("declaration (data model)") {
+            aeocha.it("resolves to two KVM VMs with a dependency edge") callback {
+                // images interpolate _db_image/_app_image so check tracks the
+                // AEO_*_IMAGE env (everything else is image-independent).
+                d = _db_image()
+                a = _app_image()
+                want = string_concat(string_concat(
+                    "system silly_addition_kvm:\n",
+                    "  kvm db_vm [image=${d}]\n"),
+                    "  kvm app_vm [image=${a}] -> db_vm")
+                aeocha.assert_str_eq(fw, describe_tree(), want, "resolved kvm tree snapshot")
+            }
+
+            aeocha.it("each VM names its image, size, and NIC") callback {
+                aeocha.assert_str_eq(fw, get_image("db_vm"), _db_image(), "db_vm image")
+                aeocha.assert_str_eq(fw, string_from_int(get_cpus("db_vm")), "2", "db_vm cpus")
+                aeocha.assert_str_eq(fw, get_memory("db_vm"), "2G", "db_vm memory")
+                aeocha.assert_str_eq(fw, get_nic("db_vm"), "tap0", "db_vm nic")
+                aeocha.assert_str_eq(fw, get_nic("app_vm"), "tap1", "app_vm nic (its own)")
+            }
+
+            aeocha.it("app_vm depends on db_vm (ordering edge)") callback {
+                aeocha.assert_str_eq(fw, get_depends("app_vm"), "db_vm", "app_vm ◄ db_vm")
+            }
+        }
+    }
+
+    aeocha.run_summary(fw)
+    return "check: kvm data-model assertions complete"
+}
+
+// UP — `aeo up` the kvm system, leave the VMs STANDING. Linux + qemu/KVM.
+_mode_up() -> string {
+    rc = _aeo_up()
+    if rc != 0 {
+        return "up: FAILED (aeo up rc=${string_from_int(rc)})"
+    }
+    return "up: kvm VMs stood up + left running (no checks)"
+}
+
+// SUITE — `aeo up`, verify each VM is alive (its qemu pidfile process exists),
+// then TEAR DOWN. Linux + qemu/KVM.
+_mode_suite() -> string {
+    rc = _aeo_up()
+    if rc != 0 {
+        return "suite: deploy FAILED (rc=${string_from_int(rc)})"
+    }
+    fw = aeocha.init()
+    aeocha.describe(fw, "live kvm VMs (boot + liveness)") {
+        aeocha.it("both VMs are alive (qemu pidfile process)") callback {
+            aeocha.assert_str_eq(fw, _vm_alive("db_vm"), "1", "db_vm qemu running")
+            aeocha.assert_str_eq(fw, _vm_alive("app_vm"), "1", "app_vm qemu running")
+        }
+    }
+    aeocha.run_summary(fw)
+    _aeo_down()
+    return "suite: live kvm liveness checks ran, VMs TORN DOWN"
+}
+
+main() {
+    m = getenv("AEO_MODE")
+    if string_length(m) == 0 {
+        m = "check"
+    }
+    println(run_aeo(m))
+}
+
+// ---- helpers ----
+
+_aeo_up() -> int {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "AEO_HOME=${_aeo_home()} ${_aeo_bin()} up ${_dsl()}")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    return status
+}
+_aeo_down() {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "AEO_HOME=${_aeo_home()} ${_aeo_bin()} down ${_dsl()}")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+}
+_aeo_bin() -> string {
+    b = getenv("AEO")
+    if string_length(b) == 0 {
+        return "/tmp/aeo"
+    }
+    return b
+}
+_aeo_home() -> string {
+    h = getenv("AEO_HOME")
+    if string_length(h) == 0 {
+        return string_concat(getenv("HOME"), "/aeo")
+    }
+    return h
+}
+_dsl() -> string {
+    d = getenv("AEO_DSL")
+    if string_length(d) == 0 {
+        return "examples/silly_addition_kvm.ae"
+    }
+    return d
+}
+
+// The VMs' disk images — AEO_DB_IMAGE / AEO_APP_IMAGE override the defaults so
+// the same demo runs against whatever qcow2/raw images the operator prepared.
+_db_image() -> string {
+    v = getenv("AEO_DB_IMAGE")
+    if string_length(v) == 0 {
+        return "/var/lib/aeo/db.qcow2"
+    }
+    return v
+}
+_app_image() -> string {
+    v = getenv("AEO_APP_IMAGE")
+    if string_length(v) == 0 {
+        return "/var/lib/aeo/app.qcow2"
+    }
+    return v
+}
+
+// "1" if a VM's qemu pidfile names a live process, else "0". The kvm driver
+// daemonizes qemu with -pidfile; liveness is that pid being alive.
+_vm_alive(nm: string) -> string {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "p=$(cat /tmp/aeo-vm-${nm}.pid 2>/dev/null); [ -n \"$p\" ] && kill -0 $p 2>/dev/null && echo 1 || echo 0")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    return _chomp(out)
+}
+
+_chomp(s: string) -> string {
+    n = string_length(s)
+    if n == 0 { return s }
+    if string_char_at(s, n - 1) == 10 { return string_substring(s, 0, n - 1) }
+    return s
+}
