@@ -17,7 +17,7 @@ malware and are impregnable to attack.* Two axes — stop a node REACHING things
 | rctl resource caps | ✅ | ✅ live + orchestrator-guarded | real-node deny proof pending |
 | Capsicum device grants | n/a | n/a | bhyve self-confines — no seam |
 | **Linux container confinement** | ✅ | ✅ **cgroups+cap-drop+netpolicy, fork-bomb refused live** | lib/confine_linux; reuses limit{}+constrain{} grammar (§5) |
-| Image attestation | ❌ | — | no grammar yet; built from scratch |
+| Image attestation | ✅ | ✅ **verify-before-boot, fail-closed; wrong digest refused live** | attest("sha256:..."); 3 greppable states (attested/unpinned/unattestable) |
 | Audit trail | ❌ | — | nothing records node attempts |
 
 ### 0. jail nodes — LIVE-PROVEN (the unblocked containment path)
@@ -88,15 +88,20 @@ bridge — full writeup in `docs/pf-enforcement-next-steps.md`:
       hypervisor PID → `process:<pid>` targeting). Runner logs "NOT enforced
       (kind=bhyve)" loudly rather than skipping silently.
 
-### 3. Image attestation — supply-chain (HIGH for "impregnable")
-NO grammar yet (no `sign` setter exists — built from scratch). Nothing verifies
-an image before boot, so a poisoned golden snapshot boots trusted.
-- [ ] New grammar: pin an expected digest in the image recipe (e.g.
-      `attest("sha256:...")` on the golden snapshot / base image).
-- [ ] Verify-at-boot: the driver checks the image/snapshot digest before
-      clone-and-boot; reject on mismatch/drift (fail-closed, loud).
-- [ ] Decide the trust root (operator-pinned hashes vs. a signing key). Pure
-      digest-compare half is unit-testable off-box.
+### 3. Image attestation — DONE + LIVE (lib/attest, 2026-06-27) — supply-chain
+- [x] **Grammar**: `attest("sha256:...")` pins a node's expected image digest.
+- [x] **Verify-at-boot, FAIL-CLOSED**: the runner resolves the image's ACTUAL
+      digest, refuses on mismatch (loud), runs image@<digest> so podman enforces
+      the pin too. LIVE: correct pin boots by-digest; WRONG pin -> "DIGEST
+      MISMATCH ... refusing to boot", container refused.
+- [x] **3 greppable states** (Paul's audit idea): attest_state -> "attested" |
+      "unpinned" (pulled, no pin — a finding) | "unattestable" (built from
+      entrypoint/dockerfile — no upstream digest). In `aeo status` + `--json`
+      (attestation/attest_digest fields) so a CI gate can fail on
+      attestation!="attested". spec_attest 5.
+- [ ] Follow-up: trust root beyond operator-pinned hashes (cosign/skopeo are on
+      Bazzite — a signature path). Also: attest a qcow2 / jail-dataset hash
+      (same shape, swap the digest probe) so attestation spans substrates.
 
 ### 4. Audit trail — forensics / "contain malware" observability (MEDIUM)
 Nothing records what a node ATTEMPTED — containment blocks but doesn't observe.
