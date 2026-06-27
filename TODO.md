@@ -282,6 +282,18 @@ wired yet; mapped here as candidate kinds. Ordered by how cleanly they'd land:
       pipeline — `docs/aeo-agent-windows-pipeline.md`. Blockers: agent body is
       Linux-bound (needs driver_windows/select arm), not on the conduit yet, and
       the mingw cross-build is unproven (spike it first). Agent stays Aether.
-- [ ] Watch aether#878 (qualified-surface-on-any-import); when it lands, the
-      aeocha-driven specs can drop their bare `import std.string`. (#870 already
-      dropped from the demo.)
+- [ ] aether#870/#878 are CLOSED (fixed in ae 0.326). BUT investigated
+      2026-06-27: they do NOT let the aeocha specs drop their bare `import
+      std.string`. #878 fixes the QUALIFIED surface (`string.copy()` with the dot)
+      on any import; #870 fixes a selective ENTRY-FILE import suppressing merged
+      qualified calls. The aeocha workaround is for aeocha's inlined code calling
+      `copy` BARE/UNQUALIFIED — which needs a bare `import std.string` to provide
+      the bare-name binding, and that's aeocha's design, NOT what #870/#878 fixed.
+      So the ~14 bare-import sites STAY unless aeocha switches to qualified
+      `string.copy()` internally (an aeocha change), or ae adds bare-name
+      re-export. Couldn't even test on this box: installed ae is 0.325 (the 0.326
+      source has the sib's uncommitted WIP + a version-stamp quirk; didn't force a
+      build). Revisit when ae 0.326+ is cleanly installed.
+- [ ] aether#929/#586/#744 CLOSED (narrowing/Duration/module-global soundness).
+      aeo not exposed today (no module-scope `var` 64-bit cells; durations convert
+      ns->ms-int immediately). Commented on #929 with the corroborating near-miss.
