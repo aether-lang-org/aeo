@@ -129,9 +129,12 @@ malware, stop exhaustion, deny-default network. The Linux analogs:
       map to BOTH FreeBSD and Linux drivers, so a composition's confinement is
       substrate-portable. The driver picks rctl/Capsicum vs cgroups/seccomp.
 
-## Operability (Proxmox-inspired, within-reach — Paul 2026-06-26)
-Make aeo OPERABLE like Proxmox without becoming a platform (no web UI, no daemon,
-no HA — those cross the "aeo is not a platform" line). Config-is-code intact.
+## Lifecycle & state ops (snapshot / rollback / backup / prune / exec / restart)
+Day-2 operability for a STANDING deployment: capture point-in-time state, restore
+it, retain it, and reach into / restart individual nodes — without becoming a
+platform (no web UI, no daemon, no HA — those cross the "aeo is not a platform"
+line). Config-is-code intact. Proxmox is the comparison, not the goal: these are
+aeo's own verbs; the inline "Proxmox-X" notes just point at the familiar analog.
 - [x] **snapshot/rollback** — `aeo snapshot|rollback <compose.ae> [tag]` over each
       node's ZFS dataset (lib/snapshot; jail=declared dataset, bhyve=zroot/vm/<n>).
       Pure logic spec'd (spec_snapshot, 6); live zfs box-validated later.

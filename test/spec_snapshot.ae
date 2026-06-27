@@ -1,6 +1,6 @@
 // spec_snapshot.ae — the PURE half of lib/snapshot (dataset resolution + the
-// zfs snapshot identifier). The Proxmox-style snapshot/rollback feature on aeo's
-// grain: it snapshots the ZFS dataset aeo already manages per node. The live
+// zfs snapshot identifier). aeo's snapshot/rollback lifecycle verb (Proxmox-style)
+// on aeo's grain: it snapshots the ZFS dataset aeo already manages per node. The live
 // `zfs snapshot`/`rollback` calls are FreeBSD+sudo (box-validated); this proves
 // the node->dataset mapping + the @tag naming off-host.
 //

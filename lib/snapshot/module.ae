@@ -1,8 +1,8 @@
 // lib/snapshot — point-in-time ZFS snapshot + rollback of a node's dataset.
 //
-// The Proxmox-style operability feature, on aeo's grain: aeo already manages the
-// ZFS datasets behind every node (a jail's `dataset(...)`, a bhyve VM's
-// /zroot/vm/<name>), so snapshot/rollback is a thin, honest layer over `zfs
+// Lifecycle/state ops, on aeo's grain (Proxmox-style, but aeo's own verb): aeo
+// already manages the ZFS datasets behind every node (a jail's `dataset(...)`, a
+// bhyve VM's /zroot/vm/<name>), so snapshot/rollback is a thin, honest layer over `zfs
 // snapshot` / `zfs rollback` — no new state, no daemon. The PURE half (which
 // dataset a node maps to, and the exact zfs argv) is unit-tested here; the live
 // `zfs` calls are FreeBSD + the granted sudo, validated on the box.
