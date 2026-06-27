@@ -236,6 +236,14 @@ wired yet; mapped here as candidate kinds. Ordered by how cleanly they'd land:
 
 ## Cross-cutting / smaller
 
+- [ ] **BUG: single-container composition doesn't boot** — a system with ONE
+      container node prints `aeo: stack up` but never creates the container
+      (`podman ps -a` shows nothing). The two-container path
+      (silly_addition_containers.ae) works fine, so it's specific to a 1-node
+      compose. Found 2026-06-27 while live-testing attestation (worked around by
+      proving attestation on the 2-container demo). Suspect the runner's
+      bring-up loop / actor wiring short-circuits for a single node. Not yet
+      diagnosed.
 - [ ] **Behavioral end-to-end on the box**: one session that does the pf
       bite-step + RACCT reboot, then runs the apex and validates BOTH pf deny
       and rctl deny live (the two pending acceptance tests together).
