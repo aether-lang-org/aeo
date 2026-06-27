@@ -188,6 +188,27 @@ Gaps:
       design is RECURSIVE (the tree-of-nodes / aeo-agent recursion). No demo of
       jail-in-VM, VM-in-VM, or 3+ tier.
 
+### Lighter-tier substrates (smaller VMs + sandboxes) — future kinds
+Surveyed both boxes 2026-06-27. Below what aeo drives today (full-qemu kvm,
+podman, LXC) sits a lighter tier — smaller VMs and unprivileged sandboxes. None
+wired yet; mapped here as candidate kinds. Ordered by how cleanly they'd land:
+- [ ] **bwrap (bubblewrap)** — the STANDOUT. Unprivileged sandbox (the Flatpak
+      engine); installed on both boxes and proven to run ROOTLESS with zero host
+      setup — no sudoers, no systemctl, no idmap/bridge dance (unlike jails/kvm-
+      tap/LXC, which all needed grants + console). A driver_bwrap = aeo's
+      no-privilege "contain this process" tier, runnable anywhere. Directly serves
+      the containment thread without the host-config friction that's blocked us.
+- [ ] **systemd-nspawn** — a systemd-native system container (LXC's tier) but far
+      less finicky: a rootfs + nspawn, no idmap/lxcbr0. Installed on both boxes;
+      needs root. Possibly the LESS painful system-container path than driver_lxc.
+- [ ] **Firecracker** — the canonical "smaller VM": AWS microVM, ~125ms boot,
+      minimal device model vs full qemu. A genuinely distinct VM substrate (the
+      `kvm` kind is full-qemu). NOT installed — needs install + /dev/kvm.
+      Cloud-hypervisor / crosvm are the same rust-vmm niche (crosvm IS ChromeOS's
+      VMM, not exposed to Crostini). More setup before a driver than bwrap/nspawn.
+- [ ] **Raw primitives** — unshare (namespaces), chroot (the oldest container).
+      Too low-level to be node kinds on their own; bwrap is the usable wrapper.
+
 ## Cross-cutting / smaller
 
 - [ ] **Behavioral end-to-end on the box**: one session that does the pf
