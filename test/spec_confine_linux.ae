@@ -1,0 +1,66 @@
+// test/spec_confine_linux.ae — the PURE renderers of lib/confine_linux: the three
+// Linux container-confinement axes (cgroup caps / cap-drop+seccomp / netpolicy)
+// from the SAME grammar (limit{} + constrain{}) that lib/rctl renders to FreeBSD.
+// Substrate-portable confinement. The live podman flags are proven on Bazzite
+// (fork-bomb refused under --pids-limit); this pins the pure rendering off-box.
+
+import aeocha
+import confine_linux (cgroup_flags, security_flags, net_flags, confine_string, _kv_value)
+import std.string   // bare: aeocha's inlined asserts call string.copy unqualified
+
+main() {
+    fw = aeocha.init()
+
+    aeocha.describe(fw, "confine_linux (Linux confinement renderers)") {
+
+        aeocha.describe("axis 1 — cgroup caps (the rctl peer, from limit{})") {
+            aeocha.it("renders memoryuse/maxproc/openfiles to podman flags") callback {
+                got = cgroup_flags("memoryuse=512M, maxproc=32, openfiles=4096")
+                aeocha.assert_str_eq(fw, got, "--memory 512M --pids-limit 32 --ulimit nofile=4096:4096", "caps -> flags")
+            }
+            aeocha.it("empty caps -> no flags") callback {
+                aeocha.assert_str_eq(fw, cgroup_flags(""), "", "no limit{} -> empty")
+            }
+            aeocha.it("_kv_value extracts a single cap from the list") callback {
+                aeocha.assert_str_eq(fw, _kv_value("memoryuse=1G, maxproc=8", "maxproc"), "8", "maxproc=8")
+                aeocha.assert_str_eq(fw, _kv_value("memoryuse=1G", "maxproc"), "", "absent -> empty")
+            }
+        }
+
+        aeocha.describe("axis 2 — seccomp/cap-drop (the Capsicum peer)") {
+            aeocha.it("a constrained node drops caps + no-new-privileges") callback {
+                got = security_flags("net(tap0)=rd", "")
+                aeocha.assert_str_eq(fw, got, "--cap-drop ALL --security-opt no-new-privileges", "constrained -> hardened")
+            }
+            aeocha.it("a deny_egress node also gets --read-only") callback {
+                got = security_flags("", "egress:DENY-ALL")
+                aeocha.assert_str_eq(fw, got, "--cap-drop ALL --security-opt no-new-privileges --read-only", "deny_egress -> read-only")
+            }
+            aeocha.it("an unconstrained node gets no hardening") callback {
+                aeocha.assert_str_eq(fw, security_flags("", ""), "", "no constrain{} -> empty")
+            }
+        }
+
+        aeocha.describe("axis 3 — netpolicy (the pf peer)") {
+            aeocha.it("deny_egress -> --network none (no outbound)") callback {
+                aeocha.assert_str_eq(fw, net_flags("egress:DENY-ALL", "aeo-sys"), "--network none", "deny_egress -> none")
+            }
+            aeocha.it("otherwise the shared aeo net") callback {
+                aeocha.assert_str_eq(fw, net_flags("ingress:6379", "aeo-sys"), "--network aeo-sys", "shared net")
+            }
+        }
+
+        aeocha.describe("all three composed (confine_string)") {
+            aeocha.it("full confinement renders every axis") callback {
+                got = confine_string("memoryuse=512M, maxproc=32", "net(x)=rd", "egress:DENY-ALL", "aeo-sys")
+                want = "--memory 512M --pids-limit 32 --cap-drop ALL --security-opt no-new-privileges --read-only --network none"
+                aeocha.assert_str_eq(fw, got, want, "limit + constrain + deny_egress")
+            }
+            aeocha.it("no confinement -> just the shared net") callback {
+                aeocha.assert_str_eq(fw, confine_string("", "", "", "aeo-sys"), "--network aeo-sys", "bare node")
+            }
+        }
+    }
+
+    aeocha.run_summary(fw)
+}

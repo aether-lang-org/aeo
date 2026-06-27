@@ -26,8 +26,8 @@ import std.fs (write_atomic)
 
 exports (
     name, engine_resolve,
-    up, up_net, network_ensure, down, probe, exec_capture, build, build_entrypoint, built_tag,
-    ps_running_argv, run_argv, run_argv_net, stop_argv, rm_argv, exec_health_argv,
+    up, up_net, up_confined, network_ensure, down, probe, exec_capture, build, build_entrypoint, built_tag,
+    ps_running_argv, run_argv, run_argv_net, run_argv_confined, stop_argv, rm_argv, exec_health_argv,
     build_argv
 )
 
@@ -76,22 +76,41 @@ run_argv(res_name: string, image: string, cmd: string, expose: int) -> ptr {
 // run_argv_net — like run_argv, plus a shared `net` (so peers resolve by name)
 // and `env` ("K=V,K=V" pairs). net "" -> default network; env "" -> none.
 run_argv_net(res_name: string, image: string, cmd: string, expose: int, net: string, env: string) -> ptr {
+    return run_argv_confined(res_name, image, cmd, expose, net, env, "")
+}
+
+// run_argv_confined — adds `confine`, a space-separated string of confinement
+// flag tokens from lib/confine_linux (cgroup caps + cap-drop/seccomp + netpolicy).
+// If confine carries its own `--network` (a deny_egress -> --network none), THAT
+// wins and the shared `net` is suppressed (a confined node's net policy overrides
+// the default join). When deny_egress sets --network none, host port publish (-p)
+// is also dropped (none = no network at all).
+run_argv_confined(res_name: string, image: string, cmd: string, expose: int, net: string, env: string, confine: string) -> ptr {
     av = list_new()
     list_add(av, "run")
     list_add(av, "-d")
     list_add(av, "--replace")
     list_add(av, "--name")
     list_add(av, res_name)
+    confine_has_net = string_contains(confine, "--network")
     if string_length(net) > 0 {
-        list_add(av, "--network")
-        list_add(av, net)
+        if confine_has_net == 0 {
+            list_add(av, "--network")
+            list_add(av, net)
+        }
     }
+    // splice the confinement flag tokens (cgroup/security/network).
+    _add_token_args(av, confine)
     if string_length(env) > 0 {
         _add_env_args(av, env)
     }
+    // publish the port UNLESS the node is network-isolated (--network none).
+    no_net = string_contains(confine, "--network none")
     if expose > 0 {
-        list_add(av, "-p")
-        list_add(av, "${_itoa(expose)}:${_itoa(expose)}")
+        if no_net == 0 {
+            list_add(av, "-p")
+            list_add(av, "${_itoa(expose)}:${_itoa(expose)}")
+        }
     }
     list_add(av, image)
     if string_length(cmd) > 0 {
@@ -100,6 +119,30 @@ run_argv_net(res_name: string, image: string, cmd: string, expose: int, net: str
         list_add(av, cmd)
     }
     return av
+}
+
+// splice a space-separated flag string into the argv as individual tokens.
+_add_token_args(av: ptr, flags: string) {
+    if string_length(flags) == 0 {
+        return
+    }
+    rest = flags
+    more = 1
+    while more == 1 {
+        sp = string_index_of(rest, " ")
+        if sp < 0 {
+            if string_length(rest) > 0 {
+                list_add(av, rest)
+            }
+            more = 0
+        } else {
+            tok = string_substring(rest, 0, sp)
+            if string_length(tok) > 0 {
+                list_add(av, tok)
+            }
+            rest = string_substring(rest, sp + 1, string_length(rest))
+        }
+    }
 }
 
 // split "K=V,K=V" and append `-e K=V` for each to the argv list.
@@ -184,6 +227,12 @@ up(res_name: string, image: string, cmd: string, expose: int, engine_pref: strin
 // up_net — like up, plus a shared `net` (peers resolve by name) and `env`
 // ("K=V,K=V"). Used for the host-container path so app can reach db by name.
 up_net(res_name: string, image: string, cmd: string, expose: int, net: string, env: string, engine_pref: string) -> string {
+    return up_confined(res_name, image, cmd, expose, net, env, "", engine_pref)
+}
+
+// up_confined — up_net plus `confine`, the lib/confine_linux flag string
+// (cgroup caps + cap-drop/seccomp + netpolicy). The CONFINED host-container path.
+up_confined(res_name: string, image: string, cmd: string, expose: int, net: string, env: string, confine: string, engine_pref: string) -> string {
     eng = engine_resolve(engine_pref)
     if eng == "" {
         return "aeo: no container engine found (need podman or docker on PATH)"
@@ -195,7 +244,7 @@ up_net(res_name: string, image: string, cmd: string, expose: int, net: string, e
     if probe(res_name, "", engine_pref) == 1 {
         return ""
     }
-    av = run_argv_net(res_name, image, cmd, expose, net, env)
+    av = run_argv_confined(res_name, image, cmd, expose, net, env, confine)
     out, status, err = run_capture(eng, av, null)
     list_free(av)
     if err != "" {

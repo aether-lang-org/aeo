@@ -29,6 +29,7 @@ import pf
 import rctl
 import snapshot
 import snapshot_linux
+import confine_linux
 import resource (set_state, get_state, STATE_DOWN, STATE_BOOTING, STATE_UP, STATE_FAILED)
 import host (family, profile)
 import aeo_compose (aeo_orchestration)
@@ -247,7 +248,11 @@ driver_up(nm: string, k: string) -> string {
         // are injected so the workload reaches its dependency's container.
         net = "aeo-${compose.get_system(nm)}"
         _ne = driver_linux.network_ensure(net, "")
-        return driver_linux.up_net(nm, img, compose.get_command(nm), compose.get_expose(nm), net, compose.get_env(nm), "")
+        // CONFINEMENT (the Linux peer of rctl/Capsicum/pf): render limit{} caps,
+        // constrain{} hardening, and netpolicy to podman flags via confine_linux,
+        // so a composition's confinement is substrate-portable.
+        confine = _confine_flags(nm, net)
+        return driver_linux.up_confined(nm, img, compose.get_command(nm), compose.get_expose(nm), net, compose.get_env(nm), confine, "")
     }
     if k == "jail" {
         return driver_bsd.up(nm, compose.get_dataset(nm), "", compose.get_ip(nm), compose.get_command(nm))
@@ -342,6 +347,18 @@ _engine_of(k: string) -> string {
         return "docker"
     }
     return ""
+}
+
+// _confine_flags(nm, net) — render this node's confinement (limit{} caps,
+// constrain{} hardening, netpolicy) to a podman flag string via confine_linux.
+// The substrate-portable seam: the SAME grammar that lib/rctl renders to FreeBSD
+// rctl rules, here renders to Linux cgroup/seccomp/network flags. "" if the node
+// declared no confinement.
+_confine_flags(nm: string, net: string) -> string {
+    rctl = compose.get_rctl(nm)
+    constraints = compose.get_constraints(nm)
+    netpolicy = compose.get_netpolicy(nm)
+    return confine_linux.confine_string(rctl, constraints, netpolicy, net)
 }
 
 // _container_image encodes a build failure as a leading "ERR:" sentinel

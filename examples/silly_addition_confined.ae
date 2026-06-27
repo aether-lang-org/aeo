@@ -1,0 +1,162 @@
+// examples/silly_addition_confined.ae — the CONFINED Linux container demo: the
+// rootless peer of the FreeBSD Capsicum/rctl/pf containment, all three axes at
+// once. Same workload as silly_addition_containers.ae, but db and app declare
+// confinement that the SAME grammar (limit{} + constrain{}) renders to podman
+// cgroup/seccomp/network flags (lib/confine_linux) instead of FreeBSD rctl/
+// Capsicum/pf. Substrate-portable confinement.
+//
+//   system("silly_addition_confined")  (Linux/podman host)
+//     ├─ db   (container) — redis, HARDENED: capped (mem/pids), cap-dropped,
+//     │                      deny_egress (no outbound — can't phone home), read-only
+//     └─ app  (container) — /add service, capped + cap-dropped ──depends──► db
+//
+// THE THREE AXES (mirrors the FreeBSD three-axis showcase):
+//   1. limit{}      -> --memory / --pids-limit  (cgroups: the fork-bomb ceiling,
+//                      the rctl peer — stops a node STARVING the host)
+//   2. constrain{}  -> --cap-drop ALL, --security-opt no-new-privileges
+//                      (the Capsicum peer — a compromised node can't escalate)
+//   3. deny_egress  -> --network none (the pf peer — a pure server that, if owned,
+//                      STILL can't reach out / exfiltrate)
+//
+// db uses deny_egress (a cache answers; it never dials out) — so it's --network
+// none. That means app can't reach db over the network in THIS demo: the point
+// here is to SHOWCASE confinement rendering + enforcement (fork-bomb refused, no
+// egress), not the cache round-trip (silly_addition_containers.ae proves that).
+//
+// SIBLING NOTE: self-contained by design. Do NOT factor the scaffold out.
+
+import aeocha
+import compose (system, container)
+import compose (image, entrypoint, expose, health, depends)
+import compose (limit, limit_mem, limit_maxproc, constrain, grant_fd, deny_egress)
+import compose (get_image, get_rctl, get_constraints, get_netpolicy, describe_tree)
+import std.string (string_length, string_from_int, string_concat, string_contains)
+import std.string   // bare: inlined aeocha calls bare exports unqualified
+import std.os (getenv, run_capture)
+import std.list
+
+exports ( aeo_orchestration )
+
+aeo_orchestration() {
+    system("silly_addition_confined") {
+        // db — a HARDENED cache. All three axes:
+        db = container("db") {
+            image("docker.io/library/redis:alpine")
+            expose(6379)
+            health("redis-cli ping")
+            limit("db") {
+                limit_mem("256m")        // -> --memory 256m
+                limit_maxproc(32)        // -> --pids-limit 32 (fork-bomb ceiling)
+            }
+            constrain("db") {
+                grant_fd("none", "none", "none")   // marks it confined -> cap-drop
+                deny_egress()                       // -> --network none (no phone-home)
+            }
+        }
+
+        // app — capped + cap-dropped (but allowed network: it serves).
+        app = container("app") {
+            entrypoint(<<PY
+                import http.server as h
+                class A(h.BaseHTTPRequestHandler):
+                    def do_GET(self):
+                        p = self.path.strip("/").split("/")
+                        try: b = str(int(p[1]) + int(p[2]))
+                        except: b = "err"
+                        self.send_response(200); self.end_headers(); self.wfile.write(b.encode())
+                    def log_message(self, *a): pass
+                h.HTTPServer(("0.0.0.0", 8080), A).serve_forever()
+PY
+            )
+            expose(8080)
+            health("python -c \"import urllib.request as u; u.urlopen('http://localhost:8080/add/0/0').read()\"")
+            limit("app") {
+                limit_mem("256m")
+                limit_maxproc(64)
+            }
+            constrain("app") {
+                grant_fd("none", "none", "none")   // confined -> cap-drop
+            }
+            depends("db")
+        }
+    }
+}
+
+run_aeo(mode: string) -> string {
+    aeo_orchestration()
+    match (mode) {
+        "check" -> { return _mode_check() }
+        "up"    -> { return _mode_up() }
+        _       -> { return "aeo: unknown AEO_MODE '${mode}' (check|up)" }
+    }
+}
+
+_mode_check() -> string {
+    fw = aeocha.init()
+    aeocha.describe(fw, "confined containers: db (3 axes) <- app (2 axes)") {
+
+        aeocha.describe("confinement is declared (data model)") {
+            aeocha.it("db declares limit caps, a constrain block, and deny_egress") callback {
+                aeocha.assert_str_eq(fw, get_rctl("db"), "memoryuse=256m, maxproc=32", "db limit{} caps")
+                // constrain block recorded + netpolicy has deny_egress.
+                aeocha.assert_true(fw, string_length(get_constraints("db")) > 0, "db is constrained")
+                aeocha.assert_true(fw, _has(get_netpolicy("db"), "egress:DENY-ALL"), "db deny_egress (no outbound)")
+            }
+            aeocha.it("app is capped + constrained (but may serve)") callback {
+                aeocha.assert_str_eq(fw, get_rctl("app"), "memoryuse=256m, maxproc=64", "app limit{} caps")
+                aeocha.assert_true(fw, string_length(get_constraints("app")) > 0, "app is constrained")
+                aeocha.assert_str_eq(fw, _has_s(get_netpolicy("app"), "egress:DENY-ALL"), "0", "app NOT deny_egress (serves)")
+            }
+        }
+    }
+    aeocha.run_summary(fw)
+    return "check: confinement data-model assertions complete"
+}
+
+_mode_up() -> string {
+    rc = _aeo_up()
+    if rc != 0 {
+        return "up: FAILED (aeo up rc=${string_from_int(rc)})"
+    }
+    return "up: confined containers stood up (capped + cap-dropped + db network-isolated)"
+}
+
+main() {
+    m = getenv("AEO_MODE")
+    if string_length(m) == 0 {
+        m = "check"
+    }
+    println(run_aeo(m))
+}
+
+// ---- helpers ----
+_has(s: string, sub: string) -> int {
+    return string_contains(s, sub)
+}
+_has_s(s: string, sub: string) -> string {
+    return string_from_int(string_contains(s, sub))
+}
+
+_aeo_up() -> int {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "AEO_HOME=${_aeo_home()} ${_aeo_bin()} up ${_dsl()}")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    return status
+}
+_aeo_bin() -> string {
+    b = getenv("AEO")
+    if string_length(b) == 0 { return "/tmp/aeo" }
+    return b
+}
+_aeo_home() -> string {
+    h = getenv("AEO_HOME")
+    if string_length(h) == 0 { return string_concat(getenv("HOME"), "/aeo") }
+    return h
+}
+_dsl() -> string {
+    d = getenv("AEO_DSL")
+    if string_length(d) == 0 { return "examples/silly_addition_confined.ae" }
+    return d
+}

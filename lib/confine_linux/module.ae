@@ -1,0 +1,204 @@
+// lib/confine_linux — Linux CONTAINER confinement: the rootless peer of the
+// FreeBSD Capsicum/rctl/pf axes, rendered to podman/docker run flags. Same
+// composition grammar (limit{} + constrain{}), different mechanism per host:
+// FreeBSD -> rctl/Capsicum/pf; Linux -> cgroups/seccomp+caps/network. So a
+// composition's confinement is SUBSTRATE-PORTABLE — the driver picks the renderer.
+//
+//   THREE axes (mirrors the FreeBSD three-axis showcase):
+//   1. cgroup caps (rctl peer)   — limit{} -> --memory / --pids-limit / --cpus.
+//      Stops a node STARVING the host (fork bomb, memory balloon).
+//   2. seccomp/cap-drop (Capsicum peer) — a constrain{} node -> --cap-drop=ALL,
+//      --security-opt=no-new-privileges, --read-only. A compromised container
+//      can't escalate / can't acquire privileges it wasn't given.
+//   3. netpolicy (pf peer)       — deny_egress() -> --network none (no outbound);
+//      otherwise the shared aeo net. Stops a compromised node phoning home.
+//
+//   cgroup_flags(rctl)           -> "--memory 512m --pids-limit 32 ..." (from limit{})
+//   security_flags(constraints)  -> "--cap-drop ALL --security-opt no-new-privileges ..."
+//   net_flags(netpolicy, net)    -> "--network none" | "--network <net>"
+//   confine_argv(rctl, constraints, netpolicy, net) -> a list of all flag tokens
+//
+// All flags verified ROOTLESS on Bazzite 2026-06-27 (cgroup v2, no sudo).
+
+import std.list
+import std.string (string_length, string_contains, string_index_of, string_substring)
+
+exports (
+    cgroup_flags, security_flags, net_flags, confine_argv, confine_string,
+    _kv_value, _split_csv
+)
+
+// ---- axis 1: cgroup caps (from limit{} -> get_rctl: "memoryuse=512M, maxproc=32") ----
+// rctl cap names -> podman flags:
+//   memoryuse=V   -> --memory V        (RAM ceiling; OOM-kills past it)
+//   maxproc=N     -> --pids-limit N    (the fork-bomb ceiling)
+//   pcpu=P        -> --cpus P/100       (pcpu is %, podman --cpus is cores)
+//   vmemoryuse=V  -> (no direct podman flag; --memory covers the practical case)
+//   openfiles=N   -> --ulimit nofile=N:N
+// Returns the flag string ("" if no caps).
+cgroup_flags(rctl: string) -> string {
+    if string_length(rctl) == 0 {
+        return ""
+    }
+    out = ""
+    mem = _kv_value(rctl, "memoryuse")
+    if string_length(mem) > 0 {
+        out = _append(out, "--memory ${mem}")
+    }
+    procs = _kv_value(rctl, "maxproc")
+    if string_length(procs) > 0 {
+        out = _append(out, "--pids-limit ${procs}")
+    }
+    nof = _kv_value(rctl, "openfiles")
+    if string_length(nof) > 0 {
+        out = _append(out, "--ulimit nofile=${nof}:${nof}")
+    }
+    // pcpu is a percentage; podman --cpus is in cores. Leave a cpu cap to the
+    // operator's memory/pids ceilings for v0 (pcpu->cores needs float division
+    // we keep out of the hot path). Documented; can add --cpus later.
+    return out
+}
+
+// ---- axis 2: seccomp / cap-drop (a constrain{} node is confined) ----
+// ANY node with a constrain{} block (non-empty constraints) is hardened:
+//   --cap-drop ALL                       drop every Linux capability
+//   --security-opt no-new-privileges     can't gain privileges via setuid
+//   --security-opt seccomp=<default>     the default syscall filter (podman's)
+// A deny_egress in the netpolicy additionally makes it --read-only-friendly; we
+// add --read-only only when the node declares deny_egress (a pure server that
+// shouldn't even write its own rootfs). Returns "" if the node isn't constrained.
+security_flags(constraints: string, netpolicy: string) -> string {
+    // a node is "confined" if it declared ANY constrain{} content OR a netpolicy.
+    if string_length(constraints) == 0 {
+        if string_length(netpolicy) == 0 {
+            return ""
+        }
+    }
+    out = "--cap-drop ALL --security-opt no-new-privileges"
+    // a deny_egress server is a good candidate for an immutable rootfs.
+    if string_contains(netpolicy, "egress:DENY-ALL") == 1 {
+        out = "${out} --read-only"
+    }
+    return out
+}
+
+// ---- axis 3: network policy (deny_egress -> no network) ----
+// deny_egress() = "reaches out to NOTHING" -> --network none (a pure server with
+// no outbound; if compromised it CANNOT phone home). Otherwise the node joins the
+// shared aeo net (peers resolve by name). egress/ingress whitelisting beyond
+// on/off is a follow-up (podman has no per-flow filter without extra tooling;
+// --network none vs shared is the v0 deny-default).
+net_flags(netpolicy: string, net: string) -> string {
+    if string_contains(netpolicy, "egress:DENY-ALL") == 1 {
+        return "--network none"
+    }
+    if string_length(net) > 0 {
+        return "--network ${net}"
+    }
+    return ""
+}
+
+// confine_argv — all three axes as a flat list of argv TOKENS (split on spaces),
+// ready to splice into the podman run argv. The driver calls this once per node.
+confine_argv(rctl: string, constraints: string, netpolicy: string, net: string) -> ptr {
+    av = list_new()
+    _push_tokens(av, cgroup_flags(rctl))
+    _push_tokens(av, security_flags(constraints, netpolicy))
+    _push_tokens(av, net_flags(netpolicy, net))
+    return av
+}
+
+// confine_string — all three axes as one space-separated flag STRING (the form
+// the driver/runner splice directly; avoids a list-ptr round-trip). "" if the
+// node declared no confinement.
+confine_string(rctl: string, constraints: string, netpolicy: string, net: string) -> string {
+    out = cgroup_flags(rctl)
+    out = _append(out, security_flags(constraints, netpolicy))
+    out = _append(out, net_flags(netpolicy, net))
+    return out
+}
+
+// ---- helpers ----
+
+// _kv_value(s, key) — value of "key=VALUE" inside a comma-list ("a=1, b=2").
+// "" if the key isn't present.
+_kv_value(s: string, key: string) -> string {
+    needle = "${key}="
+    idx = string_index_of(s, needle)
+    if idx < 0 {
+        return ""
+    }
+    start = idx + string_length(needle)
+    rest = string_substring(s, start, string_length(s))
+    // value runs to the next comma (or end).
+    c = string_index_of(rest, ",")
+    if c < 0 {
+        return rest
+    }
+    return string_substring(rest, 0, c)
+}
+
+// split a space-separated flag string into tokens, appending each to `av`.
+_push_tokens(av: ptr, flags: string) {
+    if string_length(flags) == 0 {
+        return
+    }
+    rest = flags
+    more = 1
+    while more == 1 {
+        sp = string_index_of(rest, " ")
+        if sp < 0 {
+            if string_length(rest) > 0 {
+                list_add(av, rest)
+            }
+            more = 0
+        } else {
+            tok = string_substring(rest, 0, sp)
+            if string_length(tok) > 0 {
+                list_add(av, tok)
+            }
+            rest = string_substring(rest, sp + 1, string_length(rest))
+        }
+    }
+}
+
+// split a comma-list into a list of trimmed entries (exported for tests/reuse).
+_split_csv(s: string) -> ptr {
+    av = list_new()
+    if string_length(s) == 0 {
+        return av
+    }
+    rest = s
+    more = 1
+    while more == 1 {
+        c = string_index_of(rest, ",")
+        if c < 0 {
+            list_add(av, _trim(rest))
+            more = 0
+        } else {
+            list_add(av, _trim(string_substring(rest, 0, c)))
+            rest = string_substring(rest, c + 1, string_length(rest))
+        }
+    }
+    return av
+}
+
+_trim(s: string) -> string {
+    n = string_length(s)
+    if n == 0 { return s }
+    // trim a single leading space (the ", " join uses one).
+    if string_index_of(s, " ") == 0 {
+        return string_substring(s, 1, n)
+    }
+    return s
+}
+
+_append(acc: string, piece: string) -> string {
+    if string_length(piece) == 0 {
+        return acc
+    }
+    if string_length(acc) == 0 {
+        return piece
+    }
+    return "${acc} ${piece}"
+}
