@@ -28,6 +28,7 @@ import ipam
 import pf
 import rctl
 import snapshot
+import snapshot_linux
 import resource (set_state, get_state, STATE_DOWN, STATE_BOOTING, STATE_UP, STATE_FAILED)
 import host (family, profile)
 import aeo_compose (aeo_orchestration)
@@ -707,14 +708,23 @@ run_snapshot(tag: string) {
         nm = compose.name_at(i)
         k = compose.get_kind(nm)
         ds = snapshot.dataset_for(nm, k, compose.get_dataset(nm))
-        if ds == "" {
-            println("  ${nm} [${k}] — no dataset, skipped")
-        } else {
+        if ds != "" {
             err = snapshot.snapshot(nm, k, compose.get_dataset(nm), tag)
             if err != "" {
                 println("  ${nm} [${k}] FAILED: ${err}")
             } else {
                 println("  ${nm} [${k}] snapped ${ds}@${tag}")
+            }
+        } else {
+            if snapshot_linux.supports(k) == 1 {
+                lerr = snapshot_linux.snapshot(nm, k, compose.get_image(nm), tag)
+                if lerr != "" {
+                    println("  ${nm} [${k}] FAILED: ${lerr}")
+                } else {
+                    println("  ${nm} [${k}] snapped (${k}) @${tag}")
+                }
+            } else {
+                println("  ${nm} [${k}] — no snapshot mechanism, skipped")
             }
         }
         i = i + 1
@@ -734,14 +744,23 @@ run_rollback(tag: string) {
         nm = compose.name_at(i)
         k = compose.get_kind(nm)
         ds = snapshot.dataset_for(nm, k, compose.get_dataset(nm))
-        if ds == "" {
-            println("  ${nm} [${k}] — no dataset, skipped")
-        } else {
+        if ds != "" {
             err = snapshot.rollback(nm, k, compose.get_dataset(nm), tag)
             if err != "" {
                 println("  ${nm} [${k}] FAILED: ${err}")
             } else {
                 println("  ${nm} [${k}] rolled back to ${ds}@${tag}")
+            }
+        } else {
+            if snapshot_linux.supports(k) == 1 {
+                lerr = snapshot_linux.rollback(nm, k, compose.get_image(nm), tag)
+                if lerr != "" {
+                    println("  ${nm} [${k}] FAILED: ${lerr}")
+                } else {
+                    println("  ${nm} [${k}] rolled back (${k}) @${tag}")
+                }
+            } else {
+                println("  ${nm} [${k}] — no snapshot mechanism, skipped")
             }
         }
         i = i - 1
@@ -759,14 +778,23 @@ run_backup(tag: string, dir: string) {
         nm = compose.name_at(i)
         k = compose.get_kind(nm)
         ds = snapshot.dataset_for(nm, k, compose.get_dataset(nm))
-        if ds == "" {
-            println("  ${nm} [${k}] — no dataset, skipped")
-        } else {
+        if ds != "" {
             err = snapshot.backup(nm, k, compose.get_dataset(nm), tag, dir)
             if err != "" {
                 println("  ${nm} [${k}] FAILED: ${err}")
             } else {
                 println("  ${nm} [${k}] -> ${snapshot.backup_file(dir, nm, tag)}")
+            }
+        } else {
+            if snapshot_linux.supports(k) == 1 {
+                lerr = snapshot_linux.backup(nm, k, compose.get_image(nm), tag, dir)
+                if lerr != "" {
+                    println("  ${nm} [${k}] FAILED: ${lerr}")
+                } else {
+                    println("  ${nm} [${k}] -> ${snapshot_linux.backup_file(dir, nm, tag, k)}")
+                }
+            } else {
+                println("  ${nm} [${k}] — no backup mechanism, skipped")
             }
         }
         i = i + 1
@@ -783,14 +811,23 @@ run_prune(keep: int) {
         nm = compose.name_at(i)
         k = compose.get_kind(nm)
         ds = snapshot.dataset_for(nm, k, compose.get_dataset(nm))
-        if ds == "" {
-            println("  ${nm} [${k}] — no dataset, skipped")
-        } else {
+        if ds != "" {
             err = snapshot.prune(nm, k, compose.get_dataset(nm), keep)
             if err != "" {
                 println("  ${nm} [${k}] FAILED: ${err}")
             } else {
                 println("  ${nm} [${k}] pruned (kept ${string_from_int(keep)})")
+            }
+        } else {
+            if snapshot_linux.supports(k) == 1 {
+                lerr = snapshot_linux.prune(nm, k, compose.get_image(nm), keep)
+                if lerr != "" {
+                    println("  ${nm} [${k}] FAILED: ${lerr}")
+                } else {
+                    println("  ${nm} [${k}] pruned (kept ${string_from_int(keep)})")
+                }
+            } else {
+                println("  ${nm} [${k}] — no prune mechanism, skipped")
             }
         }
         i = i + 1

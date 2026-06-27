@@ -1,0 +1,41 @@
+// test/spec_snapshot_linux.ae — the PURE surface of lib/snapshot_linux: which
+// kinds it handles, the snapshot-image tag, and the per-kind backup artifact
+// path. The live mechanism (podman commit/save, qemu-img, lxc-snapshot) is
+// proven on the box (container round-trip validated on Bazzite 2026-06-27); this
+// pins the pure logic off-box.
+
+import aeocha
+import snapshot_linux (supports, snap_image, backup_file)
+import std.string (string_from_int)
+import std.string   // bare: aeocha's inlined asserts call string.copy unqualified
+
+main() {
+    fw = aeocha.init()
+
+    aeocha.describe(fw, "snapshot_linux (Linux operability, pure surface)") {
+
+        aeocha.it("supports the Linux kinds; not the ZFS ones") callback {
+            aeocha.assert_str_eq(fw, string_from_int(supports("container")), "1", "container")
+            aeocha.assert_str_eq(fw, string_from_int(supports("docker")), "1", "docker")
+            aeocha.assert_str_eq(fw, string_from_int(supports("kvm")), "1", "kvm")
+            aeocha.assert_str_eq(fw, string_from_int(supports("lxc")), "1", "lxc")
+            // jail/bhyve are lib/snapshot's (ZFS) job — NOT this module's.
+            aeocha.assert_str_eq(fw, string_from_int(supports("jail")), "0", "jail -> not here")
+            aeocha.assert_str_eq(fw, string_from_int(supports("bhyve")), "0", "bhyve -> not here")
+        }
+
+        aeocha.it("snap_image tags a committed container aeo-snap/<node>:<tag>") callback {
+            aeocha.assert_str_eq(fw, snap_image("db", "v1"), "aeo-snap/db:v1", "db@v1")
+            aeocha.assert_str_eq(fw, snap_image("app", "nightly"), "aeo-snap/app:nightly", "app@nightly")
+        }
+
+        aeocha.it("backup_file uses the right extension per kind") callback {
+            // kvm: a qcow2 copy (carries internal snapshots). else: a tar (save).
+            aeocha.assert_str_eq(fw, backup_file("/b", "db", "v1", "kvm"), "/b/db-v1.qcow2", "kvm -> .qcow2")
+            aeocha.assert_str_eq(fw, backup_file("/b", "db", "v1", "container"), "/b/db-v1.tar", "container -> .tar")
+            aeocha.assert_str_eq(fw, backup_file("/b", "x", "t", "lxc"), "/b/x-t.tar", "lxc -> .tar")
+        }
+    }
+
+    aeocha.run_summary(fw)
+}
