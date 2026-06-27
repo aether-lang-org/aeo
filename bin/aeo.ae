@@ -96,7 +96,7 @@ main() {
     }
 
     if compose_path == "" {
-        println("usage: aeo [up|down|status|dry-run|snapshot|rollback|exec|restart|backup|prune] <compose.ae> [tag|node cmd...]")
+        println("usage: aeo [up|down|status|dry-run|snapshot|rollback|exec|restart|backup|prune|audit] <compose.ae> [tag|node cmd...]")
         exit(2)
     }
     if cmd != "up" {
@@ -109,8 +109,10 @@ main() {
                                 if cmd != "restart" {
                                     if cmd != "backup" {
                                         if cmd != "prune" {
-                                            println("aeo: unknown subcommand '${cmd}' (want up|down|status|dry-run|snapshot|rollback|exec|restart|backup|prune)")
-                                            exit(2)
+                                            if cmd != "audit" {
+                                                println("aeo: unknown subcommand '${cmd}' (want up|down|status|dry-run|snapshot|rollback|exec|restart|backup|prune|audit)")
+                                                exit(2)
+                                            }
                                         }
                                     }
                                 }

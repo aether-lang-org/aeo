@@ -1,0 +1,271 @@
+// lib/audit — aeo's tamper-evident AUDIT TRAIL: the forensics pillar of
+// "contain malware." Containment BLOCKS; the audit trail OBSERVES — it records
+// every security DECISION aeo makes per node (the confinement posture applied,
+// the attestation verdict, each refusal) into an append-only, HASH-CHAINED log,
+// so a compromised node's rejected attempts are visible after the fact and the
+// record itself can't be silently edited.
+//
+// NB: this is NOT std.audit (that's Aether's in-process sandbox permission ring).
+// This is aeo's INFRASTRUCTURE audit: what posture each ORCHESTRATED node got and
+// what aeo allowed/refused.
+//
+// Tamper-evidence: each line carries hash = sha256(prev_hash + payload). Editing
+// or deleting any past line breaks the chain at that point — `verify` walks the
+// file and reports the first break. A genesis line anchors the chain.
+//
+//   record(node, kind, event, detail)  — append one hash-chained entry.
+//   verify(path)                       — walk the chain; "" if intact, else the
+//                                        first broken seq + reason.
+//   path()                             — the audit log path (AEO_AUDIT or default).
+//
+// Events aeo emits: "attest-pass" / "attest-refuse" (the supply-chain verdict),
+// "confine" (the posture string), "up" / "down" / "refuse".
+
+import std.os (run_capture, getenv)
+import std.list
+import std.string (string_length, string_index_of, string_substring, string_contains, string_char_at, string_from_char)
+
+exports ( record, verify, path, line_for, _sha, _chomp, _jq )
+
+// the audit log path: $AEO_AUDIT, else .aeo/audit.log under cwd (per-deploy).
+path() -> string {
+    p = getenv("AEO_AUDIT")
+    if string_length(p) == 0 {
+        return ".aeo/audit.log"
+    }
+    return p
+}
+
+// record — append ONE hash-chained entry. Reads the last line's hash (the chain
+// tip), builds this entry's payload, hashes (prev_hash + payload), appends
+// "<payload> hash=<h>". Returns "" on success else an error.
+record(node: string, kind: string, event: string, detail: string) -> string {
+    p = path()
+    prev = _last_hash(p)
+    payload = _payload(node, kind, event, detail)
+    h = _sha("${prev}${payload}")
+    line = "${payload} prev=${prev} hash=${h}"
+    // append (create the dir + file). One sh so a failed mkdir/append surfaces.
+    esc = _shq(line)
+    cmd = "mkdir -p $(dirname ${_shq(p)}) && printf '%s\\n' ${esc} >> ${_shq(p)}"
+    out = _sh(cmd)
+    return out
+}
+
+// line_for — the entry payload+hash as it would be written (pure given prev).
+// Exposed for unit tests (the hash chain without touching the filesystem).
+line_for(prev: string, node: string, kind: string, event: string, detail: string) -> string {
+    payload = _payload(node, kind, event, detail)
+    h = _sha("${prev}${payload}")
+    return "${payload} prev=${prev} hash=${h}"
+}
+
+// verify — walk the chain in `path`. Recompute each line's hash from the prior
+// line's hash + its payload; the first mismatch is a tamper. "" if intact.
+verify(p: string) -> string {
+    // read the file; empty/absent -> trivially intact.
+    body = _sh_out("cat ${_shq(p)} 2>/dev/null")
+    if string_length(body) == 0 {
+        return ""
+    }
+    prev = "GENESIS"
+    lines = _split_lines(body)
+    n = list_size(lines)
+    i = 0
+    while i < n {
+        lp = list_get_raw(lines, i)
+        line = "${lp}"
+        if string_length(line) > 0 {
+            payload = _strip_chain(line)
+            want = _sha("${prev}${payload}")
+            got = _field(line, "hash=")
+            if _eq(want, got) == 0 {
+                return "audit: CHAIN BROKEN at entry ${_itoa(i)} — recomputed ${want} but line claims ${got} (tampered/truncated?)"
+            }
+            // also check the line's recorded prev matches our running prev.
+            lprev = _field(line, "prev=")
+            if _eq(lprev, prev) == 0 {
+                return "audit: CHAIN BROKEN at entry ${_itoa(i)} — prev mismatch (line says ${lprev}, expected ${prev})"
+            }
+            prev = got
+        }
+        i = i + 1
+    }
+    return ""
+}
+
+// ---- payload + helpers ----
+
+// the JSON-ish payload (a flat record, jq-greppable). No timestamp from inside
+// (Date.now is unavailable in scripts); the caller/sink can stamp arrival time.
+_payload(node: string, kind: string, event: string, detail: string) -> string {
+    return "{\"node\":\"${_jq(node)}\",\"kind\":\"${_jq(kind)}\",\"event\":\"${_jq(event)}\",\"detail\":\"${_jq(detail)}\"}"
+}
+
+// the chain tip: the hash= of the last line, or "GENESIS" if the file is empty.
+_last_hash(p: string) -> string {
+    last = _sh_out("tail -n 1 ${_shq(p)} 2>/dev/null")
+    last = _chomp(last)
+    if string_length(last) == 0 {
+        return "GENESIS"
+    }
+    h = _field(last, "hash=")
+    if string_length(h) == 0 {
+        return "GENESIS"
+    }
+    return h
+}
+
+// the payload portion of a line (everything before " prev=").
+_strip_chain(line: string) -> string {
+    c = string_index_of(line, " prev=")
+    if c < 0 {
+        return line
+    }
+    return string_substring(line, 0, c)
+}
+
+// value of a "key=VALUE" token, to end-of-line or next space. "" if absent.
+_field(line: string, key: string) -> string {
+    idx = string_index_of(line, key)
+    if idx < 0 {
+        return ""
+    }
+    rest = string_substring(line, idx + string_length(key), string_length(line))
+    sp = string_index_of(rest, " ")
+    if sp < 0 {
+        return rest
+    }
+    return string_substring(rest, 0, sp)
+}
+
+// sha256 of a string (via sha256sum). The chain link.
+_sha(s: string) -> string {
+    out = _sh_out("printf '%s' ${_shq(s)} | sha256sum | cut -d' ' -f1")
+    return _chomp(out)
+}
+
+_split_lines(body: string) -> ptr {
+    av = list_new()
+    rest = body
+    more = 1
+    while more == 1 {
+        nl = string_index_of(rest, "\n")
+        if nl < 0 {
+            if string_length(rest) > 0 {
+                list_add(av, rest)
+            }
+            more = 0
+        } else {
+            list_add(av, string_substring(rest, 0, nl))
+            rest = string_substring(rest, nl + 1, string_length(rest))
+        }
+    }
+    return av
+}
+
+_eq(a: string, b: string) -> int {
+    if string_length(a) != string_length(b) {
+        return 0
+    }
+    if string_length(a) == 0 {
+        return 1
+    }
+    if string_contains(a, b) == 1 {
+        return 1
+    }
+    return 0
+}
+
+// JSON string escape (backslash + quote); the status --json path uses the same.
+// JSON string escape via char CODES (34 = ", 92 = \) — robust vs string_contains
+// quirks on the escape chars themselves.
+_jq(s: string) -> string {
+    out = ""
+    n = string_length(s)
+    i = 0
+    while i < n {
+        c = string_char_at(s, i)
+        if c == 34 {
+            out = "${out}${string_from_char(92)}${string_from_char(34)}"
+        } else {
+            if c == 92 {
+                out = "${out}${string_from_char(92)}${string_from_char(92)}"
+            } else {
+                out = "${out}${string_from_char(c)}"
+            }
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// single-quote for the shell (so JSON braces/quotes survive sh -c).
+_shq(s: string) -> string {
+    out = "'"
+    n = string_length(s)
+    i = 0
+    while i < n {
+        ch = string_substring(s, i, i + 1)
+        if string_contains(ch, "'") == 1 {
+            out = "${out}'\\''"
+        } else {
+            out = "${out}${ch}"
+        }
+        i = i + 1
+    }
+    return "${out}'"
+}
+
+_chomp(s: string) -> string {
+    n = string_length(s)
+    if n == 0 { return s }
+    if string_contains(string_substring(s, n - 1, n), "\n") == 1 {
+        return string_substring(s, 0, n - 1)
+    }
+    return s
+}
+
+_itoa(n: int) -> string {
+    if n == 0 { return "0" }
+    v = n
+    s = ""
+    while v > 0 {
+        d = v - (v / 10) * 10
+        s = "${_digit(d)}${s}"
+        v = v / 10
+    }
+    return s
+}
+_digit(d: int) -> string {
+    if d == 1 { return "1" }
+    if d == 2 { return "2" }
+    if d == 3 { return "3" }
+    if d == 4 { return "4" }
+    if d == 5 { return "5" }
+    if d == 6 { return "6" }
+    if d == 7 { return "7" }
+    if d == 8 { return "8" }
+    if d == 9 { return "9" }
+    return "0"
+}
+
+_sh(cmd: string) -> string {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, cmd)
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    if status != 0 {
+        return out
+    }
+    return ""
+}
+_sh_out(cmd: string) -> string {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, cmd)
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    return out
+}

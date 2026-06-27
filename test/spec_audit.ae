@@ -1,0 +1,58 @@
+// test/spec_audit.ae — the PURE chain logic of lib/audit (the tamper-evident
+// forensics trail): line_for builds a hash-chained entry, and the chain links
+// (each entry's prev = the prior entry's hash). The live record/verify (file +
+// sha256sum + tamper detection) is proven on the box; this pins the pure shape.
+
+import aeocha
+import audit (line_for, _sha, _jq)
+import std.string (string_length, string_contains, string_index_of, string_substring)
+import std.string   // bare: aeocha's inlined asserts call string.copy unqualified
+
+main() {
+    fw = aeocha.init()
+
+    aeocha.describe(fw, "audit (tamper-evident trail, pure chain logic)") {
+
+        aeocha.it("_sha is real sha256 (known vector)") callback {
+            aeocha.assert_str_eq(fw, _sha("hello"),
+                "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824", "sha256(hello)")
+        }
+
+        aeocha.it("line_for embeds the payload + prev + a hash") callback {
+            l = line_for("GENESIS", "db", "container", "attest-pass", "sha256:abc")
+            aeocha.assert_true(fw, string_contains(l, "\"node\":\"db\"") == 1, "carries the node")
+            aeocha.assert_true(fw, string_contains(l, "\"event\":\"attest-pass\"") == 1, "carries the event")
+            aeocha.assert_true(fw, string_contains(l, "prev=GENESIS") == 1, "carries prev")
+            aeocha.assert_true(fw, string_contains(l, "hash=") == 1, "carries the chain hash")
+        }
+
+        aeocha.it("the chain LINKS — entry N's prev is entry N-1's hash") callback {
+            l1 = line_for("GENESIS", "db", "container", "attest-pass", "x")
+            h1 = _hash_of(l1)
+            l2 = line_for(h1, "app", "container", "up", "ok")
+            aeocha.assert_true(fw, string_contains(l2, "prev=${h1}") == 1, "l2.prev == l1.hash (chained)")
+        }
+
+        aeocha.it("a changed payload yields a different hash (tamper sensitivity)") callback {
+            a = _sha("GENESIS-attest-pass")
+            b = _sha("GENESIS-attest-FAKE")
+            same = "1"
+            if string_length(a) != string_length(b) { same = "0" }
+            else { if string_contains(a, b) == 0 { same = "0" } }
+            aeocha.assert_str_eq(fw, same, "0", "different payload -> different hash")
+        }
+
+        aeocha.it("_jq escapes quotes (the JSON payload is safe)") callback {
+            aeocha.assert_str_eq(fw, _jq("a\"b"), "a\\\"b", "quote escaped")
+        }
+    }
+
+    aeocha.run_summary(fw)
+}
+
+// pull the hash= field out of a line (test helper).
+_hash_of(line: string) -> string {
+    idx = string_index_of(line, "hash=")
+    if idx < 0 { return "" }
+    return string_substring(line, idx + 5, string_length(line))
+}

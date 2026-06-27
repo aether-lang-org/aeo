@@ -31,6 +31,7 @@ import snapshot
 import snapshot_linux
 import confine_linux
 import attest
+import audit
 import resource (set_state, get_state, STATE_DOWN, STATE_BOOTING, STATE_UP, STATE_FAILED)
 import host (family, profile)
 import aeo_compose (aeo_orchestration)
@@ -251,8 +252,10 @@ driver_up(nm: string, k: string) -> string {
         if attest.is_attested(pin) == 1 {
             averr = attest.verify(img, pin)
             if averr != "" {
+                _ = audit.record(nm, k, "attest-refuse", pin)   // FORENSICS: a refused boot
                 return averr                       // refuse to boot — loud
             }
+            _ = audit.record(nm, k, "attest-pass", pin)
             img = attest.pinned_ref(img, pin)      // run-by-digest
         }
         // HOST container: put it on a per-system shared network so peers resolve
@@ -264,6 +267,11 @@ driver_up(nm: string, k: string) -> string {
         // constrain{} hardening, and netpolicy to podman flags via confine_linux,
         // so a composition's confinement is substrate-portable.
         confine = _confine_flags(nm, net)
+        // FORENSICS: record the posture this node booted WITH (the audit trail —
+        // what was confined/attested is then provable after the fact).
+        if string_length(confine) > 0 {
+            _ = audit.record(nm, k, "confine", confine)
+        }
         return driver_linux.up_confined(nm, img, compose.get_command(nm), compose.get_expose(nm), net, compose.get_env(nm), confine, "")
     }
     if k == "jail" {
@@ -897,6 +905,34 @@ run_prune(keep: int) {
     }
 }
 
+// run_audit — `aeo audit <compose.ae>`: VERIFY the tamper-evident audit trail
+// (the hash chain) and report. Each recorded security decision (attest verdict,
+// confine posture) is hash-chained; a broken chain means the log was edited /
+// truncated. Prints the path, the chain verdict, and the entry count.
+run_audit() {
+    p = audit.path()
+    println("aeo: audit trail ${p}")
+    cnt = _count_lines(p)
+    println("  entries: ${cnt}")
+    v = audit.verify(p)
+    if v == "" {
+        println("  chain:   INTACT (tamper-evident hash chain verified)")
+    } else {
+        println("  chain:   ${v}")
+    }
+}
+_count_lines(p: string) -> string {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "wc -l < '${p}' 2>/dev/null | tr -d ' \\n' || echo 0")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    if string_length(out) == 0 {
+        return "0"
+    }
+    return out
+}
+
 // run_exec — `aeo exec <compose.ae> <node> <cmd>`: run cmd IN one node, print its
 // stdout. The per-node operability primitive. Node + cmd come from AEO_NODE /
 // AEO_EXEC_CMD (the front-door sets them). Errors loudly if the node isn't in the
@@ -1159,6 +1195,10 @@ main() {
         run_prune(_keep())
         return
     }
+    if cmd == "audit" {
+        run_audit()
+        return
+    }
 
     // Fast-fail host gating before any bring-up or teardown touches a
     // resource. Applies to up, down, and dry-run alike — dry-run is the
@@ -1239,5 +1279,5 @@ _atoi_simple(s: string) -> int {
     return acc
 }
 
-import std.os (os_getenv)
+import std.os (os_getenv, run_capture)
 extern exit(code: int)
