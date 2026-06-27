@@ -138,7 +138,15 @@ no HA — those cross the "aeo is not a platform" line). Config-is-code intact.
 - [x] **enriched `aeo status`** — per node now shows ip / rctl caps / pf netpolicy
       / Capsicum grants / snapshots, only where set. Live state still driver-probed.
 - [ ] Live-validate snapshot/rollback on the box (zfs snapshot a jail, roll it
-      back) once it's back from the storm.
+      back) once it's back from the storm. [the FreeBSD/ZFS side — still pending;
+      box is on Bazzite. The LINUX side is now done + live, see below.]
+- [x] **Linux-side operability** (lib/snapshot_linux) — snapshot/rollback/backup/
+      prune for container/kvm/lxc (the verbs were ZFS-only). container = podman
+      commit -> image; kvm = qemu-img snapshot; lxc = lxc-snapshot. Runner
+      dispatches on kind. LIVE on Bazzite 2026-06-27: container round-trip proven
+      (snapshot -> change /marker.txt -> rollback -> restored), backup -> real
+      .tar artifacts. spec_snapshot_linux 3. Pending live: kvm (needs a qcow2 VM
+      up) + lxc (needs lxc-snapshot added to the NOPASSWD sudoers grant).
 - [x] **`aeo status --json`** — machine-readable status (flat array of node
       objects: name/kind/system/host/depends/state/ip/caps/netpolicy/grants).
       Validated through a real JSON parser on both demos (paths/<-/= chars
