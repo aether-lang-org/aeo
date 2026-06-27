@@ -32,7 +32,7 @@
 
 import aeocha
 import compose (system, container)
-import compose (image, entrypoint, base, expose, health, depends, env, within, every)
+import compose (image, entrypoint, base, expose, health, depends, env, within, every, without)
 import compose (get_image, get_expose, get_depends, describe_tree)
 import std.string (string_length, string_from_int, string_concat)
 import std.string   // bare too: inlined aeocha calls bare exports unqualified
@@ -53,8 +53,12 @@ aeo_orchestration() {
         // (db inherits 30s/500ms; app overrides its own window below).
         within(30s)
         every(500ms)
+        // ...and the within() TWIN: on teardown, wait up to 10s for each node to
+        // VERIFIABLY disappear (not just flip aeo's "down" flag) — FluentSelenium's
+        // without(), the retry-until-gone window.
+        without(10s)
 
-        // db tier — stock redis container. (inherits the system within/every)
+        // db tier — stock redis container. (inherits the system within/every/without)
         db = container("db") {
             image("docker.io/library/redis:alpine")
             expose(6379)

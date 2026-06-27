@@ -569,9 +569,35 @@ run_down() {
         a ! Configure { in_name: nm, in_kind: compose.get_kind(nm) }
         a ! Halt {}
         _await_down(nm, 60)
+        // without(d): the FluentSelenium retry-until-GONE twin. After Halt flips
+        // aeo's own state, VERIFY the node actually disappeared (driver probe stops
+        // finding it), waiting up to the declared window. A node that lingers past
+        // it is reported — teardown is no longer fire-and-assume.
+        _await_gone(nm, compose.get_kind(nm), compose.get_without_ms(nm))
         i = i - 1
     }
     wait_for_idle()
+}
+
+// _await_gone — poll until the node is genuinely gone (driver_probe == 0), up to
+// `window_ms`. window 0 (no without() declared) -> skip (back-compat: the old
+// state-flip teardown). A node still present at the deadline is logged loudly.
+_await_gone(nm: string, k: string, window_ms: int) {
+    if window_ms <= 0 {
+        return
+    }
+    waited = 0
+    step = 250
+    while waited < window_ms {
+        // probe with no health string: 1 if still up/present, 0 if gone.
+        if driver_probe(nm, k, "") == 0 {
+            println("aeo: [${nm}] gone (verified within without window)")
+            return
+        }
+        sleep(step)
+        waited = waited + step
+    }
+    println("aeo: [${nm}] WARNING still present after without window (${string_from_int(window_ms)}ms) — lingering")
 }
 
 // Block until `nm` is up or failed (or `secs` elapse). Returns the state.

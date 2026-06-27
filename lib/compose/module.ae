@@ -37,7 +37,7 @@ exports (
     image, command, dockerfile, health, dataset, ip, depends, env, get_env, attest, get_attest,
     cpus, memory, nic, expose,
     guest_image, network, ssh_key,
-    health_interval, health_budget, within, every, get_within_ms,
+    health_interval, health_budget, within, every, without, get_within_ms, get_without_ms,
     count, name_at, get_system, get_host,
     syscount, sysname_at,
     entrypoint, base,
@@ -88,8 +88,9 @@ exports (
 system(nm: string) -> string {
     config.put("aeo.cmp.cursystem", nm)
     config.put("aeo.cmp.curhost", "")        // entering a system resets host nesting
-    config.put("aeo.cmp.curwithin", "")      // ...and the floating within/every window
-    config.put("aeo.cmp.curevery", "")       //    (FluentSelenium float, scoped per-system)
+    config.put("aeo.cmp.curwithin", "")      // ...and the floating within/every/without
+    config.put("aeo.cmp.curevery", "")       //    windows (FluentSelenium float, per-system)
+    config.put("aeo.cmp.curwithout", "")
     if config.get("aeo.cmp.sysknown.${nm}") == "" {
         s = _syscount()
         config.put("aeo.cmp.sysname.${s}", nm)
@@ -163,6 +164,7 @@ resource(nm: string, k: string) -> string {
     // consumed the float immediately; aeo freezes it at declaration.
     config.put("aeo.cmp.floatwithin.${nm}", config.get("aeo.cmp.curwithin"))
     config.put("aeo.cmp.floatevery.${nm}", config.get("aeo.cmp.curevery"))
+    config.put("aeo.cmp.floatwithout.${nm}", config.get("aeo.cmp.curwithout"))
     return nm
 }
 
@@ -511,8 +513,31 @@ every(_ctx: ptr, d: Duration) {
     config.put("aeo.cmp.interval.${_ctx}", ms)
     config.put("aeo.cmp.curevery", ms)
 }
+// without(d) — the FluentSelenium TWIN of within(): retry-until-GONE. On TEARDOWN,
+// aeo waits up to this window for the node to genuinely DISAPPEAR (driver probe
+// stops finding it), not just for aeo's own "down" flag to flip. Floats + snapshots
+// exactly like within() (a system-scope without() applies to every node below; a
+// node's own wins; frozen at declaration; reset per-system). Stored as ms.
+without(_ctx: ptr, d: Duration) {
+    ms = string_from_int(_dur_ms(d))
+    config.put("aeo.cmp.without.${_ctx}", ms)
+    config.put("aeo.cmp.curwithout", ms)
+}
 // Duration (ns) -> milliseconds.
 _dur_ms(d: Duration) -> int { return d / 1000000 }
+// the node's WITHOUT (teardown-gone) window in ms: own setter, else the floated
+// system default snapshotted at decl, else 0 (unset -> no extra wait).
+get_without_ms(nm: string) -> int {
+    v = config.get("aeo.cmp.without.${nm}")
+    if string_length(v) > 0 {
+        return _to_int(v)
+    }
+    f = config.get("aeo.cmp.floatwithout.${nm}")
+    if string_length(f) > 0 {
+        return _to_int(f)
+    }
+    return 0
+}
 // the node's within window in ms: its OWN setter, else the floated system default
 // (curwithin), else 0 (unset).
 get_within_ms(nm: string) -> int {

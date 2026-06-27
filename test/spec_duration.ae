@@ -4,8 +4,8 @@
 // the budget is DERIVED (window / interval). A Duration is int64 ns -> /1e6 = ms.
 
 import aeocha
-import compose (system, container, image, within, every, health_interval, health_budget,
-                get_interval, get_budget, get_within_ms)
+import compose (system, container, image, within, every, without, health_interval, health_budget,
+                get_interval, get_budget, get_within_ms, get_without_ms)
 import std.string (string_from_int)
 import std.string   // bare: aeocha's inlined asserts call string.copy unqualified
 
@@ -81,6 +81,29 @@ main() {
             system("d6b") { b = container("b") { image("redis") } }   // fresh system, no float
             aeocha.assert_str_eq(fw, string_from_int(get_within_ms("a")), "9000", "d6a floated")
             aeocha.assert_str_eq(fw, string_from_int(get_within_ms("b")), "0", "d6b unset (float reset)")
+        }
+
+        // without() — the FluentSelenium retry-until-GONE twin (teardown wait).
+        // Same float + snapshot + per-system mechanism as within().
+        aeocha.it("without(d) floats + overrides like within (the teardown twin)") callback {
+            system("d7") {
+                without(10s)                                            // floats
+                lingerable = container("lingerable") { image("redis") }
+                fast = container("fast") { image("redis") without(2s) } // own
+            }
+            aeocha.assert_str_eq(fw, string_from_int(get_without_ms("lingerable")), "10000", "floated gone-window")
+            aeocha.assert_str_eq(fw, string_from_int(get_without_ms("fast")), "2000", "own wins")
+            // within and without are INDEPENDENT windows on the same node.
+            system("d8") {
+                both = container("both") { image("redis") within(30s) without(8s) }
+            }
+            aeocha.assert_str_eq(fw, string_from_int(get_within_ms("both")), "30000", "within independent")
+            aeocha.assert_str_eq(fw, string_from_int(get_without_ms("both")), "8000", "without independent")
+        }
+
+        aeocha.it("no without() -> 0 (back-compat: the old state-flip teardown)") callback {
+            system("d9") { plain = container("plain") { image("redis") } }
+            aeocha.assert_str_eq(fw, string_from_int(get_without_ms("plain")), "0", "unset -> no extra wait")
         }
     }
 
