@@ -17,7 +17,10 @@ aeo is **not** a build system and **not** an aeb SDK. It is a third sibling to
 [`aeb`](https://github.com/aether-lang-org/aeb) (the build runner). aeo is
 *built by* aeb and can shell *to* aeb at runtime, across a plain artifact + CLI
 seam. Its DSL philosophy is inherited from the ecosystem — **config IS code**,
-closure-with-setters, no YAML — applied to live infrastructure.
+closure-with-setters, no YAML — applied to live infrastructure. Its containment
+thinking traces back to [The Principles of
+Containment](https://paulhammant.com/2016/12/14/principles-of-containment/) (see
+[below](#principles-of-containment)).
 
 > Status: **working v0.** Host probe, Linux (podman/docker) and FreeBSD (jail)
 > drivers, an actor-based runtime, the compose DSL, host-gating fast-fail, and

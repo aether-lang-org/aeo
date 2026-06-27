@@ -34,7 +34,7 @@ exports (
     bhyve_vm, freebsd_vm, get_flavor, kvm_vm,
     resource,
     container, docker, lxc, kvm, jail, bhyve,
-    image, command, dockerfile, health, dataset, ip, depends, env, get_env,
+    image, command, dockerfile, health, dataset, ip, depends, env, get_env, attest, get_attest,
     cpus, memory, nic, expose,
     guest_image, network, ssh_key,
     health_interval, health_budget,
@@ -172,6 +172,15 @@ bhyve(nm: string)     -> string { return resource(nm, "bhyve") }
 // `${_ctx}` interpolates it back to the name string for the config key.
 image(_ctx: ptr, v: string)   { config.put("aeo.cmp.image.${_ctx}", v) }
 command(_ctx: ptr, v: string) { config.put("aeo.cmp.command.${_ctx}", v) }
+// attest(digest) — the SUPPLY-CHAIN pin: the expected content digest of this
+// node's image (e.g. "sha256:abc..."). aeo verifies the image's ACTUAL digest
+// against this BEFORE boot and refuses on mismatch (fail-closed) — a poisoned /
+// tampered / drifted image never runs. For containers the driver also runs
+// image@<digest> so podman enforces the pin too. "" / unset = unattested (boots,
+// but aeo status flags it as un-verified). Substrate-portable: the same pin can
+// later gate a qcow2 / jail-dataset hash.
+attest(_ctx: ptr, digest: string) { config.put("aeo.cmp.attest.${_ctx}", digest) }
+get_attest(nm: string) -> string  { return config.get("aeo.cmp.attest.${nm}") }
 
 // Inline Dockerfile (heredoc). When set, aeo BUILDS the image from this
 // text and runs the result, instead of pulling image(). Pass it a

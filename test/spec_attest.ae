@@ -1,0 +1,50 @@
+// test/spec_attest.ae — the PURE surface of lib/attest (image attestation, the
+// supply-chain gate): is_attested + pinned_ref (run-by-digest) + tag-stripping.
+// The live verify (resolve actual digest, compare, fail-closed) is proven on the
+// box; this pins the pure logic off-box.
+
+import aeocha
+import attest (is_attested, pinned_ref, verify, attest_state)
+import std.string (string_from_int, string_length)
+import std.string   // bare: aeocha's inlined asserts call string.copy unqualified
+
+main() {
+    fw = aeocha.init()
+
+    aeocha.describe(fw, "attest (image attestation, pure surface)") {
+
+        aeocha.it("is_attested: a pinned digest is attested; empty is not") callback {
+            aeocha.assert_str_eq(fw, string_from_int(is_attested("sha256:abc")), "1", "pinned -> 1")
+            aeocha.assert_str_eq(fw, string_from_int(is_attested("")), "0", "unset -> 0")
+        }
+
+        aeocha.it("pinned_ref builds image@<digest> (run-by-digest), stripping the tag") callback {
+            aeocha.assert_str_eq(fw, pinned_ref("docker.io/library/redis:alpine", "sha256:abc"),
+                "docker.io/library/redis@sha256:abc", "tag stripped, digest pinned")
+            aeocha.assert_str_eq(fw, pinned_ref("alpine", "sha256:def"),
+                "alpine@sha256:def", "untagged + digest")
+            aeocha.assert_str_eq(fw, pinned_ref("redis:alpine", ""), "redis:alpine", "no pin -> as-is")
+        }
+
+        aeocha.it("a registry host:port prefix is NOT mistaken for the tag colon") callback {
+            // localhost:5000/app:v1 -> the tag is :v1 (after the last /), NOT :5000.
+            aeocha.assert_str_eq(fw, pinned_ref("localhost:5000/app:v1", "sha256:x"),
+                "localhost:5000/app@sha256:x", "host:port preserved, tag stripped")
+        }
+
+        aeocha.it("verify with no pinned digest is an internal error (caller guards)") callback {
+            v = verify("docker.io/library/redis:alpine", "")
+            aeocha.assert_true(fw, string_length(v) > 0, "empty pin -> error text")
+        }
+
+        aeocha.it("attest_state names all THREE postures (the audit grep targets)") callback {
+            // pinned -> attested; pulled-but-unpinned -> unpinned (a finding);
+            // built-locally -> unattestable (no upstream digest to pin).
+            aeocha.assert_str_eq(fw, attest_state("sha256:x", "redis", 0), "attested", "pinned")
+            aeocha.assert_str_eq(fw, attest_state("", "redis", 0), "unpinned", "pulled, no pin")
+            aeocha.assert_str_eq(fw, attest_state("", "", 1), "unattestable", "built locally")
+        }
+    }
+
+    aeocha.run_summary(fw)
+}

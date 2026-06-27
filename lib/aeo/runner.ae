@@ -30,6 +30,7 @@ import rctl
 import snapshot
 import snapshot_linux
 import confine_linux
+import attest
 import resource (set_state, get_state, STATE_DOWN, STATE_BOOTING, STATE_UP, STATE_FAILED)
 import host (family, profile)
 import aeo_compose (aeo_orchestration)
@@ -242,6 +243,17 @@ driver_up(nm: string, k: string) -> string {
         img = _container_image(nm, "")
         if string_starts_err(img) == 1 {
             return _strip_err(img)
+        }
+        // ATTESTATION (supply-chain gate): if attest("sha256:...") is pinned,
+        // verify the image's ACTUAL digest BEFORE boot and REFUSE on mismatch
+        // (fail-closed). Then run image@<digest> so podman enforces the pin too.
+        pin = compose.get_attest(nm)
+        if attest.is_attested(pin) == 1 {
+            averr = attest.verify(img, pin)
+            if averr != "" {
+                return averr                       // refuse to boot — loud
+            }
+            img = attest.pinned_ref(img, pin)      // run-by-digest
         }
         // HOST container: put it on a per-system shared network so peers resolve
         // each other BY NAME (app -> db:6379). env() pairs (e.g. REDIS_HOST=db)
@@ -614,6 +626,36 @@ _status_detail(nm: string, k: string) {
     if snaps != "" {
         println("      snaps: ${_oneline(snaps)}")
     }
+    // ATTESTATION posture — shown for EVERY container node, including the
+    // unattested ones (an "unattestable" / "unpinned" node is exactly what a
+    // supply-chain audit greps for; silence would hide it).
+    if _is_container(k) == 1 {
+        st = _attest_state(nm)
+        pin = compose.get_attest(nm)
+        if pin != "" {
+            println("      attest: ${st} (${pin})")
+        } else {
+            println("      attest: ${st}")
+        }
+    }
+}
+
+// a node whose image is built locally (entrypoint/dockerfile) has no upstream
+// digest -> "unattestable". A pulled image() with no pin -> "unpinned".
+_attest_state(nm: string) -> string {
+    built = 0
+    if compose.get_entrypoint(nm) != "" {
+        built = 1
+    }
+    if compose.get_dockerfile(nm) != "" {
+        built = 1
+    }
+    return attest.attest_state(compose.get_attest(nm), compose.get_image(nm), built)
+}
+_is_container(k: string) -> int {
+    if k == "container" { return 1 }
+    if k == "docker"    { return 1 }
+    return 0
 }
 
 // Collapse a newline-separated list to a comma-joined one-liner for status.
@@ -676,7 +718,11 @@ _status_json() {
         obj = "${obj}\"ip\":\"${_jq(compose.get_ip(nm))}\","
         obj = "${obj}\"caps\":\"${_jq(compose.get_rctl(nm))}\","
         obj = "${obj}\"netpolicy\":\"${_jq(compose.get_netpolicy(nm))}\","
-        obj = "${obj}\"grants\":\"${_jq(compose.get_constraints(nm))}\""
+        obj = "${obj}\"grants\":\"${_jq(compose.get_constraints(nm))}\","
+        // attestation posture: "attested"|"unpinned"|"unattestable" + the pin.
+        // A CI gate / audit can fail on attestation!="attested" for prod nodes.
+        obj = "${obj}\"attestation\":\"${_jq(_attest_state(nm))}\","
+        obj = "${obj}\"attest_digest\":\"${_jq(compose.get_attest(nm))}\""
         obj = "${obj}}"
         if i == 0 {
             out = "${out}${obj}"

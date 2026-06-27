@@ -1,0 +1,174 @@
+// lib/attest — image ATTESTATION: verify a node's image content digest against an
+// operator-pinned expected digest BEFORE boot, and refuse on mismatch
+// (fail-closed). The supply-chain pillar of "impregnable": nothing else verifies
+// an image, so a poisoned / tampered / silently-drifted golden image would boot
+// trusted. attest() pins the expected sha256; this gates the boot on it.
+//
+// FAIL-CLOSED is the whole point: an UNVERIFIABLE image (can't resolve its
+// digest) is a FAILURE, not a pass — "couldn't check" must never read as "ok".
+//
+//   verify(image, expected)  -> "" if the image's actual digest == expected;
+//                               else an error (mismatch OR can't-resolve). The
+//                               boot gate: driver calls this, refuses on non-"".
+//   actual_digest(image)     -> the image's real content digest ("" if unknown).
+//   pinned_ref(image, digest)-> "name@sha256:..." (run-by-digest: podman ALSO
+//                               enforces the pin, so a swapped local image fails).
+//   is_attested(expected)    -> 1 if a digest was pinned (for status/reporting).
+//
+// container images: podman/docker digests. (qcow2/jail-dataset hashing is the
+// same shape — actual_digest swaps the probe — a documented follow-up.)
+
+import std.os (run_capture)
+import std.list
+import std.string (string_length, string_contains, string_index_of, string_substring)
+
+exports ( verify, actual_digest, pinned_ref, is_attested, attest_state, _chomp )
+
+is_attested(expected: string) -> int {
+    if string_length(expected) == 0 {
+        return 0
+    }
+    return 1
+}
+
+// attest_state(pin, image, built) — classify a node's supply-chain posture into
+// one of THREE explicit, GREPPABLE states (so an audit can find each):
+//   "attested"     — a digest is pinned (attest("sha256:...")); verified at boot.
+//   "unpinned"     — a PULLED image() with NO pin: the operator COULD attest it
+//                    but didn't — a finding (grep target: "attestation=unpinned").
+//   "unattestable" — built from entrypoint()/dockerfile(): there is no upstream
+//                    digest to pin THIS way, so it's structurally unattestable by
+//                    image-digest (grep target: "attestation=unattestable").
+// Making "unattestable" a NAMED state (not a silent absence) is the point: a
+// supply-chain audit greps for it instead of inferring it.
+//   built = 1 if the node's image is built locally (entrypoint/dockerfile set).
+attest_state(pin: string, image: string, built: int) -> string {
+    if string_length(pin) > 0 {
+        return "attested"
+    }
+    if built == 1 {
+        return "unattestable"
+    }
+    return "unpinned"
+}
+
+// actual_digest — the image's REAL content digest via `podman image inspect`.
+// Tries the local store; if absent, a `podman pull` first (so first-boot can
+// resolve a not-yet-pulled image). "" if it genuinely can't be determined.
+actual_digest(image: string) -> string {
+    d = _inspect_digest(image)
+    if string_length(d) > 0 {
+        return d
+    }
+    // not local yet — pull, then re-inspect.
+    _p = _sh("podman pull ${image} >/dev/null 2>&1")
+    return _inspect_digest(image)
+}
+
+// verify(image, expected) — the BOOT GATE. "" iff actual == expected. Fail-closed:
+// an empty expected is a programming error here (caller checks is_attested first);
+// an unresolvable actual is a FAILURE (refuse), not a skip.
+verify(image: string, expected: string) -> string {
+    if string_length(expected) == 0 {
+        return "attest: verify called with no pinned digest (internal)"
+    }
+    actual = actual_digest(image)
+    if string_length(actual) == 0 {
+        return "attest: REFUSING '${image}' — cannot resolve its digest to verify against ${expected} (fail-closed: unverifiable != trusted)"
+    }
+    if _digest_eq(actual, expected) == 1 {
+        return ""
+    }
+    return "attest: DIGEST MISMATCH for '${image}' — pinned ${expected} but image is ${actual} (poisoned/tampered/drifted? refusing to boot)"
+}
+
+// pinned_ref — "image@<digest>" so podman runs EXACTLY that content. Strips any
+// existing tag (name:tag@digest is invalid). Lets the engine enforce the pin in
+// addition to aeo's pre-check (defense in depth).
+pinned_ref(image: string, digest: string) -> string {
+    if string_length(digest) == 0 {
+        return image
+    }
+    base = _strip_tag(image)
+    return "${base}@${digest}"
+}
+
+// ---- helpers ----
+
+// `podman image inspect <image> --format {{.Digest}}` -> "sha256:..." or "".
+_inspect_digest(image: string) -> string {
+    out = _sh_out("podman image inspect ${image} --format '{{.Digest}}' 2>/dev/null")
+    return _chomp(out)
+}
+
+// digest equality — exact, after chomping. Both are "sha256:hex".
+_digest_eq(a: string, b: string) -> int {
+    if string_length(a) != string_length(b) {
+        return 0
+    }
+    if string_contains(a, b) == 1 {
+        return 1
+    }
+    return 0
+}
+
+// strip a ":tag" from an image ref, preserving a registry "host:port/" prefix.
+// "docker.io/library/redis:alpine" -> "docker.io/library/redis".
+_strip_tag(image: string) -> string {
+    // the tag colon is AFTER the last "/". Find the last slash, then a colon past it.
+    slash = _last_index(image, "/")
+    tail_start = 0
+    if slash >= 0 {
+        tail_start = slash + 1
+    }
+    tail = string_substring(image, tail_start, string_length(image))
+    c = string_index_of(tail, ":")
+    if c < 0 {
+        return image                      // no tag
+    }
+    // keep everything up to the tag colon.
+    return string_substring(image, 0, tail_start + c)
+}
+
+_last_index(s: string, sub: string) -> int {
+    last = -1
+    i = 0
+    n = string_length(s)
+    while i < n {
+        rest = string_substring(s, i, n)
+        c = string_index_of(rest, sub)
+        if c < 0 {
+            return last
+        }
+        last = i + c
+        i = last + 1
+    }
+    return last
+}
+
+_chomp(s: string) -> string {
+    n = string_length(s)
+    if n == 0 { return s }
+    // trim a single trailing newline.
+    if string_index_of(string_substring(s, n - 1, n), "\n") == 0 {
+        return string_substring(s, 0, n - 1)
+    }
+    return s
+}
+
+_sh(cmd: string) -> string {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, cmd)
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    return out
+}
+_sh_out(cmd: string) -> string {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, cmd)
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    return out
+}
