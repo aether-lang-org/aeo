@@ -1,0 +1,64 @@
+// test/spec_duration.ae — aether DURATION LITERALS woven into the aeo DSL, the
+// FluentSelenium within()/secs() idiom on aeo's grain. `within(30s) every(500ms)`
+// expresses a health-retry as WALL-CLOCK time (not a hand-computed attempt count);
+// the budget is DERIVED (window / interval). A Duration is int64 ns -> /1e6 = ms.
+
+import aeocha
+import compose (system, container, image, within, every, health_interval, health_budget,
+                get_interval, get_budget, get_within_ms)
+import std.string (string_from_int)
+import std.string   // bare: aeocha's inlined asserts call string.copy unqualified
+
+main() {
+    fw = aeocha.init()
+
+    aeocha.describe(fw, "duration literals in the aeo DSL (within/every)") {
+
+        aeocha.it("within(30s) every(500ms) -> interval 500ms, derived budget 60") callback {
+            system("d1") {
+                db = container("db") {
+                    image("redis")
+                    within(30s)
+                    every(500ms)
+                }
+            }
+            aeocha.assert_str_eq(fw, string_from_int(get_interval("db")), "500", "every(500ms) -> 500")
+            aeocha.assert_str_eq(fw, string_from_int(get_within_ms("db")), "30000", "within(30s) -> 30000ms")
+            // budget = window/interval = 30000/500 = 60 (the FluentSelenium within semantics)
+            aeocha.assert_str_eq(fw, string_from_int(get_budget("db")), "60", "derived attempts")
+        }
+
+        aeocha.it("within(5s) with default 1s interval -> budget 5") callback {
+            system("d2") {
+                svc = container("svc") {
+                    image("redis")
+                    within(5s)
+                }
+            }
+            aeocha.assert_str_eq(fw, string_from_int(get_budget("svc")), "5", "5s / 1s default = 5")
+        }
+
+        aeocha.it("an explicit health_budget still WINS over within (back-compat)") callback {
+            system("d3") {
+                old = container("old") {
+                    image("redis")
+                    health_interval(250)
+                    health_budget(12)
+                    within(99s)
+                }
+            }
+            aeocha.assert_str_eq(fw, string_from_int(get_interval("old")), "250", "int setter honored")
+            aeocha.assert_str_eq(fw, string_from_int(get_budget("old")), "12", "explicit budget wins")
+        }
+
+        aeocha.it("no tuning -> the defaults (1s interval, 60 attempts)") callback {
+            system("d4") {
+                bare = container("bare") { image("redis") }
+            }
+            aeocha.assert_str_eq(fw, string_from_int(get_interval("bare")), "1000", "default interval")
+            aeocha.assert_str_eq(fw, string_from_int(get_budget("bare")), "60", "default budget")
+        }
+    }
+
+    aeocha.run_summary(fw)
+}

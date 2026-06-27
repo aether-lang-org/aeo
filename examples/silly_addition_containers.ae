@@ -32,7 +32,7 @@
 
 import aeocha
 import compose (system, container)
-import compose (image, entrypoint, base, expose, health, depends, env)
+import compose (image, entrypoint, base, expose, health, depends, env, within, every)
 import compose (get_image, get_expose, get_depends, describe_tree)
 import std.string (string_length, string_from_int, string_concat)
 import std.string   // bare too: inlined aeocha calls bare exports unqualified
@@ -86,6 +86,11 @@ PY
             // Health via PYTHON (always in the app container) — NOT curl, which
             // python:3-alpine doesn't ship. Probes the service's own HTTP.
             health("python -c \"import urllib.request as u; u.urlopen('http://localhost:8080/add/0/0').read()\"")
+            // Retry the health probe for up to 30s, every 500ms (the FluentSelenium
+            // within()/secs() idiom — duration literals, not a hand-computed attempt
+            // count). aeo derives the attempt budget from within/every.
+            within(30s)
+            every(500ms)
             depends("db")    // app starts after db (dependency-ordered)
         }
     }

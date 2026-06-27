@@ -37,7 +37,7 @@ exports (
     image, command, dockerfile, health, dataset, ip, depends, env, get_env, attest, get_attest,
     cpus, memory, nic, expose,
     guest_image, network, ssh_key,
-    health_interval, health_budget,
+    health_interval, health_budget, within, every, get_within_ms,
     count, name_at, get_system, get_host,
     syscount, sysname_at,
     entrypoint, base,
@@ -475,6 +475,26 @@ depends(_ctx: ptr, on: string) { config.put("aeo.cmp.depends.${_ctx}", on) }
 health_interval(_ctx: ptr, ms: int) { config.put("aeo.cmp.interval.${_ctx}", string_from_int(ms)) }
 health_budget(_ctx: ptr, n: int)    { config.put("aeo.cmp.budget.${_ctx}", string_from_int(n)) }
 
+// DURATION-typed health tuning — the FluentSelenium within()/secs() idiom, on
+// aeo's grain. Aether has first-class duration literals (10s, 250ms, 2m), so:
+//   within(d)  — keep retrying the health probe for up to this WALL-CLOCK window
+//                (the total budget, expressed as time not attempt-count — like
+//                FluentSelenium's within(secs(5))). Stored as ms.
+//   every(d)   — the interval BETWEEN probes, as a duration (the duration form of
+//                health_interval). Stored as ms.
+// A Duration is int64 nanoseconds under the hood, so `/ 1000000` -> ms. The runner
+// derives the attempt budget from within/every (see get_budget). Operators write
+// `within(30s) every(500ms)` instead of computing attempt counts by hand.
+within(_ctx: ptr, d: Duration) { config.put("aeo.cmp.within.${_ctx}", string_from_int(_dur_ms(d))) }
+every(_ctx: ptr, d: Duration)  { config.put("aeo.cmp.interval.${_ctx}", string_from_int(_dur_ms(d))) }
+// Duration (ns) -> milliseconds.
+_dur_ms(d: Duration) -> int { return d / 1000000 }
+get_within_ms(nm: string) -> int {
+    v = config.get("aeo.cmp.within.${nm}")
+    if string_length(v) == 0 { return 0 }
+    return _to_int(v)
+}
+
 // --- reader helpers (the runner consumes these) ----------------------
 
 count() -> int {
@@ -711,11 +731,22 @@ get_interval(nm: string) -> int {
 }
 
 get_budget(nm: string) -> int {
+    // an explicit attempt budget wins.
     v = config.get("aeo.cmp.budget.${nm}")
-    if string_length(v) == 0 {
-        return 60
+    if string_length(v) > 0 {
+        return _to_int(v)
     }
-    return _to_int(v)
+    // else, if within(d) set a wall-clock window, derive attempts = window/interval
+    // (FluentSelenium within(): retry for that long, at the probe interval).
+    w = get_within_ms(nm)
+    if w > 0 {
+        iv = get_interval(nm)
+        if iv <= 0 { iv = 1000 }
+        a = w / iv
+        if a < 1 { a = 1 }
+        return a
+    }
+    return 60
 }
 
 // std.string lacks a to_int wrapper in this surface; parse digits.
