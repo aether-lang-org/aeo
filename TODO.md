@@ -148,8 +148,15 @@ aeo's own verbs; the inline "Proxmox-X" notes just point at the familiar analog.
       commit -> image; kvm = qemu-img snapshot; lxc = lxc-snapshot. Runner
       dispatches on kind. LIVE on Bazzite 2026-06-27: container round-trip proven
       (snapshot -> change /marker.txt -> rollback -> restored), backup -> real
-      .tar artifacts. spec_snapshot_linux 3. Pending live: kvm (needs a qcow2 VM
-      up) + lxc (needs lxc-snapshot added to the NOPASSWD sudoers grant).
+      .tar artifacts. spec_snapshot_linux 3.
+      - [x] kvm validated 2026-06-27: offline snapshot (v1/v2 on a qcow2) + PRUNE
+            keep-N (seeded a/b/c, keep=2 -> {b,c}, dropped oldest). FOUND: kvm
+            snapshot is OFFLINE-ONLY — qemu write-locks a running VM's qcow2
+            ("Failed to get shared write lock"), unlike ZFS/podman (live). The
+            driver now returns an actionable "aeo down first" message (_qemu_offline).
+      - [ ] lxc live: needs `lxc-snapshot` added to the NOPASSWD sudoers grant
+            (only create/start/stop/info/attach/destroy/ls granted today). One line,
+            like the lxc-* grant already made.
 - [x] **`aeo status --json`** — machine-readable status (flat array of node
       objects: name/kind/system/host/depends/state/ip/caps/netpolicy/grants).
       Validated through a real JSON parser on both demos (paths/<-/= chars
