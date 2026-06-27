@@ -244,14 +244,17 @@ wired yet; mapped here as candidate kinds. Ordered by how cleanly they'd land:
 
 ## Cross-cutting / smaller
 
-- [ ] **BUG: single-container composition doesn't boot** — a system with ONE
-      container node prints `aeo: stack up` but never creates the container
-      (`podman ps -a` shows nothing). The two-container path
-      (silly_addition_containers.ae) works fine, so it's specific to a 1-node
-      compose. Found 2026-06-27 while live-testing attestation (worked around by
-      proving attestation on the 2-container demo). Suspect the runner's
-      bring-up loop / actor wiring short-circuits for a single node. Not yet
-      diagnosed.
+- [x] **NOT A BUG: "single-container doesn't boot" was a test-harness artifact.**
+      Investigated 2026-06-27 and traced to the END: a 1-node compose DOES boot
+      fine (`aeo up justdb.ae` -> [db] up -> container RUNNING). The earlier
+      "quirk" was MY fault — test demos written via SSH heredocs with `\"` inside
+      double-quoted commands landed on the box with BACKSLASH-ESCAPED quotes
+      (`system(\"justdb\")`), so `system()`/`container()` got mangled names,
+      resources registered under bad keys, and `compose.count()` came back 0 ->
+      run_up's loop did nothing -> vacuous "stack up". Clean-quoted files (all the
+      real demos, and any scp'd file) register + boot correctly. LESSON: write
+      .ae test files locally + scp them, or use a quoted heredoc delimiter
+      (`<<'EOF'`) — never an unquoted SSH heredoc with `\"`.
 - [ ] **Behavioral end-to-end on the box**: one session that does the pf
       bite-step + RACCT reboot, then runs the apex and validates BOTH pf deny
       and rctl deny live (the two pending acceptance tests together).
