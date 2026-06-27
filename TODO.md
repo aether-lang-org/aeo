@@ -297,15 +297,17 @@ wired yet; mapped here as candidate kinds. Ordered by how cleanly they'd land:
 - [ ] aether#929/#586/#744 CLOSED (narrowing/Duration/module-global soundness).
       aeo not exposed today (no module-scope `var` 64-bit cells; durations convert
       ns->ms-int immediately). Commented on #929 with the corroborating near-miss.
-- [ ] **aether#937 (module `var` not persisted across import)** — OPEN, repro'd
-      on 0.327 (`setc(7)` then `getc()` reads back 0 from an imported module). aeo
-      IMMUNE: it uses ZERO module-level `var`s — ALL ambient state (cursystem/
-      curhost, the within/without float snapshots, audit) goes through std.config
-      (the C-extern process-global KV), which DOES persist across imports (proved
-      the contrast). 2nd module-global bug this week aeo dodged via config, not
-      var — worth keeping as a design rule: **ambient/cross-module state = config,
-      never a module var.** #937 is the LAST blocker (after #934) for a fluent
-      aeocha facade's ambient current_fw cell. Commented on #937 with the contrast.
+- [ ] **aether#937 (module `var` not persisted across import) FIXED in ae 0.328**
+      — verified read-back=7 (was 0). aeo was immune anyway (zero module vars; all
+      ambient state via std.config — kept as a design rule + memory). With #934
+      (0.327) + #937 (0.328) BOTH fixed, the full fluent-facade shape now builds +
+      runs end-to-end: verified `matchers.expect_int(5).to_equal(5).to_be_gt(0)`
+      across the import boundary with an ambient cur_fw cell ([myspec] ok lines).
+- [ ] **NOW UNBLOCKED: fluent aeocha facade + aeo spec sweep.** #934+#937 fixed,
+      so aeocha can ship `expect_int(x).to_equal(5).to_be_gt(0)` (chainable matchers
+      + an ambient fw cell). That's an AEOCHA change; THEN a mechanical aeo sweep
+      of ~18 specs from `aeocha.assert_str_eq(fw, got, want, msg)` to the fluent
+      form. Real readability win, now actionable.
 - [ ] **aether#934 (cross-module UFCS) FIXED in ae 0.327** — verified end-to-end:
       `b.bump()` AND `b.bump().bump()` resolve + run across the import boundary
       (was the exact failure we commented on). Unblocks a FLUENT aeocha facade
