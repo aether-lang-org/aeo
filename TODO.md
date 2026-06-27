@@ -297,3 +297,12 @@ wired yet; mapped here as candidate kinds. Ordered by how cleanly they'd land:
 - [ ] aether#929/#586/#744 CLOSED (narrowing/Duration/module-global soundness).
       aeo not exposed today (no module-scope `var` 64-bit cells; durations convert
       ns->ms-int immediately). Commented on #929 with the corroborating near-miss.
+- [ ] **aether#934 (cross-module UFCS) FIXED in ae 0.327** — verified end-to-end:
+      `b.bump()` AND `b.bump().bump()` resolve + run across the import boundary
+      (was the exact failure we commented on). Unblocks a FLUENT aeocha facade
+      (`expect_int(x).to_equal(5).to_be_gt(0)`) — which would replace aeo's verbose
+      `aeocha.assert_str_eq(fw, got, want, msg)` across ~18 specs. That's an AEOCHA
+      change (add the chainable facade), then a mechanical aeo spec sweep. aeo's
+      OWN DSL is block-setter (container("db"){within(30s)}), not method-chain, so
+      not directly blocked — but the readability win on the specs is real.
+      (Compiler bump to 0.327: full aeo suite + demos re-checked, no regression.)
