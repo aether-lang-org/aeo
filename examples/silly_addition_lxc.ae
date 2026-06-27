@@ -1,0 +1,205 @@
+// examples/silly_addition_lxc.ae — the REAL LXC (system-container) cell. Unlike
+// the podman demos (APP containers via driver_linux), this uses driver_lxc and
+// the classic lxc-* tools: a SYSTEM container — a full-OS userland (alpine) under
+// its own root, booted with its own init. The genuine `lxc` kind.
+//
+//   system("silly_addition_lxc")  (on a Linux host with lxc + lxcbr0 up)
+//     ├─ db   (lxc) — an alpine system container
+//     └─ app  (lxc) — an alpine system container ──depends──► db
+//
+// vs the grid siblings (which are all podman/VM substrates):
+//   silly_addition_containers.ae = -VMM+podman (app containers on the host)
+//   silly_addition_jails.ae      = FreeBSD jails (the BSD system-container peer)
+//   THIS one                     = Linux LXC system containers (the jails-peer
+//                                  on Linux: a full-OS container, not an app one)
+//
+// LXC ≈ the Linux analog of a FreeBSD jail: OS-level virtualization, its own
+// init/userland, lighter than a VM, heavier (more complete) than an app
+// container. driver_lxc shells lxc-create/start/info/attach/destroy via self-sudo.
+//
+// HONEST scope: a stock alpine LXC has no redis/python pre-installed, so this demo
+// proves the LXC SUBSTRATE — boot + containment (each container its own root via
+// lxc-attach) + dependency ordering — not the /add cache service (that needs
+// in-container provisioning, a future step like the kvm_podman prepared-image
+// caveat). The arithmetic-over-HTTP story lives in the podman/VM demos.
+//
+// HOST PREREQS (Bazzite, verified 2026-06-27):
+//   - lxc-* tools installed; NOPASSWD sudoers for /usr/bin/lxc-{create,start,
+//     stop,info,attach,destroy,ls} (driver_lxc self-sudo).
+//   - the LXC default bridge up: `sudo systemctl enable --now lxc-net` (lxcbr0).
+//
+// SIBLING NOTE: shares the mode scaffold with the other demos by DESIGN — these
+// are deliberately SELF-CONTAINED. Do NOT factor the shared scaffold out.
+
+import aeocha
+import compose (system, lxc)
+import compose (image, health, depends)
+import compose (get_image, get_depends, describe_tree)
+import std.string (string_length, string_from_int, string_concat, string_char_at, string_substring)
+import std.string   // bare too: inlined aeocha calls bare exports unqualified
+import std.os (getenv, run_capture)
+import std.list
+
+exports ( aeo_orchestration )
+
+// ---- the composition — two alpine LXC system containers, db <- app ----
+// Each is a full-OS alpine container (its own init/root). app depends on db
+// (ordering edge). `image` is the download-template "dist:release". `aeo up`
+// calls this.
+aeo_orchestration() {
+    system("silly_addition_lxc") {
+        db = lxc("db") {
+            image(_image())
+            health("test -d /etc")     // a liveness probe runnable in stock alpine
+        }
+        app = lxc("app") {
+            image(_image())
+            health("test -d /etc")
+            depends("db")              // app starts after db (dependency-ordered)
+        }
+    }
+}
+
+// ---- MODES ----
+//   check  — (DEFAULT) data-model assertions only; no deploy. Runs anywhere.
+//   up     — `aeo up`, leave the containers STANDING. No checks.
+//   suite  — `aeo up` + a live containment probe, then TEAR DOWN.
+run_aeo(mode: string) -> string {
+    aeo_orchestration()
+    match (mode) {
+        "check" -> { return _mode_check() }
+        "up"    -> { return _mode_up() }
+        "suite" -> { return _mode_suite() }
+        _       -> { return "aeo: unknown AEO_MODE '${mode}' (check|up|suite)" }
+    }
+}
+
+// CHECK — data-model assertions, in-process, no deploy (the default).
+_mode_check() -> string {
+    fw = aeocha.init()
+
+    aeocha.describe(fw, "lxc system containers: db(alpine) <- app(alpine)") {
+
+        aeocha.describe("declaration (data model)") {
+            aeocha.it("resolves to two LXC system containers with a dependency edge") callback {
+                img = _image()
+                want = string_concat(string_concat(
+                    "system silly_addition_lxc:\n",
+                    "  lxc db [image=${img}]\n"),
+                    "  lxc app [image=${img}] -> db")
+                aeocha.assert_str_eq(fw, describe_tree(), want, "resolved lxc tree snapshot")
+            }
+
+            aeocha.it("both are LXC of the same image; app depends on db") callback {
+                aeocha.assert_str_eq(fw, get_image("db"), _image(), "db image (dist:release)")
+                aeocha.assert_str_eq(fw, get_image("app"), _image(), "app image")
+                aeocha.assert_str_eq(fw, get_depends("app"), "db", "app ◄ db")
+            }
+        }
+    }
+
+    aeocha.run_summary(fw)
+    return "check: lxc data-model assertions complete"
+}
+
+// UP — deploy the containers, LEAVE THEM STANDING. No checks.
+_mode_up() -> string {
+    rc = _aeo_up()
+    if rc != 0 {
+        return "up: FAILED (aeo up rc=${string_from_int(rc)})"
+    }
+    return "up: lxc system containers stood up + left running (no checks)"
+}
+
+// SUITE — deploy, a live CONTAINMENT probe (each container shows its OWN root),
+// then TEAR DOWN.
+_mode_suite() -> string {
+    rc = _aeo_up()
+    if rc != 0 {
+        return "suite: deploy FAILED (rc=${string_from_int(rc)})"
+    }
+    fw = aeocha.init()
+    aeocha.describe(fw, "live lxc (containment)") {
+        aeocha.it("each container runs alpine under its OWN root (lxc-attach)") callback {
+            // attach into db, read its alpine-release — proves a contained,
+            // running system container (not the host).
+            rel = _exec("db", "cat /etc/alpine-release")
+            aeocha.assert_true(fw, string_length(rel) > 0, "db is a running alpine container (got release '${_chomp(rel)}')")
+        }
+    }
+    aeocha.run_summary(fw)
+    _aeo_down()
+    return "suite: live containment probe ran, containers TORN DOWN"
+}
+
+main() {
+    m = getenv("AEO_MODE")
+    if string_length(m) == 0 {
+        m = "check"
+    }
+    println(run_aeo(m))
+}
+
+// ---- helpers ----
+
+// the LXC image as the download-template "dist:release". AEO_LXC_IMAGE overrides.
+_image() -> string {
+    v = getenv("AEO_LXC_IMAGE")
+    if string_length(v) == 0 {
+        return "alpine:3.21"
+    }
+    return v
+}
+
+_aeo_up() -> int {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "AEO_HOME=${_aeo_home()} ${_aeo_bin()} up ${_dsl()}")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    return status
+}
+_aeo_down() {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "AEO_HOME=${_aeo_home()} ${_aeo_bin()} down ${_dsl()}")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+}
+// `aeo exec <dsl> <node> <cmd>` — capture a command's stdout from inside a node.
+_exec(node: string, cmd: string) -> string {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "AEO_HOME=${_aeo_home()} ${_aeo_bin()} exec ${_dsl()} ${node} ${cmd}")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    return out
+}
+_aeo_bin() -> string {
+    b = getenv("AEO")
+    if string_length(b) == 0 {
+        return "/tmp/aeo"
+    }
+    return b
+}
+_aeo_home() -> string {
+    h = getenv("AEO_HOME")
+    if string_length(h) == 0 {
+        return string_concat(getenv("HOME"), "/aeo")
+    }
+    return h
+}
+_dsl() -> string {
+    d = getenv("AEO_DSL")
+    if string_length(d) == 0 {
+        return "examples/silly_addition_lxc.ae"
+    }
+    return d
+}
+// trim a trailing newline for tidy messages.
+_chomp(s: string) -> string {
+    n = string_length(s)
+    if n == 0 { return s }
+    if string_char_at(s, n - 1) == 10 { return string_substring(s, 0, n - 1) }
+    return s
+}

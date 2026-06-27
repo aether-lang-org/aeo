@@ -1,0 +1,220 @@
+// lib/driver_lxc — REAL LXC (system-container) backend.
+//
+// Distinct from driver_linux (podman/docker APP containers): LXC is a SYSTEM
+// container — a full-OS userland under its own root, started via the classic
+// lxc-* tools. This is the genuine `lxc` kind (previously the runner mis-routed
+// `lxc` to podman; this driver makes it real).
+//
+// Contract mirrors driver_bsd: idempotent up/down + a liveness probe +
+// exec_capture, all shelling the lxc-* tools through self-sudo (`sudo -n
+// /usr/bin/lxc-*`), since LXC create/start need root. The operator pre-authorizes
+// the lxc-* binaries NOPASSWD (see the sudoers note); the LXC default bridge
+// (lxcbr0 via `systemctl enable --now lxc-net`) must be up for container
+// networking. Verified rootful on Bazzite 2026-06-27.
+//
+//   up    — if `lxc-info -n NAME` shows RUNNING, no-op; else lxc-create from the
+//           download template (image "dist:release", e.g. "alpine:3.21") + lxc-start.
+//   down  — lxc-stop + lxc-destroy -f; an absent container is success.
+//   probe — 1 if `lxc-info -n NAME` State is RUNNING (+ optional health via
+//           lxc-attach), else 0.
+//   exec  — `lxc-attach -n NAME -- /bin/sh -c CMD`, capturing stdout.
+
+import std.os (run_capture)
+import std.list
+import std.string (string_length, string_index_of, string_substring, string_contains)
+
+exports (
+    name,
+    up, down, probe, exec_capture,
+    create_argv, start_argv, stop_argv, destroy_argv, info_argv, attach_argv,
+    image_dist, image_release
+)
+
+name() -> string { return "lxc" }
+
+// --- image "dist:release" -> the download-template -d/-r args ----------------
+// "alpine:3.21" -> dist "alpine", release "3.21". No ':' -> dist, release "".
+image_dist(image: string) -> string {
+    c = string_index_of(image, ":")
+    if c < 0 {
+        return image
+    }
+    return string_substring(image, 0, c)
+}
+image_release(image: string) -> string {
+    c = string_index_of(image, ":")
+    if c < 0 {
+        return ""
+    }
+    return string_substring(image, c + 1, string_length(image))
+}
+
+// --- pure argv builders (unit-testable; the actual lxc-* invocations) --------
+
+// lxc-create -n NAME -B dir -t download -- -d DIST -r REL -a amd64
+create_argv(res_name: string, image: string) -> ptr {
+    av = list_new()
+    list_add(av, "-n")
+    list_add(av, res_name)
+    list_add(av, "-B")
+    list_add(av, "dir")
+    list_add(av, "-t")
+    list_add(av, "download")
+    list_add(av, "--")
+    list_add(av, "-d")
+    list_add(av, image_dist(image))
+    list_add(av, "-r")
+    list_add(av, image_release(image))
+    list_add(av, "-a")
+    list_add(av, "amd64")
+    return av
+}
+
+start_argv(res_name: string) -> ptr {
+    av = list_new()
+    list_add(av, "-n")
+    list_add(av, res_name)
+    return av
+}
+
+stop_argv(res_name: string) -> ptr {
+    av = list_new()
+    list_add(av, "-n")
+    list_add(av, res_name)
+    return av
+}
+
+destroy_argv(res_name: string) -> ptr {
+    av = list_new()
+    list_add(av, "-f")
+    list_add(av, "-n")
+    list_add(av, res_name)
+    return av
+}
+
+info_argv(res_name: string) -> ptr {
+    av = list_new()
+    list_add(av, "-n")
+    list_add(av, res_name)
+    return av
+}
+
+// lxc-attach -n NAME -- /bin/sh -c CMD
+attach_argv(res_name: string, cmd: string) -> ptr {
+    av = list_new()
+    list_add(av, "-n")
+    list_add(av, res_name)
+    list_add(av, "--")
+    list_add(av, "/bin/sh")
+    list_add(av, "-c")
+    list_add(av, cmd)
+    return av
+}
+
+// --- exec'ing entry points ---------------------------------------------------
+
+// Bring the LXC container up idempotently. `image` is "dist:release" (e.g.
+// "alpine:3.21"). Returns "" on success else an error.
+up(res_name: string, image: string) -> string {
+    if probe(res_name, "", "") == 1 {
+        return ""
+    }
+    if string_length(image) == 0 {
+        return "aeo: lxc '${res_name}' has no image() set (want dist:release, e.g. alpine:3.21)"
+    }
+    // create (if the container isn't defined yet — lxc-create errors loudly if it
+    // already exists, which we tolerate: a defined-but-stopped one just needs start)
+    cav = create_argv(res_name, image)
+    _co, _cs, _ce = _sudo_lxc("lxc-create", cav)
+    list_free(cav)
+    // start
+    sav = start_argv(res_name)
+    out, status, err = _sudo_lxc("lxc-start", sav)
+    list_free(sav)
+    if err != "" {
+        return "aeo: lxc-start spawn failed for '${res_name}': ${err}"
+    }
+    // verify it actually reached RUNNING (start can exit 0 yet fail to spawn).
+    if probe(res_name, "", "") != 1 {
+        return "aeo: lxc '${res_name}' did not reach RUNNING after start (lxcbr0 up? lxc-net running?)"
+    }
+    return ""
+}
+
+// Tear down: stop + destroy. Absent container == success.
+down(res_name: string) -> string {
+    if probe(res_name, "", "") == 1 {
+        sav = stop_argv(res_name)
+        _so, _ss, _se = _sudo_lxc("lxc-stop", sav)
+        list_free(sav)
+    }
+    dav = destroy_argv(res_name)
+    _do, _ds, _de = _sudo_lxc("lxc-destroy", dav)
+    list_free(dav)
+    return ""
+}
+
+// Liveness. 1 if lxc-info reports State: RUNNING (and the health command, when
+// given, exits 0 under lxc-attach). Plain int (like the other drivers' probe).
+probe(res_name: string, health: string, _unused: string) -> int {
+    iav = info_argv(res_name)
+    out, status, err = _sudo_lxc("lxc-info", iav)
+    list_free(iav)
+    if err != "" {
+        return 0
+    }
+    if string_contains(out, "RUNNING") == 0 {
+        return 0
+    }
+    if string_length(health) == 0 {
+        return 1
+    }
+    hav = attach_argv(res_name, health)
+    hout, hstatus, herr = _sudo_lxc("lxc-attach", hav)
+    list_free(hav)
+    if herr != "" {
+        return 0
+    }
+    if hstatus == 0 {
+        return 1
+    }
+    return 0
+}
+
+// exec_capture — run `cmd` inside the container via lxc-attach, return stdout
+// ("" on failure). The per-node operability primitive for `aeo exec <lxc> <cmd>`.
+exec_capture(res_name: string, cmd: string) -> string {
+    av = attach_argv(res_name, cmd)
+    out, status, err = _sudo_lxc("lxc-attach", av)
+    list_free(av)
+    if err != "" {
+        return ""
+    }
+    if status != 0 {
+        return ""
+    }
+    return out
+}
+
+// --- privilege: self-sudo ----------------------------------------------------
+// `sudo -n /usr/bin/<tool> <args>` — the lxc-* tools are the operator's NOPASSWD
+// grants. Builds the FULL argv [-n, /usr/bin/<tool>, ...argv] and passes it
+// DIRECTLY to run_capture("sudo", ...) — NOT interpolated into an `sh -c` string.
+// (Interpolating a list-element ptr with "${a}" yields its ADDRESS, not the
+// string — the bug that bit driver_bsd's _sudo_run; run_capture takes the argv
+// list as-is, exactly like driver_vm's qemu exec.) Returns (out, status, err).
+_sudo_lxc(tool: string, argv: ptr) -> {
+    full = list_new()
+    list_add(full, "-n")
+    list_add(full, "/usr/bin/${tool}")
+    n = list_size(argv)
+    i = 0
+    while i < n {
+        a = list_get_raw(argv, i)     // raw ptr to the stored string
+        _ = list_add_raw(full, a)     // copy the element ptr verbatim (no string interp)
+        i = i + 1
+    }
+    out, status, err = run_capture("sudo", full, null)
+    list_free(full)
+    return out, status, err
+}

@@ -20,6 +20,7 @@
 import std.config
 import std.string (string_length, string_substring, string_index_of)
 import driver_linux
+import driver_lxc
 import driver_bsd
 import driver_vm
 import compose
@@ -220,11 +221,9 @@ driver_up(nm: string, k: string) -> string {
         return driver_linux.up(nm, img, compose.get_command(nm), compose.get_expose(nm), "docker")
     }
     if k == "lxc" {
-        img = _container_image(nm, "")
-        if string_starts_err(img) == 1 {
-            return _strip_err(img)
-        }
-        return driver_linux.up(nm, img, compose.get_command(nm), compose.get_expose(nm), "")
+        // REAL LXC system container (driver_lxc), not podman. image() is the
+        // download-template "dist:release" (e.g. "alpine:3.21").
+        return driver_lxc.up(nm, compose.get_image(nm))
     }
     if k == "container" {
         // NESTED container: if it lives INSIDE a VM (get_host != ""), aeo
@@ -300,7 +299,7 @@ driver_exec(nm: string, k: string, cmd: string) -> string {
         return driver_linux.exec_capture(nm, cmd, "docker")
     }
     if k == "lxc" {
-        return driver_linux.exec_capture(nm, cmd, "")
+        return driver_lxc.exec_capture(nm, cmd)
     }
     return ""
 }
@@ -315,6 +314,9 @@ driver_down(nm: string, k: string) -> string {
     if k == "kvm" {
         return driver_vm.down("kvm", nm)
     }
+    if k == "lxc" {
+        return driver_lxc.down(nm)
+    }
     return driver_linux.down(nm, _engine_of(k))
 }
 
@@ -327,6 +329,9 @@ driver_probe(nm: string, k: string, health: string) -> int {
     }
     if k == "kvm" {
         return driver_vm.probe("kvm", nm, health)
+    }
+    if k == "lxc" {
+        return driver_lxc.probe(nm, health, "")
     }
     return driver_linux.probe(nm, health, _engine_of(k))
 }
