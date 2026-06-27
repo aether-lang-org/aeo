@@ -1,516 +1,269 @@
-# aeo — design doc
+# aeo — design doc (as built)
 
-Status: **implementation underway** (was a pre-impl sketch). The two open
-decisions are now RESOLVED — **1B** (native Aether supervision) and **2A**
-(actor per resource) — and a working v0 is committed: host probe, Linux
-(podman/docker) + FreeBSD (jail) drivers, the actor-based runtime, the
-compose DSL, host-gating fast-fail, and the `aeo [up|down|status]
-<compose.ae>` front-door. Proven green end-to-end on Linux/podman; jail
-driver proven on FreeBSD short of the privileged boot. See `LLM.md` for the
-current state and the Aether constraints navigated; this doc remains the
-design source of truth. Sibling to `aether` (the language), `aeb` (the
-build runner). Lives at `~/scm/aeo/`.
+The design of what aeo **is**, as implemented and live-proven (ae 0.328,
+2026-06-27). An earlier version of this doc proposed a grammar and left two open
+decisions; both are resolved and the grammar evolved in building it. This
+describes the real system. For the user tour see [`README.md`](./README.md), for
+the working surface see [`examples/`](./examples/), for the LLM primer +
+footguns see [`LLM.md`](./LLM.md), for the honest per-item scorecard see
+[`TODO.md`](./TODO.md).
 
 ## One paragraph
 
-aeo is an **infrastructure orchestrator**: a tool that stands up and tears
-down a *deliberate tree* of VMs and containers — FreeBSD jails + bhyve VMs,
-Linux LXC/Docker + KVM VMs — from a single Aether composition script run as
-`aeo compose.ae`. It is **not** a build system and **not** an aeb SDK. It is
-a third sibling tool, born already-spun-out (the way `aether-ui` and
-`servirtium-vcr` ended up), built *by* aeb and able to shell *to* aeb at
-runtime across a boring artifact + CLI seam. Its DSL philosophy is inherited
-wholesale from the Aether ecosystem — **config IS code**, closure-with-setters,
-no YAML/HCL parser — applied to live infrastructure instead of builds.
+aeo is an **infrastructure orchestrator**: from a single Aether composition it
+stands up, keeps coherent, confines, and tears down a deliberate *tree* of
+compute nodes — FreeBSD jails + bhyve VMs, Linux podman/docker containers + LXC
+system containers + KVM VMs. Bring-up is dependency-ordered and gated on
+**health**; teardown is reverse-order and **verifies** disappearance. Its
+purpose is the thing that distinguishes it from a generic orchestrator:
+**trees of compute nodes that contain malware and are impregnable to attack** —
+every node confinable (resource caps, cap-drop/seccomp, deny-default network),
+attestable (image digest verified before boot, fail-closed), and audited
+(tamper-evident hash chain). aeo is the third sibling to `aether` (the language)
+and `aeb` (the build runner), built by aeb, shelling to aeb at runtime.
 
-## Why aeo is separate from aeb (not an SDK inside it)
+## Why aeo is separate from aeb (the load-bearing decision)
 
-This is the load-bearing decision. aeb has a deep architectural commitment
-that aeo's core feature *violates on purpose*:
+aeb has an architectural commitment that aeo's core feature *violates on
+purpose*:
 
-> **`build.dep()` is a runtime no-op.** The DAG is built entirely from
-> textual extraction *before* any `.ae` file runs. Deps are data, not
-> procedure. — aeb/LLM.md
+> **`build.dep()` is a runtime no-op.** The DAG is built entirely from textual
+> extraction *before* any `.ae` file runs. Deps are data, not procedure. — aeb/LLM.md
 
 aeb is **declare-then-schedule**: the graph is static text, grep-extracted,
-topo-sorted, then nodes run as isolated `_static` subprocesses coordinating
-only through on-disk `.rc` markers. A node cannot hold a runtime reference to
-another node, let alone block on its liveness.
+topo-sorted, then nodes run as isolated subprocesses coordinating through
+on-disk markers. A node cannot hold a runtime reference to another, let alone
+block on its liveness.
 
-aeo's signature feature — `vm(a).wait_for_it_to_be_up()` — is the exact
-opposite: a **live handle, in one running process's memory, with imperative
-runtime control flow** (spawn, poll, block, proceed). That is `state` +
-sequencing + liveness *at runtime*. Forcing it into aeb would smuggle
-procedure into a system whose key invariant is "deps are data, not
-procedure." Different grain of computation ⇒ different tool.
+aeo's signature feature is the exact opposite: a node comes up, and aeo **blocks
+on its health** — a live reference, in one running process, with imperative
+control flow (spawn, poll, block, proceed). That is sequencing + liveness *at
+runtime*. Forcing it into aeb would smuggle procedure into a system whose key
+invariant is "deps are data." Different grain ⇒ different tool.
 
-### Division of labor, stated cleanly
+| | aeb | aeo |
+|---|---|---|
+| grain | static DAG of artifacts | imperative orchestration of live nodes |
+| dep | data (runtime no-op) | runtime reference (a node is live) |
+| time | build-time | run-time lifecycle (up / healthy / confined / down) |
+| invoke | `aeb target:name` | `aeo up compose.ae` |
+| one-liner | "build the tree" | "stand the tree up, keep it coherent, contain it" |
 
-|                   | aeb                                    | aeo                                          |
-|-------------------|----------------------------------------|----------------------------------------------|
-| Computation grain | Static DAG of build artifacts          | Imperative orchestration of live resources   |
-| dep semantics     | Data (grep-extractable, runtime no-op) | Runtime references (`vm(a)` is a live handle) |
-| Sequencing        | Topo-sort, then parallel subprocesses  | In-script control flow, `wait_for_*`, actors |
-| Time model        | Build-time                             | Run-time / lifecycle (up, healthy, down)     |
-| Invocation        | `aeb target:name`                      | `aeo compose.ae`                             |
-| State             | `.rc` markers on disk                  | Live resource state in one process           |
-| Honest one-liner  | "build the tree"                       | "stand the tree up and keep it coherent"     |
+**Do NOT let aeo grow aeb's graph features.** No static DAG, topo-sort, or build
+cache in aeo — that work is aeb's; aeo shells out (`run_capture("aeb", …)`). The
+moment aeo reimplements a static DAG it has become a second aeb and the factoring
+rots. aeo's value is *only* the runtime + containment layer.
 
-aeo is to infrastructure what aeb is to builds — **same DSL philosophy,
-different time axis.** They rhyme deliberately, so an operator who reads
-aeb's `.build.ae` grammar reads an aeo `compose.ae` instantly.
+## The architecture, as built
 
-### Do NOT let aeo grow aeb's graph features
+### The compose DSL — config IS code
 
-If aeo ever wants topo-sort / affected-target / build-caching, that work
-*is aeb's* — aeo should shell out to aeb, not reimplement it. aeo's entire
-reason to exist is the **runtime lifecycle layer aeb refuses to have**:
-`wait_for_*`, health probes, ordering-by-liveness-not-by-artifact,
-teardown-in-reverse. The moment aeo reimplements a static DAG, it has become
-a second aeb and the clean split rots.
+A composition is an ordinary Aether module exporting `aeo_orchestration()` (no
+args). The kind is the verb; a trailing block configures it. It's real Aether —
+control flow, env lookups, conditionals around the declarations. There is **no
+config parser**: the composition is run, not parsed.
 
-## Repo topology — aeo is its own repo, its own binary
+```aether
+import compose (system, container)
+import compose (image, health, depends, within, limit, limit_maxproc, constrain, deny_egress)
+exports ( aeo_orchestration )
+
+aeo_orchestration() {
+    system("web") {
+        within(30s)                                   // health-retry window for the tree
+        db = container("db") {
+            image("docker.io/library/redis:alpine")
+            health("redis-cli ping")
+            limit("db")     { limit_maxproc(32) }     // cgroup fork-bomb ceiling
+            constrain("db") { deny_egress() }          // -> --network none
+        }
+        app = container("app") {
+            image("docker.io/library/myapp:latest")
+            health("curl -fsS localhost:8080/healthz")
+            depends(db)                                // db up + healthy first
+        }
+    }
+}
+```
+
+The DSL is closure-with-setters, **single-arg** (Aether is fixed-arity — repeat
+the call for more), pure accumulation into a process-global KV (`std.config`).
+`system(name){…}` opens a system; `container`/`jail`/`bhyve_vm`/… open nodes;
+nesting (`bhyve_vm("x"){ container("app"){…} }`) records a containment edge
+(`get_host`). The grammar is *substrate-agnostic*: a `kind` the host can't run is
+a fast, loud error at eval time, not a silent no-op three nodes deep.
+
+(History: the proposed grammar threaded a `cap` through every handle —
+`jail(cap, "db")`, `aeo(cap)` — as capability injection. That is **not built**;
+today's openers are `kind(name){…}` and `aeo_orchestration()` is cap-less. The
+DI intent survives in spirit — the front-door grants the composition its
+authority — but not as a literal `cap` parameter.)
+
+### The runtime — one actor per node (Decision 2A, built)
+
+Each declared node becomes one **Aether actor** (`Resource`) with a small
+protocol: `Configure{nm, kind}` sets its identity → `Boot{}` drives
+`driver_up` then a `within()`-bounded health poll → `Halt{}` drives
+`driver_down`. State machine: `down → booting → up → failed`. Because `main`
+cannot await an actor reply, the actor publishes its state through a **config-KV
+state bridge** (`set_state`/`get_state`) that `main` polls — this is the
+legitimate main↔actor channel, not a workaround.
+
+Bring-up walks declaration order, spawning+booting each node whose deps are `up`,
+blocking on health before proceeding. Teardown walks reverse order and — the
+FluentSelenium `without()` twin — **verifies** each node is gone (probe until
+absent), not merely flips a flag.
+
+### The front-door — native supervision + codegen (Decision 1B, built)
+
+`bin/aeo.ae` is native Aether (no bash trampoline). A real Aether constraint
+shapes it: **actors are single-compilation-unit only** — `actor`/`message` defs
+and their `spawn`/`!` sites must live in the file with `main` and do NOT cross
+`import`. So the resource actor can't be a plain importable lib. The front-door
+therefore **codegens by staging a build dir**:
+
+1. copy `lib/` into a work dir;
+2. install the operator's compose file as the `aeo_compose` module
+   (it must define `aeo_orchestration()`);
+3. copy `lib/aeo/runner.ae` (which holds the inlined actor + `main`) as the
+   top-level `run.ae`;
+4. `ae build run.ae --lib lib` → a composition binary;
+5. run it under `os.run_supervised` (own process group, signal forwarding, group
+   reap). A Ctrl-C during bring-up forwards to the whole tree; the operator then
+   runs `aeo down` (Aether exposes no general in-process `sigaction`, so
+   supervision is via the supervised-child model, not an in-process trap).
+
+`examples/` files are the hand-written shape of that staged unit. On an immutable
+host where `ae` isn't on the runtime PATH, an `ae` container-shim builds inside a
+toolchain container (`docs/build-in-container.md`).
+
+### Substrate independence (keep this true)
+
+aeo's DSL/runtime layer is coupled to **nothing**. bhyve/jail are one substrate;
+the same composition drives KVM, LXC, podman/docker — only the **leaf command**
+changes per backend. `kind(...)` is a setter, never a hardcoded assumption; a
+Linux-container node may `depends` on a BSD-jail node and the ordering layer does
+not care about kernel. The unification is at the DSL + runtime layer; underneath
+sit N per-backend drivers, each doing the load-bearing 80%: **idempotent up/down
++ a liveness probe**, genuinely different code per kernel.
+
+"BSD **and** Linux from one composition" is real via (A) nested virt (aeo boots a
+bhyve/KVM VM node, then runs a container *inside* it — the kernel boundary
+crossed as one nesting edge; the `*_podman` demos do this, executing one level),
+or (B) remote hosts via the resident agent (future — see Nesting). A single
+single-kernel host can only *describe* both; only one kind boots there.
+
+## The containment architecture (the purpose)
+
+This is what aeo is *for*. Six axes; the design intent is that they share **one
+substrate-portable grammar** that each driver renders to its host's mechanism.
+
+### Two grammar blocks, two renderers
+
+The operator writes the same `limit{}` and `constrain{}` blocks regardless of
+substrate; the composition records them substrate-agnostically (`get_rctl`,
+`get_constraints`, `get_netpolicy`); the driver renders:
+
+| Grammar | FreeBSD renderer | Linux renderer |
+|---|---|---|
+| `limit{}` (caps) | `lib/rctl` → rctl rules | `lib/confine_linux` → `--memory`/`--pids-limit` (cgroups) |
+| `constrain{}` grants | Capsicum fd grants | `--cap-drop ALL --security-opt no-new-privileges` |
+| `constrain{}` netpolicy (`egress`/`deny_egress`) | `lib/pf` → pf anchor | podman network tier (`none` / `--internal` / shared) |
+
+So a composition's confinement is **portable**: the driver picks the renderer.
+`lib/confine_linux.confine_string2(rctl, constraints, netpolicy, …)` produces the
+podman flag string; the runner splices it into `up_confined`.
+
+### The six axes — design + live state
+
+- **Resource caps (don't starve the host).** `limit{}` → cgroups (Linux) / rctl
+  (FreeBSD). LIVE: a fork-bomb in a `--pids-limit 32` node is *refused*; rctl
+  caps live on a GhostBSD jail.
+- **Confinement (don't escalate).** `constrain{}` → cap-drop/seccomp (Linux) /
+  Capsicum (FreeBSD, where bhyve self-confines). LIVE: `podman inspect` shows
+  `CapDrop=ALL`.
+- **Network policy (don't reach out).** `egress`/`ingress`/`deny_egress` →
+  three Linux tiers (`--network none` for deny_egress; an `--internal` podman net
+  for peer-only egress — reaches the named peer, not the internet; shared
+  otherwise) / pf on FreeBSD. LIVE on Linux: a `deny_egress` node has no network
+  namespace; a peer-egress node reaches its peer but not the internet. This
+  **sidesteps** the one red axis below.
+- **Image attestation (trust only what you pinned).** `attest("sha256:…")` →
+  the driver verifies the image's actual digest before boot, **fail-closed**
+  (an unresolvable digest is a refusal, not a skip), and runs `image@<digest>`.
+  Three greppable states: `attested` / `unpinned` / `unattestable`. LIVE: a
+  mismatched digest is refused at boot.
+- **Audit trail (observe, tamper-evidently).** Every attest/confine decision is
+  appended to a hash-chained log (`hash = sha256(prev + payload)`); `aeo audit`
+  verifies the chain. LIVE: an edited entry is caught.
+- **pf inter-VM network delivery (FreeBSD).** The one **red** axis: pf doesn't
+  compose with `if_bridge` for inter-VM filtering (a known kernel bug). Rulegen
+  is correct + unit-tested; live delivery is broken. The Linux per-flow netpolicy
+  (routed/`--internal` networks, no bridge) is the design's answer and works.
+
+### Nesting — the principle the post treats as defining
+
+The grammar nests, the data model records containment, the preflight gates a
+nested node against its guest substrate, and the nest **executes one level** (a
+container inside a bhyve/KVM VM, built+run in the guest). What's not yet built is
+*recursive, depth-agnostic* nesting. The design for that is **aeo-agent**
+(`docs/aeo-agent.md`): rather than aeo reaching *through* a boundary (ssh-ing in
+— the directionality the containment post calls a disaster), the container hands
+its contained an agent; that agent carries orchestration deeper, receiving the
+instructions for its node and everything below, and handing instructions to its
+children's agents. Same actor protocol at every level, so no node knows its
+depth — "further restricted without knowledge of its nesting depth."
+
+## Day-2 operability (lifecycle & state ops)
+
+Beyond up/down, aeo is operable like Proxmox *without becoming a platform* (no
+web UI, no daemon, no HA — those cross the line). Verbs:
+`snapshot`/`rollback`/`backup`/`prune` (ZFS for jail/bhyve via `lib/snapshot`;
+podman-commit / qemu-img / lxc-snapshot for the Linux kinds via
+`lib/snapshot_linux`), `exec`/`restart` (per-node), and enriched `status`
+(per-node ip/caps/netpolicy/grants/attestation, `--json` for a CI gate). Each
+substrate has its own honest semantics (kvm/lxc snapshots are offline; podman is
+live) encoded in the driver.
+
+## The seam to aeb
+
+Boring on purpose: **artifacts on disk + a CLI invocation.** aeb produces an
+image/disk in `target/<module>/`; aeo boots a node around it. Mid-composition aeo
+can `run_capture("aeb", ["app:image"], env)` to build something it then deploys.
+Not an in-process binding — the value-add over shell-out is unproven.
+
+## Repo topology & invariants
 
 ```
 ~/scm/aether   the language; produces `ae`, `aetherc`, libaether.a
-~/scm/aeb      build runner; its OWN binary; built from Aether
-~/scm/aeo      orchestrator; its OWN binary; built BY aeb; calls aeb at runtime
+~/scm/aeb      build runner; built from Aether
+~/scm/aeo      THIS repo; its own binary; built BY aeb (or `ae build`); calls aeb at runtime
+~/scm/aeocha   the test framework aeo's specs use
 ```
 
-**aeo is a second binary artifact — but NOT one produced in the aeb repo.**
-Reasons:
-
-1. **It violates aeb's own "no domain-specific in core" rule.** aeo is not a
-   build SDK; it is a different domain (run-time infra lifecycle). Worse than
-   domain-specific-to-aeb — it is off aeb's domain entirely.
-2. **Dependency direction forbids it.** aeo is *built by* aeb and at runtime
-   *shells out to* aeb. If aeo lived in aeb's repo, that repo would acquire
-   conceptual + CI dependencies on `bhyve` / `jail` / `ssh` / `libvirt` —
-   backends with nothing to do with building software. Separate repos keep
-   aeb small and substrate-free; aeo carries the infra weight.
-3. **Precedent.** `aether-ui` (was `contrib/aether_ui/`) and `servirtium-vcr`
-   (was `std.http.server.vcr`) both spun OUT once they became their own
-   thing, and now consume Aether the way external users do (install +
-   `$(ae cflags)`). aeo should be born already-spun-out.
-
-Edges: build-time aeo→aeb, run-time aeo→aeb. **No cycle** — aeb never
-references aeo.
-
-Nuance to avoid relitigating later: *"built by aeb"* is convenience, not
-requirement. aeo can bootstrap with `ae build` directly (it is just an Aether
-program) and adopt aeb for its own build later. The invariant is only that
-aeo's binary is **emitted from the aeo repo**, by whatever builds it — never
-checked into or produced by aeb's repo.
-
-## The seam to aeb — "casually hand to aeb"
-
-The handoff is the most boring, robust seam there is: **artifacts on disk +
-a CLI invocation**, exactly how aeb already treats every external toolchain.
-
-- **aeb → aeo**: an aeb build node produces an artifact (image, disk, jar),
-  drops metadata in `target/<module>/`; the aeo composition picks it up and
-  boots a resource around it.
-- **aeo → aeb**: mid-composition, aeo shells out — `os.run_capture("aeb",
-  ["app:image"], env)` — to *build* something it then deploys. aeb is just
-  another binary aeo spawns.
-
-(Forward-looking, not v0: aeb/LLM.md notes `--emit=lib` artifacts are now
-first-class imports — a precompiled lib with reconstructed builder DSL. If
-aeo ever wanted in-process rather than shell-out coupling, that mechanism
-exists. Unproven value-add over shell-out; flagged, not adopted.)
-
-## What aeo leans on from Aether (the language)
-
-Catalogued so the design rests on real primitives, not wishes (see
-aether/LLM.md):
-
-- **config IS code** — the composition is a `.ae` the operator *runs*, not a
-  YAML aeo parses. Reads like config; full Aether underneath (control flow,
-  env lookups, conditionals). The "pseudo-declarative nirvana" pitch applied
-  to infra. If anyone asks "add a YAML loader," the answer is the same as
-  Aether's: no — expose setters, point at `docs/config-is-code.md`.
-- **closure-with-setters DSL** — `vm(cap, "web") { image(...) memory(...) }`,
-  identical idiom to aeb's `aether.program(b) { ... }` and Aether's
-  `actor { ... }`. Single-arg-per-call setters (Aether is fixed-arity).
-- **`os.run_capture`** — the canonical spawn+capture+exit primitive every
-  backend driver shells through (argv-based, no shell, binary-safe).
-  `os.run_pipe*` available if a backend needs a child→parent back-channel.
-- **actor model** — `actor { state ... receive { ... } }` fits "a long-lived
-  stateful resource you send messages to" almost too well (see Handle Model
-  decision below).
-- **std.http.client / os.run_capture** for liveness probes — `wait_for_*` is
-  poll-until-`ssh` exits zero, or poll-until-`http.get` returns 200, with a
-  timeout.
-- **capability discipline** — `--emit=lib` capability-empty by default; host
-  injects authority via the `cap` handle (see Front-Door decision). This is
-  what makes running a not-fully-trusted `compose.ae` defensible: it can only
-  touch backends `cap` grants.
-
-## Substrate independence (important — keep this true)
-
-aeo's DSL/graph layer is coupled to **nothing**. bhyve/jail are one substrate;
-the *same composition tree* drives KVM/libvirt, LXC/Docker/Podman, QEMU, even
-cloud CLIs — only the **leaf command** changes per backend. So:
-
-- `kind(...)` / `backend(...)` is a setter, never a hardcoded assumption.
-- A Linux-container node may `dep` on a BSD-jail node; the ordering layer does
-  not care about kernel.
-- "BSD **and** Linux from one script" is real via either **(A) remote hosts**
-  (each node's builder `ssh`-es its target host — aeo is a control plane) or
-  **(B) nested virt** (aeo boots a bhyve Linux VM node, then creates LXC
-  *inside* it — kernel boundary crossed as one `dep` edge). (C) single-host /
-  single-kernel can only *describe* both; only one kind boots — the trap.
-
-The unification is at the **graph + DSL layer**; underneath sit N
-per-backend drivers. The DSL is the easy 20%; the load-bearing 80% is each
-backend's **idempotent up/down + liveness probe** — genuinely different code
-per kernel. Unified DSL is real and worth building; it does not erase the
-drivers.
-
-The one thing that *would* weld aeo to FreeBSD: leaning on **hierarchical
-jails as a native kernel tree** (jails creating sub-jails). If the tree's
-recursion lives there, it is FreeBSD-locked. If "tree" just means a
-boot-order DAG, it stays portable. Decide per-composition, not in the tool.
-
-## Host adaptation & capability-gated grammar
-
-aeo **adapts to whether the host is BSD or Linux**, and some grammar must
-**fast-fail when the host can't honor it** (the headline example: requesting
-Capsicum containment on a Linux host, or on a FreeBSD kernel lacking it).
-Three rules:
-
-1. **Detect once, at startup, in the front-door.** aeo probes the host
-   (`uname -s`, plus capability probes — see below) and stamps a host-profile
-   onto the injected `cap`. Every handle (`jail`/`vm`/`container`) reads the
-   profile from `cap`; no driver re-probes ad hoc.
-2. **Backend availability gates which `kind(...)` values resolve.** `kind("jail")`
-   / `kind("bhyve")` require FreeBSD; `kind("lxc")` / `kind("kvm")` require
-   Linux. A `kind` the host can't execute is a **fast, loud error at
-   composition-evaluation time** — before any resource is touched — not a
-   silent no-op and not a runtime failure three nodes deep. (Remote/nested-virt
-   targets gate on the *target* host's profile, not the orchestrator's.)
-3. **Capability features (Capsicum, Casper) gate on a runtime probe, not just
-   on `uname`.** "FreeBSD" ≠ "Capsicum present" — a kernel can lack it. So the
-   gate is a positive probe (`available() == 1`), with a deliberate choice per
-   feature between *fast-fail* (the operator asked for enforcement they can't
-   get) and *degrade-with-warning* (best-effort containment).
-
-### This is already designed in Aether — reuse it, don't reinvent
-
-The `feat/freebsd-sandbox-parity` branch (see below) **already implements the
-exact portability contract** aeo wants, at the language layer:
-
-- `std.capsicum.available() -> int` — 1 if Capsicum is usable *right now*, 0
-  off FreeBSD or on a kernel without it. Its own docstring says *"Portable code
-  should branch on available() before relying on enforcement."* That IS aeo's
-  fast-fail gate; aeo inherits it rather than writing host-detection for
-  Capsicum.
-- `capsicum.enter()` returns `CAP_UNSUPPORTED` (-2) off FreeBSD — every call
-  degrades cleanly, never crashes.
-- `std.casper.available()` — same shape for the DNS/passwd/sysctl delegation a
-  Capsicum-sandboxed process needs.
-- Runtime dispatch precedent: `spawn_sandboxed_{linux,bsd,stub}.c`,
-  self-guarded by `#if defined(__FreeBSD__)/__linux__`, with the **stub that
-  fails loudly** (`"only available on Linux and FreeBSD"`, returns -1). aeo's
-  backend drivers should mirror this three-way split exactly:
-  `driver_bsd` (jail/bhyve) / `driver_linux` (lxc/kvm) / `driver_stub`
-  (fail-loud).
-
-So aeo's host-adaptation = (a) a thin `uname`-based backend selector for
-*which kind runs where*, layered over (b) Aether's already-built
-`available()`-probe contract for *capability features*. aeo writes (a); aeo
-consumes (b).
-
-### Fast-fail vs degrade — the per-feature call
-
-Stated so it isn't decided ad hoc per driver:
-
-| Grammar | Host lacks it → |
-|---|---|
-| `kind("jail")` / `kind("bhyve")` on Linux | **fast-fail** at eval — wrong substrate, operator intent is unambiguous |
-| `kind("lxc")` / `kind("kvm")` on BSD | **fast-fail** at eval — same |
-| `require_capsicum()` (operator asked for enforcement) | **fast-fail** if `capsicum.available()==0` — they asked for a guarantee the host can't give |
-| `prefer_capsicum()` / best-effort containment | **degrade + warn** — run unsandboxed, audit-log that enforcement was unavailable |
-
-The split is: *did the operator request a **guarantee** or a **preference**?*
-Guarantee → fast-fail. Preference → degrade with a loud, audited warning
-(`std.audit` from the same branch is the natural sink for "enforcement
-requested but unavailable").
-
-## Sketch of the surface (illustrative, not final)
-
-```
-// compose.ae  — run with `aeo compose.ae`
-aeo(cap) {
-    db  = jail(cap, "db")        { dataset("tank/db") ... }
-    web = vm(cap, "web")         { image("freebsd-14.ova") depends(db) ... }
-    k8s = container(cap, "k8s")  { host("linux-box") kind("lxc") depends(web) ... }
-
-    db.up(); web.up(); k8s.up()
-    web.wait_for_it_to_be_up()   // poll ssh/http until healthy, with timeout
-}
-```
-
-`cap` threads through every handle — the script *receives* authority to spawn
-`bhyve`/`jail`/`ssh`, it does not construct it. Mirrors aeb's `aeb(cap)`
-entrypoint convention exactly.
-
-## Worked example — three-tier app on one FreeBSD host
-
-The canonical end-user composition: a web tier, an app tier, and a database
-tier, all as **jails on a single FreeBSD host**, brought up in dependency
-order and torn down in reverse. This is the shape an operator actually writes.
-
-Everything below is *illustrative grammar* — the exact setter names and the
-handle model (actor vs plain struct) are still open decisions (see end of
-doc). What is NOT open: the **config-is-code** posture, single-arg setters,
-`cap` threading, dependency-ordered bring-up, liveness gating via
-`wait_for_*`, and reverse-order teardown.
-
-```
-// three-tier.ae  —  `aeo three-tier.ae`  (up)   /   `aeo down three-tier.ae`
-//
-// db  ◄── app  ◄── web        (dep edges; web depends on app depends on db)
-//
-// All three are jails on this host. bhyve/Capsicum variants shown afterwards.
-
-aeo(cap) {
-    // ---- Tier 1: database (PostgreSQL in a jail) ----
-    db = jail(cap, "db") {
-        dataset("tank/jails/db")          // ZFS dataset backing the jail root
-        ip("10.0.0.10")
-        memory_limit("2G")                // RCTL rule
-        provision("pkg install -y postgresql16-server")
-        start_command("service postgresql onestart")
-        health_check("pg_isready -h 10.0.0.10")   // probe for wait_for_*
-        health_timeout(60)
-    }
-
-    // ---- Tier 2: app server (depends on db) ----
-    app = jail(cap, "app") {
-        dataset("tank/jails/app")
-        ip("10.0.0.20")
-        memory_limit("4G")
-        depends(db)                        // ordering edge → db comes up first
-        provision("pkg install -y myapp")
-        env("DATABASE_URL", "postgres://10.0.0.10/app")
-        start_command("service myapp onestart")
-        health_check("curl -fsS http://10.0.0.20:8080/healthz")
-        health_timeout(90)
-    }
-
-    // ---- Tier 3: web / reverse proxy (depends on app) ----
-    web = jail(cap, "web") {
-        dataset("tank/jails/web")
-        ip("10.0.0.30")
-        depends(app)
-        provision("pkg install -y nginx")
-        env("UPSTREAM", "http://10.0.0.20:8080")
-        start_command("service nginx onestart")
-        health_check("curl -fsS http://10.0.0.30/")
-        health_timeout(30)
-    }
-
-    // ---- Bring-up: dependency order, gated on liveness ----
-    // aeo brings each up and blocks on its health_check before proceeding to
-    // dependents. db must be pg_isready before app starts; app must answer
-    // /healthz before web starts. This is the runtime-lifecycle layer aeb
-    // cannot express — ordering by *liveness*, not by artifact existence.
-    db.up();  db.wait_for_it_to_be_up()
-    app.up(); app.wait_for_it_to_be_up()
-    web.up(); web.wait_for_it_to_be_up()
-
-    println("three-tier stack up: http://10.0.0.30/")
-}
-```
-
-Teardown (`aeo down three-tier.ae`) walks the same tree in **reverse dependency
-order** — `web` → `app` → `db` — so the proxy stops before the app it fronts,
-and the app stops before the database it needs. The operator writes the tree
-*once*; direction is aeo's job, not the script's.
-
-### Variant A — mixed substrate (a bhyve VM leaf)
-
-Swap the app tier for a Linux appliance shipped as a bhyve VM. Only the node
-*kind* changes; the tree, deps, and `wait_for_*` are identical:
-
-```
-    app = vm(cap, "app") {
-        kind("bhyve")
-        image("/tank/images/myapp-linux.raw")
-        cpus(4)
-        memory("4G")
-        nic("10.0.0.20")
-        depends(db)
-        health_check("curl -fsS http://10.0.0.20:8080/healthz")
-        health_timeout(120)               // VMs boot slower than jails
-    }
-```
-
-`kind("bhyve")` resolves only on FreeBSD; on a Linux host this **fast-fails at
-composition-evaluation time** with a clear "bhyve requires a FreeBSD host"
-error — before `db` is ever touched (host-adaptation rule 2).
-
-### Variant B — opt into Capsicum containment for the db tier
-
-The database jail asks for kernel-enforced containment of a helper process.
-The `require_*` form is the **guarantee** posture — fast-fail if the host
-can't honor it:
-
-```
-    db = jail(cap, "db") {
-        dataset("tank/jails/db")
-        ip("10.0.0.10")
-        require_capsicum()                // guarantee → fast-fail if unavailable
-        // ... as before ...
-    }
-```
-
-On a host where `capsicum.available() == 0` (non-FreeBSD, or a kernel without
-Capsicum), `require_capsicum()` aborts the whole composition *before* bring-up,
-citing the failed probe. Had the operator written `prefer_capsicum()` instead
-(the **preference** posture), aeo would run the tier unconfined and emit a
-loud, `std.audit`-logged warning that enforcement was requested but
-unavailable. The guarantee-vs-preference distinction is the operator's, made
-explicit in the grammar (host-adaptation §, fast-fail-vs-degrade table).
-
-### What this example is NOT
-
-- **Not a build.** Nothing here compiles `myapp`; it `pkg install`s a built
-  artifact. If `myapp` needed building first, the script would shell out:
-  `os.run_capture("aeb", ["app:image"], env)` — aeo orchestrates, aeb builds
-  (the seam, above).
-- **Not multi-host.** Every node is local. The multi-host control-plane form
-  adds `host("other-box")` per node and aeo `ssh`-es the backend commands
-  there; the tree and ordering are unchanged (substrate-independence §).
-- **Not YAML.** This *is* the config. It has `println`, and could have `if
-  env_is("prod") { ... }`, env lookups, loops over a tier list — full Aether
-  underneath the config-shaped surface. That is the whole point.
-
-## Upstream dependency: the `feat/freebsd-sandbox-parity` Aether branch
-
-aeo's Capsicum/host-gating story rests on an **existing but unmerged** Aether
-branch: `feat/freebsd-sandbox-parity` (GitHub: aether-lang-org/aether).
-Assessment (from reading the branch, not the name):
-
-**It is far more complete than "stale draft" suggests** — ~1826 insertions
-atop v0.166.0, clearly authored by someone who understood Capsicum properly:
-
-- `std.capsicum` — bindings (`available`/`enter`/`in_mode`/`rights_limit`/
-  `fcntls_limit`, full `R_*`/`F_*` constants). Phase 1 (bindings) + Phase 2
-  (self-sandbox at startup, `capsicum_autosandbox.c`).
-- `std.casper` — DNS/passwd/sysctl delegation across the capability-mode
-  boundary, with the **mandatory two-phase ordering** (open channels *before*
-  `capsicum.enter()`) baked in. That ordering is the part everyone gets
-  wrong; getting it right is the tell that this branch is sound.
-- `std.audit` — audit trail for the permission layer (aeo's natural sink for
-  "enforcement requested but unavailable").
-- Platform-dispatched `spawn_sandboxed_{linux,bsd,stub}.c` with a fail-loud
-  stub; even handles GhostBSD's missing `libcasper.so` symlinks.
-
-**What's stale / incomplete (the honest gaps):**
-
-1. **Pinned to v0.166.0**; main is well past it. Drift is most likely
-   *mechanical* — the `STD_SRC`/`OBJ_DIR` Makefile lists and CHANGELOG
-   `[current]` — not semantic, since the new C files are self-`#if`-guarded
-   and won't textually conflict. Needs a rebase + re-pin.
-2. **`rights_limit()` takes a raw int fd**; std.file/std.net don't expose
-   their fds yet, so today it only works with inherited/raw-extern
-   descriptors. **For aeo this is fine** — aeo spawns children with inherited
-   fds — but it's the seam where the branch is unfinished.
-3. **Auto-wiring Capsicum into `spawn_sandboxed` is explicitly deferred.** So
-   automatic Capsicum containment of aeo-spawned backends isn't there; aeo
-   would call `capsicum.enter()` explicitly. Genuinely-future phase.
-
-**Recommendation (and aeo's stake in it):** revive it — rebase onto current
-main, re-pin the Makefile lists, ship `std.capsicum` + `std.casper` +
-`std.audit` as-is, leave spawn_sandboxed auto-wiring as the future phase.
-**aeo should be its first real consumer.** Per aether/LLM.md, downstream
-adoption is how Aether features get finished; aeo consuming `std.capsicum`
-gives this branch the pressure to land. Until it merges, aeo's Capsicum
-grammar targets this branch explicitly (document the required `ae` version /
-branch in aeo's build).
-
-Related branches seen alongside it (context, not dependencies):
-`origin/docs/capsicum-sandboxing`, `fix/sandbox-clone3-seccomp`,
-`fix/sandbox-preload-vfork-toolchain`, `feat/contrib-templating-liquid-sandbox-gate`.
-
----
-
-# Open decisions (alternatives recorded, not yet chosen)
-
-## Decision 1 — the `aeo` front-door
-
-Choosing `aeo compose.ae` (over `ae run compose.ae`) is what earns aeo three
-things a bare library-under-`ae-run` cannot have: an **injected `cap`**
-(authority comes from the host, not the script), **lifecycle supervision**
-(catch Ctrl-C mid-bring-up, walk the partial tree in reverse, tear down), and
-**subcommands** (`aeo down`, `aeo status`, `--dry-run`). So aeo owns its
-entrypoint. *How* that entrypoint is implemented is open:
-
-### Option 1A — bash trampoline, like aeb today  *(ships now)*
-Copy aeb's proven ~635-line pattern: bash sets `AETHER`/`AEO_HOME`/`cap`
-grants, supervises the Aether composition process (process group +
-signal-forward + timeout + group-reap), traps SIGINT → run teardown in
-reverse. Matches aeb exactly; migrate to native later.
-- **+** Ships immediately; battle-tested shape; unblocked on upstream.
-- **−** A bash layer aeo must carry; duplicates aeb's trampoline concept.
-
-### Option 1B — native Aether supervision primitives  *(cleaner, blocked)*
-Be the first consumer of the not-yet-built native process-supervision
-primitives Aether already tracks for aeb (aeb/TODO.md § "Full Aether CLI
-entrypoint" + aether/aeb-process-supervision-primitives.md). Front-door is
-pure Aether: `supervise(cap) { run_composition(); on_signal { teardown() } }`.
-- **+** No bash; one language; the "right" long-term shape.
-- **−** Blocks aeo on upstream Aether work.
-
-**Note for the aether side:** aeo wanting these primitives makes it the
-**second downstream** (after aeb) asking for the same supervision shape —
-exactly the "two downstreams want it, now factor" signal aether/LLM.md says
-to watch for. Worth filing regardless of which option aeo ships on.
-
-**Possible third cut (raise before deciding):** v0 needs *no* supervision —
-bring-up and teardown are separate invocations (`aeo compose.ae` up, `aeo
-down compose.ae` down), no in-process Ctrl-C handling at all. Simplest;
-defers 1A/1B entirely. Reverse-order teardown still needed, just driven by a
-separate run rather than a signal trap.
-
-## Decision 2 — resource handle model
-
-How is `vm(a)` represented?
-
-### Option 2A — actor per resource
-`vm(a)` is an Aether `actor` with `state: Down|Booting|Up` and a `receive`
-block (`Start`/`Probe`/`Stop`). `wait_for_it_to_be_up()` is a
-receive-with-timeout polling `Probe` until `Up`. Maps "a VM is a long-lived
-stateful thing you message" onto Aether's actor model natively.
-- **+** Concurrency falls out for free (many resources booting at once);
-  state machine is explicit; idiomatic Aether.
-- **−** Pulls the actor runtime into v0; more machinery before first light-up;
-  reserved-word footguns (`state`, `message`, `receive` — see aether/LLM.md).
-
-### Option 2B — plain handle + imperative methods  *(simpler start)*
-`vm(a)` is a struct; `.up()` / `.wait_for_it_to_be_up(timeout)` / `.down()`
-are plain functions over it. Sequencing is just call order in `compose.ae`.
-- **+** Minimal runtime; fastest path to a working bring-up; add actors later
-  if concurrency demands.
-- **−** Concurrent bring-up is manual; no built-in state-machine discipline.
-
-Reasonable path: **start 2B, migrate hot paths to 2A** when parallel
-bring-up of independent siblings becomes the bottleneck. The handle's public
-surface (`up`/`wait_for_it_to_be_up`/`down`) can stay stable across the
-switch, since both can present the same method names.
-
----
-
-# Invariants to not break (early, but worth stating)
-
-- aeo never reimplements aeb's static DAG / topo-sort / caching. It shells to
-  aeb for build-graph work.
-- aeo's binary is emitted from the aeo repo, never from aeb's repo.
-- No YAML/HCL/JSON config parser in aeo. Composition is `.ae` run by `aeo`.
-  External formats only via shell-out to tools that already parse them.
-- `kind`/`backend` stays a setter — aeo's core is substrate-agnostic; bhyve
-  is the first backend, not the definition.
-- Downstream-of-Aether link line is always `$(ae cflags)` — never hand-crafted
-  `-I`/`-L`/`-laether` (aether/LLM.md).
+- aeo's binary is emitted from THIS repo, never aeb's — putting it in aeb would
+  drag infra backends (bhyve/jail/ssh/libvirt) into aeb's core and violate its
+  "no domain-specific in core" rule. Edges: build-time + run-time aeo→aeb. **No
+  cycle.**
+- Link line is always `$(ae cflags)` — never hand-crafted `-I`/`-L`/`-laether`.
+- **Ambient/cross-module state goes through `std.config`, never a module `var`**
+  (the var path had cross-import soundness bugs aeo dodged only by this rule).
+- aeo is substrate-agnostic at the core — never hardcode one backend as "the" one.
+
+## What aeo is NOT
+
+Not a build (it pulls images / `pkg install`s; it doesn't compile — shell out to
+aeb). Not multi-host by default (every node is local until the agent/remote arm
+lands). Not YAML — the composition *is* the config, full Aether underneath; don't
+add a config-file parser, expose setters.
+
+## Decisions, resolved
+
+- **Decision 1 — front-door = 1B** (native Aether supervision + codegen). Built.
+  The bash-trampoline alternative (1A) was rejected once `os.run_supervised`
+  landed upstream.
+- **Decision 2 — resource handle = 2A** (actor per node). Built. The plain-struct
+  alternative (2B) was simpler to start but the actor model is what shipped and
+  is proven across all drivers.
+
+Both are settled; do not reopen or silently re-litigate.
