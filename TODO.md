@@ -16,7 +16,7 @@ malware and are impregnable to attack.* Two axes — stop a node REACHING things
 | pf network policy | ✅ rulegen | ❌ inter-VM delivery BROKEN (if_bridge) | needs design rethink — see below |
 | rctl resource caps | ✅ | ✅ live + orchestrator-guarded | real-node deny proof pending |
 | Capsicum device grants | n/a | n/a | bhyve self-confines — no seam |
-| **Linux container confinement** | ❌ | — | seccomp/cgroups/netpolicy — the Linux peer of Capsicum+rctl+pf; NOT applied yet |
+| **Linux container confinement** | ✅ | ✅ **cgroups+cap-drop+netpolicy, fork-bomb refused live** | lib/confine_linux; reuses limit{}+constrain{} grammar (§5) |
 | Image attestation | ❌ | — | no grammar yet; built from scratch |
 | Audit trail | ❌ | — | nothing records node attempts |
 
@@ -106,28 +106,27 @@ Nothing records what a node ATTEMPTED — containment blocks but doesn't observe
 - [ ] Per-node connection logging on the deny-default pf (which flows were
       refused), so a compromised node's probing is visible, not just stopped.
 
-### 5. Linux container confinement — seccomp / cgroups / netpolicy (the Linux peer)
-The FreeBSD containment axes (Capsicum fd grants, rctl caps, pf netpolicy) DON'T
-apply to Linux host containers as-is — flagged in the new -VMM+podman demos
-(silly_addition_containers.ae, silly_addition_kvm_podman.ae) as "a separate
-future driver concern." Containers isolate via the KERNEL (namespaces/cgroups),
-so the confinement primitives are different but the GOAL is identical: contain
-malware, stop exhaustion, deny-default network. The Linux analogs:
-- [ ] **cgroup resource caps** (the rctl peer): podman `--memory`, `--cpus`,
-      `--pids-limit` (fork-bomb ceiling) wired from the existing `limit{}`
-      grammar — so limit{} enforces on BOTH substrates (rctl on jails/VMs,
-      cgroups on containers). driver_linux is the seam; proven on Bazzite.
-- [ ] **seccomp / cap-drop** (the Capsicum peer): podman `--security-opt
-      seccomp=<profile>`, `--cap-drop=ALL`, `--read-only`, `--no-new-privileges`
-      from a `constrain{}`-style block — deny syscalls/capabilities a node
-      doesn't need (a compromised container can't escalate).
-- [ ] **container network policy** (the pf peer): podman `--network` isolation +
-      a deny-default between containers (only declared depends()/expose() flows
-      pass). Cleaner than the FreeBSD pf+if_bridge mess — podman networks are
-      routed/NAT'd, not bridged, so it MAY sidestep the inter-VM bug entirely.
-- [ ] Decide grammar reuse: ideally limit{} (caps) + constrain{} (confinement)
-      map to BOTH FreeBSD and Linux drivers, so a composition's confinement is
-      substrate-portable. The driver picks rctl/Capsicum vs cgroups/seccomp.
+### 5. Linux container confinement — DONE + LIVE (lib/confine_linux, 2026-06-27)
+The rootless Linux peer of the FreeBSD Capsicum/rctl/pf axes — and it REUSES the
+same grammar (limit{} + constrain{}), so confinement is substrate-portable (the
+driver picks rctl/Capsicum/pf on FreeBSD vs cgroups/seccomp/network on Linux).
+- [x] **cgroup caps** (rctl peer): limit{} -> --memory / --pids-limit / --ulimit.
+      LIVE: fork-bomb in db REFUSED by --pids-limit 32 ("can't fork: Resource
+      temporarily unavailable").
+- [x] **seccomp / cap-drop** (Capsicum peer): a constrain{} node -> --cap-drop
+      ALL + --security-opt no-new-privileges (+--read-only on deny_egress). LIVE:
+      podman inspect shows db CapDrop=ALL.
+- [x] **netpolicy** (pf peer): deny_egress() -> --network none. LIVE: db has no
+      network namespace — can't phone home. (Per-flow egress/ingress whitelist
+      beyond on/off is a follow-up — podman has no per-flow filter without extra
+      tooling; --network none vs shared is the v0 deny-default. NB: podman nets
+      are routed/NAT'd not bridged, so the richer policy MAY sidestep the FreeBSD
+      pf+if_bridge bug — worth revisiting for that.)
+- [x] **grammar reuse achieved**: limit{}+constrain{} render to BOTH substrates.
+      lib/confine_linux (spec_confine_linux 10); driver_linux up_confined;
+      runner._confine_flags. Demo: examples/silly_addition_confined.ae.
+- [ ] Follow-up: per-flow container netpolicy (egress(target,port)/ingress_from)
+      — the v0 is on/off (--network none vs shared). Also: --cpus from pcpu.
 
 ## Lifecycle & state ops (snapshot / rollback / backup / prune / exec / restart)
 Day-2 operability for a STANDING deployment: capture point-in-time state, restore
