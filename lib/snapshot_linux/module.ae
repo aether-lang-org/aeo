@@ -4,8 +4,12 @@
 //
 //   container/docker  podman/docker commit -> an image tag; backup = `save` (tar);
 //                     rollback = re-run from the snapshot image; prune = rmi keep-N.
-//   kvm               qemu-img snapshot -c/-a on the qcow2 (internal snapshots);
-//                     backup = copy the qcow2; prune = qemu-img snapshot -l/-d.
+//   kvm               qemu-img snapshot -c/-a on the qcow2 (internal snapshots).
+//                     OFFLINE ONLY: qemu write-locks a running VM's disk, so the
+//                     node must be DOWN to snapshot (unlike ZFS/podman, which
+//                     snapshot live). _qemu_offline turns the lock error into an
+//                     actionable "aeo down first" message. backup = copy the
+//                     qcow2; prune = qemu-img snapshot -l/-d.
 //   lxc               lxc-snapshot (native) -N/-r/-d; backup via the snapshot dir.
 //
 // All rootless EXCEPT lxc (needs the lxc-snapshot NOPASSWD grant). A kind with no
@@ -23,7 +27,7 @@
 
 import std.os (run_capture)
 import std.list
-import std.string (string_length)
+import std.string (string_length, string_contains)
 
 exports ( supports, snap_image, backup_file,
           snapshot, rollback, list_snaps, backup, prune )
@@ -56,7 +60,7 @@ backup_file(dir: string, name: string, tag: string, kind: string) -> string {
 snapshot(name: string, kind: string, image: string, tag: string) -> string {
     if kind == "container" { return _ctr_commit(name, tag, "") }
     if kind == "docker"    { return _ctr_commit(name, tag, "docker") }
-    if kind == "kvm"       { return _qemu("snapshot -c ${tag} ${image}") }
+    if kind == "kvm"       { return _qemu_offline("snapshot -c ${tag} ${image}", image) }
     if kind == "lxc"       { return _lxc("lxc-snapshot ${name} -N ${tag}") }
     return ""
 }
@@ -65,7 +69,7 @@ snapshot(name: string, kind: string, image: string, tag: string) -> string {
 rollback(name: string, kind: string, image: string, tag: string) -> string {
     if kind == "container" { return _ctr_restore(name, tag, "") }
     if kind == "docker"    { return _ctr_restore(name, tag, "docker") }
-    if kind == "kvm"       { return _qemu("snapshot -a ${tag} ${image}") }
+    if kind == "kvm"       { return _qemu_offline("snapshot -a ${tag} ${image}", image) }
     if kind == "lxc"       { return _lxc("lxc-snapshot ${name} -r ${tag}") }
     return ""
 }
@@ -167,6 +171,21 @@ _sh_out(cmd: string) -> string {
 }
 _qemu(args: string) -> string {
     return _sh("qemu-img ${args}")
+}
+// _qemu_offline — a qcow2 snapshot/rollback that needs the VM STOPPED: qemu holds
+// a write lock on a running VM's disk, so qemu-img fails "Failed to get shared
+// write lock". Turn that cryptic failure into an actionable message (unlike ZFS/
+// podman, kvm snapshot is offline-only — `aeo down` the node first). The `image`
+// is only for the hint text.
+_qemu_offline(args: string, image: string) -> string {
+    out = _qemu(args)
+    if string_length(out) == 0 {
+        return ""
+    }
+    if string_contains(out, "write") == 1 {
+        return "qcow2 '${image}' is in use (VM running) — qemu-img snapshot needs the VM STOPPED; `aeo down` it first, then snapshot (offline). Original: ${out}"
+    }
+    return out
 }
 // lxc-snapshot needs root: `sudo -n /usr/bin/lxc-snapshot ...` (grant required).
 _lxc(rest: string) -> string {
