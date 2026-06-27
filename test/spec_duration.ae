@@ -58,6 +58,30 @@ main() {
             aeocha.assert_str_eq(fw, string_from_int(get_interval("bare")), "1000", "default interval")
             aeocha.assert_str_eq(fw, string_from_int(get_budget("bare")), "60", "default budget")
         }
+
+        // The FluentSelenium FLOAT: within(d) at SYSTEM scope applies to every node
+        // below that doesn't set its own — frozen at each node's declaration so a
+        // later sibling's within() can't leak backward.
+        aeocha.it("system-scope within(20s) every(250ms) FLOATS onto nodes below") callback {
+            system("d5") {
+                within(20s)
+                every(250ms)
+                inherits = container("inherits") { image("redis") }     // no own -> floats
+                overrides = container("overrides") { image("redis") within(5s) }
+            }
+            aeocha.assert_str_eq(fw, string_from_int(get_within_ms("inherits")), "20000", "floated window")
+            aeocha.assert_str_eq(fw, string_from_int(get_interval("inherits")), "250", "floated interval")
+            // a later sibling's own within() must NOT leak back onto an earlier one:
+            aeocha.assert_str_eq(fw, string_from_int(get_within_ms("overrides")), "5000", "own wins")
+            aeocha.assert_str_eq(fw, string_from_int(get_within_ms("inherits")), "20000", "no backward leak")
+        }
+
+        aeocha.it("the float is scoped per-system (doesn't leak across systems)") callback {
+            system("d6a") { within(9s) a = container("a") { image("redis") } }
+            system("d6b") { b = container("b") { image("redis") } }   // fresh system, no float
+            aeocha.assert_str_eq(fw, string_from_int(get_within_ms("a")), "9000", "d6a floated")
+            aeocha.assert_str_eq(fw, string_from_int(get_within_ms("b")), "0", "d6b unset (float reset)")
+        }
     }
 
     aeocha.run_summary(fw)

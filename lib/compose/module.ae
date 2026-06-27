@@ -88,6 +88,8 @@ exports (
 system(nm: string) -> string {
     config.put("aeo.cmp.cursystem", nm)
     config.put("aeo.cmp.curhost", "")        // entering a system resets host nesting
+    config.put("aeo.cmp.curwithin", "")      // ...and the floating within/every window
+    config.put("aeo.cmp.curevery", "")       //    (FluentSelenium float, scoped per-system)
     if config.get("aeo.cmp.sysknown.${nm}") == "" {
         s = _syscount()
         config.put("aeo.cmp.sysname.${s}", nm)
@@ -155,6 +157,12 @@ resource(nm: string, k: string) -> string {
     config.put("aeo.cmp.kind.${nm}", k)
     config.put("aeo.cmp.system.${nm}", config.get("aeo.cmp.cursystem"))
     config.put("aeo.cmp.host.${nm}", config.get("aeo.cmp.curhost"))
+    // SNAPSHOT the floating within/every window AS OF this node's declaration —
+    // the model is read by the runner LATER, so the float must be frozen here, not
+    // read live (else a later sibling's within() would leak backward). FluentSelenium
+    // consumed the float immediately; aeo freezes it at declaration.
+    config.put("aeo.cmp.floatwithin.${nm}", config.get("aeo.cmp.curwithin"))
+    config.put("aeo.cmp.floatevery.${nm}", config.get("aeo.cmp.curevery"))
     return nm
 }
 
@@ -485,14 +493,38 @@ health_budget(_ctx: ptr, n: int)    { config.put("aeo.cmp.budget.${_ctx}", strin
 // A Duration is int64 nanoseconds under the hood, so `/ 1000000` -> ms. The runner
 // derives the attempt budget from within/every (see get_budget). Operators write
 // `within(30s) every(500ms)` instead of computing attempt counts by hand.
-within(_ctx: ptr, d: Duration) { config.put("aeo.cmp.within.${_ctx}", string_from_int(_dur_ms(d))) }
-every(_ctx: ptr, d: Duration)  { config.put("aeo.cmp.interval.${_ctx}", string_from_int(_dur_ms(d))) }
+// within/every both (a) record per-CONTEXT and (b) set the eval-time FLOATING
+// window (aeo.cmp.curwithin / curevery) — the FluentSelenium float, honestly: a
+// within(30s) written at SYSTEM scope (before any node) becomes the default for
+// every node in that system; a node's OWN within() overrides it. Compose eval is
+// single-threaded (top-to-bottom, like a test method), so this mutable "current
+// window" is the same safe-for-eval trick FluentSelenium used thread-locally —
+// and aeo already does it for cursystem/curhost. The float resets on system()
+// entry (see system()), so it never leaks across systems.
+within(_ctx: ptr, d: Duration) {
+    ms = string_from_int(_dur_ms(d))
+    config.put("aeo.cmp.within.${_ctx}", ms)
+    config.put("aeo.cmp.curwithin", ms)        // float onto subsequent siblings
+}
+every(_ctx: ptr, d: Duration) {
+    ms = string_from_int(_dur_ms(d))
+    config.put("aeo.cmp.interval.${_ctx}", ms)
+    config.put("aeo.cmp.curevery", ms)
+}
 // Duration (ns) -> milliseconds.
 _dur_ms(d: Duration) -> int { return d / 1000000 }
+// the node's within window in ms: its OWN setter, else the floated system default
+// (curwithin), else 0 (unset).
 get_within_ms(nm: string) -> int {
     v = config.get("aeo.cmp.within.${nm}")
-    if string_length(v) == 0 { return 0 }
-    return _to_int(v)
+    if string_length(v) > 0 {
+        return _to_int(v)
+    }
+    f = config.get("aeo.cmp.floatwithin.${nm}")   // the float SNAPSHOTTED at decl
+    if string_length(f) > 0 {
+        return _to_int(f)
+    }
+    return 0
 }
 
 // --- reader helpers (the runner consumes these) ----------------------
@@ -724,10 +756,15 @@ get_cpus(nm: string) -> int {
 // interval defaults to 1000ms, budget to 60 attempts, if unset.
 get_interval(nm: string) -> int {
     v = config.get("aeo.cmp.interval.${nm}")
-    if string_length(v) == 0 {
-        return 1000
+    if string_length(v) > 0 {
+        return _to_int(v)
     }
-    return _to_int(v)
+    // floated system-scope every() SNAPSHOTTED at this node's declaration.
+    f = config.get("aeo.cmp.floatevery.${nm}")
+    if string_length(f) > 0 {
+        return _to_int(f)
+    }
+    return 1000
 }
 
 get_budget(nm: string) -> int {

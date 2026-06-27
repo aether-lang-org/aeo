@@ -47,7 +47,14 @@ exports ( aeo_orchestration )
 // depends on db (ordering edge). The function `aeo up` calls.
 aeo_orchestration() {
     system("silly_addition_containers") {
-        // db tier — stock redis container.
+        // FLUENT-SELENIUM-STYLE FLOAT: within(d)/every(d) at SYSTEM scope set the
+        // health-retry window for EVERY node below that doesn't override it — the
+        // duration-literal form of FluentSelenium's within(secs(..)), floated
+        // (db inherits 30s/500ms; app overrides its own window below).
+        within(30s)
+        every(500ms)
+
+        // db tier — stock redis container. (inherits the system within/every)
         db = container("db") {
             image("docker.io/library/redis:alpine")
             expose(6379)
@@ -86,11 +93,10 @@ PY
             // Health via PYTHON (always in the app container) — NOT curl, which
             // python:3-alpine doesn't ship. Probes the service's own HTTP.
             health("python -c \"import urllib.request as u; u.urlopen('http://localhost:8080/add/0/0').read()\"")
-            // Retry the health probe for up to 30s, every 500ms (the FluentSelenium
-            // within()/secs() idiom — duration literals, not a hand-computed attempt
-            // count). aeo derives the attempt budget from within/every.
-            within(30s)
-            every(500ms)
+            // app OVERRIDES the floated system window with its own (a slower
+            // service gets a longer wait) — the per-node within() wins over the
+            // system-scope float, frozen at this node's declaration.
+            within(45s)
             depends("db")    // app starts after db (dependency-ordered)
         }
     }
