@@ -163,17 +163,22 @@ no HA — those cross the "aeo is not a platform" line). Config-is-code intact.
 
 ## Resource-kind coverage (which `kind`s are real vs demo'd)
 
-aeo's grammar exposes 6 kinds + a flavor. Demo'd: container/jail/bhyve/kvm. Gaps:
-- [ ] **`lxc` is a MISNOMER today** — the runner routes `lxc` to driver_linux
-      (podman), NOT real LXC. Investigated 2026-06-26: build a real driver_lxc
-      (lxc-create/start/info/attach/destroy). BLOCKED on the host: rootless LXC on
-      Bazzite (atomic, ae-shim user) does not boot a container — idmap/storage +
-      the "container uid can't x-access /home" ACL wall + cgroup delegation; and
-      `sudo` needs a password for the bazzite user, so rootful LXC is untestable
-      via the current access. Either: get a host where rootless-LXC works (or a
-      sudo grant), OR honestly rename/document `lxc` as "= podman container".
-      The lxc-* tools (lxc-create/start/attach, busybox/download templates) ARE
-      installed; it's purely the rootless env that blocks.
+aeo's grammar exposes 6 kinds + a flavor. Demo'd: container/jail/bhyve/kvm/lxc.
+Gaps:
+- [x] **`lxc` is now REAL** — was a misnomer (routed to podman). driver_lxc built
+      + wired (runner up/down/probe/exec) + silly_addition_lxc.ae; LIVE on Bazzite
+      2026-06-27 (rootful via the lxc-* NOPASSWD sudoers grant + `systemctl enable
+      --now lxc-net` for lxcbr0). `aeo up`->two alpine system containers RUNNING,
+      `aeo exec db hostname`->"db" (contained), `aeo down` clean. (busybox template
+      fails — no busybox binary on the host; the download/alpine template works.
+      Rootless LXC stays blocked on this atomic host — rootful is the path.)
+- [ ] **PORT the self-sudo argv fix to driver_bsd** — driver_bsd._sudo_run has
+      the SAME latent bug driver_lxc hit: it interpolates argv with "${a}" into an
+      `sh -c` string, yielding the element ADDRESS not the string. Its argv
+      builders are unit-tested but the live self-sudo path apparently never ran for
+      real. Fix: pass argv DIRECTLY to run_capture("sudo", [...]) with list_add_raw
+      ptr-copy (as driver_lxc now does, like driver_vm's qemu exec). Until then,
+      jail/jls/jexec via driver_bsd self-sudo would mangle their args live.
 - [ ] **`docker` kind** — thin: same as container but pins the docker engine. No
       demo; arguably container covers it. Low priority.
 - [ ] **`freebsd_vm`** — a bhyve VM with a FreeBSD GUEST (flavor "freebsd"); the
