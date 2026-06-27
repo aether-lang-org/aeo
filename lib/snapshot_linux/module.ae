@@ -10,7 +10,11 @@
 //                     snapshot live). _qemu_offline turns the lock error into an
 //                     actionable "aeo down first" message. backup = copy the
 //                     qcow2; prune = qemu-img snapshot -l/-d.
-//   lxc               lxc-snapshot (native) -N/-r/-d; backup via the snapshot dir.
+//   lxc               lxc-snapshot (native). TWO constraints (found live): it
+//                     needs the container STOPPED (offline; _lxc_snapshot does
+//                     stop->snap->start), and it AUTO-NAMES snaps (snap0, snap1
+//                     — NOT operator tags); restore by the snapN name. Dir-backed
+//                     containers get a copy-clone (works, warns).
 //
 // All rootless EXCEPT lxc (needs the lxc-snapshot NOPASSWD grant). A kind with no
 // Linux snapshot mechanism returns "" (no-op success), mirroring lib/snapshot.
@@ -61,7 +65,7 @@ snapshot(name: string, kind: string, image: string, tag: string) -> string {
     if kind == "container" { return _ctr_commit(name, tag, "") }
     if kind == "docker"    { return _ctr_commit(name, tag, "docker") }
     if kind == "kvm"       { return _qemu_offline("snapshot -c ${tag} ${image}", image) }
-    if kind == "lxc"       { return _lxc("lxc-snapshot ${name} -N ${tag}") }
+    if kind == "lxc"       { return _lxc_snapshot(name) }
     return ""
 }
 
@@ -70,6 +74,8 @@ rollback(name: string, kind: string, image: string, tag: string) -> string {
     if kind == "container" { return _ctr_restore(name, tag, "") }
     if kind == "docker"    { return _ctr_restore(name, tag, "docker") }
     if kind == "kvm"       { return _qemu_offline("snapshot -a ${tag} ${image}", image) }
+    // lxc restore: `tag` is the lxc snapname (snap0, snap1...) — LXC auto-numbers,
+    // it does NOT take operator tags. Restore replaces the rootfs from that snap.
     if kind == "lxc"       { return _lxc("lxc-snapshot ${name} -r ${tag}") }
     return ""
 }
@@ -190,6 +196,27 @@ _qemu_offline(args: string, image: string) -> string {
 // lxc-snapshot needs root: `sudo -n /usr/bin/lxc-snapshot ...` (grant required).
 _lxc(rest: string) -> string {
     return _sh("sudo -n /usr/bin/${rest}")
+}
+// _lxc_snapshot — OFFLINE snapshot of an LXC container. Two real constraints
+// (both found live): lxc-snapshot (a) needs the container STOPPED, and (b)
+// AUTO-NAMES snapshots (snap0, snap1...) — it does NOT take an operator tag, so
+// `tag` is ignored at create (use the snapN name to restore). Stop -> snapshot ->
+// restart, so the running node is only briefly down. A dir-backed container does
+// a copy-clone (lxc-snapshot warns but succeeds). Returns "" on success.
+_lxc_snapshot(name: string) -> string {
+    // stop (ignore "already stopped"); snapshot; restart.
+    _so = _lxc("lxc-stop -n ${name}")
+    snap = _lxc("lxc-snapshot ${name}")
+    _ss = _lxc("lxc-start -n ${name}")
+    // lxc-snapshot emits the dir-backed copy-clone WARNING to stderr even on
+    // success; only treat a real failure ("Error creating") as an error.
+    if string_length(snap) == 0 {
+        return ""
+    }
+    if string_contains(snap, "Error") == 1 {
+        return "lxc snapshot of '${name}' failed (dir-backed containers may need an overlay/zfs backend): ${snap}"
+    }
+    return ""        // warning-only output (copy-clone) — success
 }
 _lxc_capture(cmd: string) -> string {
     return _sh_out(cmd)
