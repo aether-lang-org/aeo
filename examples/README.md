@@ -2,13 +2,15 @@
 
 Each `silly_addition_*.ae` here is the **same two-tier app** — a `db` cache (redis)
 and an `app` that serves `/add/N/M` over HTTP, `app` depending on `db` — deployed
-on a **different substrate**. Together they span the orchestration matrix:
-**with/without a VM (VMM)** × **with/without containers (podman)**, across both
-host OSes aeo targets (FreeBSD, Linux).
+on a **different substrate**. The core six span the orchestration matrix —
+**with/without a VM (VMM)** × **with/without containers (podman)**, plus the
+host-native isolation tiers (Linux LXC, FreeBSD jails) — across both host OSes
+aeo targets. A seventh (`confined`) layers the confinement vocabulary on top.
 
 They're deliberately the *same workload* so the only thing that varies is the
-substrate — read any one, then diff it against another to see exactly what a
-different backend changes.
+substrate (or the confinement) — read any one, then diff it against another to
+see exactly what a different backend, or turning on `constrain{}`/`limit{}`,
+changes.
 
 ## The grid
 
@@ -18,10 +20,16 @@ different backend changes.
 | `silly_addition_kvm_podman.ae`   | Linux   | KVM VM   | podman (inside) | **+VMM +podman** |
 | `silly_addition_kvm.ae`          | Linux   | KVM VM   | —               | **+VMM −podman** |
 | `silly_addition_containers.ae`   | Linux   | —        | podman (host)   | **−VMM +podman** |
-| `silly_addition_jails.ae`        | FreeBSD | jail     | —               | host-native isolation |
+| `silly_addition_lxc.ae`          | Linux   | —        | LXC (system)    | host-native isolation (Linux) |
+| `silly_addition_jails.ae`        | FreeBSD | jail     | —               | host-native isolation (FreeBSD) |
 
 `−VMM −podman` is **not** a cell — a compute node has to run *somewhere*, so "no
 VM, no container" is degenerate.
+
+A seventh demo, **`silly_addition_confined.ae`**, is *not* a new substrate cell —
+it's the `containers` cell with the **confinement** vocabulary turned on
+(`limit{}` caps + `constrain{}` + `deny_egress`), so it showcases the Linux
+containment axes rather than another backend (see [Confinement](#confinement-the-impregnable-axis-live) below).
 
 The naming is by SUBSTRATE (bhyve_podman / kvm / containers / jails), not the
 workload. (The original demo was `silly_addition_cache.ae`; renamed for
@@ -40,16 +48,36 @@ specs + ipam assert against that string.)
 - **kvm** — bare KVM VMs (no container) — the VMM by itself.
 - **containers** — two podman containers on the host, no VM — the most common
   real Linux deploy, and the Linux peer of the jails demo.
+- **lxc** — two LXC *system* containers (a full-OS userland under its own root,
+  via the classic `lxc-*` tools) — the Linux analog of a FreeBSD jail, distinct
+  from the podman *app* containers.
 - **jails** — two FreeBSD jails with **rctl** resource caps (exhaustion-DoS
-  guard) — the host-native isolation tier. The unblocked, live-proven path.
+  guard) — the host-native isolation tier.
+- **confined** — the `containers` cell with all three Linux confinement axes on:
+  `limit{}` → cgroup caps, `constrain{}` → cap-drop/seccomp, `deny_egress` →
+  `--network none`. The showcase for "contain malware" on Linux.
 
-## Confinement coverage (honest)
+## Confinement: the impregnable axis (live)
 
-FreeBSD demos carry real confinement: Capsicum + pf (bhyve_podman), rctl + the
-jail boundary (jails). The **Linux container** demos do NOT yet apply Linux
-confinement (seccomp/cgroups/netpolicy) — that's a tracked future axis
-(TODO.md §5: the Linux peer of Capsicum/rctl/pf). The Linux demos today are about
-the *orchestration* (build/run/depends/health), not the confinement.
+This is no longer a "future axis" — the Linux container confinement is **built
+and live-proven**, from the *same* `limit{}` + `constrain{}` grammar that renders
+to rctl/Capsicum/pf on FreeBSD (substrate-portable confinement):
+
+- **cgroup caps** (the rctl peer) — `limit_mem`/`limit_maxproc` → `--memory`/
+  `--pids-limit`. Proven: a fork-bomb inside a capped node is *refused*.
+- **cap-drop / seccomp** (the Capsicum peer) — a `constrain{}` node →
+  `--cap-drop ALL --security-opt no-new-privileges` (+`--read-only` on
+  `deny_egress`).
+- **network policy** (the pf peer) — `deny_egress` → `--network none` (no
+  namespace; can't phone home); peer-only egress → an `--internal` podman net
+  (reaches the declared peer, *not* the internet). This *sidesteps* the FreeBSD
+  pf+if_bridge inter-VM bug entirely.
+
+Plus, orthogonal to the demos but live: **image attestation** (`attest("sha256:…")`
+refuses a mismatched image at boot, fail-closed) and a **tamper-evident audit
+trail** (`aeo audit` verifies the hash chain). The FreeBSD demos carry the
+FreeBSD side: Capsicum + pf (bhyve_podman, pf delivery pending the if_bridge
+fix), rctl + the jail boundary (jails, live).
 
 ## Every demo is ALL-IN-ONE (self-contained, by design)
 
@@ -85,17 +113,28 @@ the single-file property that is the whole point.
 
 ## Live-proven status (what's actually been run, not just modeled)
 
-- **jails** — boot + jail-boundary containment + rctl caps all proven LIVE on the
-  GhostBSD box (2026-06-25). The strongest live story.
-- **kvm** — the KVM arm's exact qemu invocation booted a daemonized VM on Bazzite
-  (2026-06-26) — qemu-boot level proven; full `aeo up` pending prepared images.
-- **bhyve_podman** — confinement data-model proven; live pf inter-VM delivery is
-  BROKEN on the box's shared bridge (TODO §1, a known if_bridge bug).
-- **containers / kvm_podman** — data-model (check) green; live `aeo up` on Bazzite
-  is the next step (the build-in-container aeo + `ae` shim are set up — see
-  `../docs/build-in-container.md`).
+- **containers** — full `aeo up` → `2+2=4` over HTTP, *with the cross-container
+  cache working* (a value poked into redis read back through app), live on
+  Bazzite. `aeo down` verifies disappearance. The reference live deploy.
+- **confined** — all three confinement axes enforced live: a fork-bomb refused by
+  `--pids-limit`, a `deny_egress` node with no network namespace, cap-drop via
+  `podman inspect`. The "impregnable" story, proven.
+- **lxc** — `aeo up` → two alpine system containers RUNNING, `aeo exec db
+  hostname` → `db` (contained), `aeo down` clean. Live on Bazzite.
+- **kvm** — full `aeo up` booted two KVM VMs (rootless `-nic user`), alive +
+  `aeo down`, live on Bazzite.
+- **jails** — boot + jail-boundary containment + rctl caps, live on the GhostBSD
+  box. The strongest FreeBSD live story.
+- **bhyve_podman** — confinement data-model proven; live pf inter-VM *delivery* is
+  the one BROKEN axis (TODO §1, the if_bridge bug — the Linux per-flow netpolicy
+  sidesteps it).
+- **kvm_podman** — check green; live `aeo up` needs guest images with podman+sshd
+  baked in (honest caveat in the file header).
 
-All five pass `check` standalone and build via both doors.
+Also live on Bazzite: **image attestation** (a mismatched digest refused at
+boot), the **tamper-evident audit trail** (an edited log caught by `aeo audit`),
+and the **lifecycle ops** (snapshot/rollback round-trip on a container, prune
+keep-N). All seven demos pass `check` standalone and build via both doors.
 
 ## Other examples here
 
