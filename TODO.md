@@ -250,16 +250,16 @@ wired yet; mapped here as candidate kinds. Ordered by how cleanly they'd land:
 
 ## Cross-cutting / smaller
 
-- [ ] **Weave aether DURATION LITERALS into the aeo DSL** (Paul 2026-06-27).
-      Aether has first-class duration literals — `2000ms`, `10s`, `200ms` —
-      typed `Duration` (i64 ns), verified to compile in aeo's toolchain. aeo's
-      time-ish setters take raw int MS today: `health_interval(ms: int)`,
-      `health_budget(n)`, and the new netpolicy connect-timeout. Replacing those
-      with Duration-typed setters (`health_interval(1s)` not `(1000)`) is a real
-      ergonomics + correctness win (no more "is this ms or s?"). Plan: a Duration
-      param + a `_dur_ms(d)` that converts to the int ms config stores; keep an
-      int overload for back-compat. Start with health_interval; the netpolicy
-      egress() could take an optional connect-timeout as a Duration.
+- [x] **Aether DURATION LITERALS woven into the aeo DSL** (Paul 2026-06-27) —
+      DONE. The FluentSelenium within()/secs() idiom: `within(30s) every(500ms)`
+      expresses a health retry as WALL-CLOCK time, not a hand-computed attempt
+      count; get_budget DERIVES attempts = window/interval. _dur_ms(d) = d/1000000
+      (Duration is i64 ns; `as int` rejected, `/` works). Back-compat: explicit
+      health_budget wins; int setters untouched. LIVE on Bazzite. spec_duration 4.
+      (Aether has no fn overloading — so `within`/`every` are NEW names, not
+      Duration overloads of health_interval.)
+      - [ ] Follow-up: an egress(target, port, timeout: Duration) connect-window,
+            and any other ms-int site that wants a duration form.
 
 - [x] **NOT A BUG: "single-container doesn't boot" was a test-harness artifact.**
       Investigated 2026-06-27 and traced to the END: a 1-node compose DOES boot
