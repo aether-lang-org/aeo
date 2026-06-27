@@ -18,7 +18,7 @@ malware and are impregnable to attack.* Two axes — stop a node REACHING things
 | Capsicum device grants | n/a | n/a | bhyve self-confines — no seam |
 | **Linux container confinement** | ✅ | ✅ **cgroups+cap-drop+netpolicy, fork-bomb refused live** | lib/confine_linux; reuses limit{}+constrain{} grammar (§5) |
 | Image attestation | ✅ | ✅ **verify-before-boot, fail-closed; wrong digest refused live** | attest("sha256:..."); 3 greppable states (attested/unpinned/unattestable) |
-| Audit trail | ❌ | — | nothing records node attempts |
+| Audit trail | ✅ | ✅ **tamper-evident hash chain; tamper + attest-refuse caught live** | lib/audit; `aeo audit` verifies the chain (§4) |
 
 ### 0. jail nodes — LIVE-PROVEN (the unblocked containment path)
 Jails share the host network stack, so the bhyve bridge/NAT bug DOESN'T apply —
@@ -103,13 +103,21 @@ bridge — full writeup in `docs/pf-enforcement-next-steps.md`:
       Bazzite — a signature path). Also: attest a qcow2 / jail-dataset hash
       (same shape, swap the digest probe) so attestation spans substrates.
 
-### 4. Audit trail — forensics / "contain malware" observability (MEDIUM)
-Nothing records what a node ATTEMPTED — containment blocks but doesn't observe.
-- [ ] Emit a tamper-evident log of denied attempts (pf-logged blocks → an aeo
-      audit stream; rctl denials; failed egress). `std.audit` is referenced in
-      the Capsicum branch design — wire aeo as a consumer.
-- [ ] Per-node connection logging on the deny-default pf (which flows were
-      refused), so a compromised node's probing is visible, not just stopped.
+### 4. Audit trail — DONE + LIVE (lib/audit, 2026-06-27) — forensics
+Containment BLOCKS; the audit trail OBSERVES. Append-only, HASH-CHAINED log of
+every security DECISION aeo makes per node.
+- [x] **record + hash chain**: each entry hash = sha256(prev + payload); editing/
+      deleting any past line breaks the chain. Events: attest-pass/attest-refuse
+      (supply-chain verdict) + confine (the posture). LIVE: confined demo recorded
+      both nodes' exact posture, chained.
+- [x] **`aeo audit` verify**: walks the chain, reports INTACT or "CHAIN BROKEN at
+      N". LIVE: edited the log to hide db's --network none -> CAUGHT. A bad-digest
+      boot recorded as attest-refuse. spec_audit 5.
+- [x] NB: distinct from std.audit (Aether's in-process SANDBOX permission ring) —
+      this is aeo's INFRASTRUCTURE audit.
+- [ ] Follow-up: arrival timestamps (Date.now is unavailable in scripts — the
+      sink/caller stamps); pf-logged blocks / rctl denials as events (FreeBSD
+      side); per-node connection logging on the deny-default.
 
 ### 5. Linux container confinement — DONE + LIVE (lib/confine_linux, 2026-06-27)
 The rootless Linux peer of the FreeBSD Capsicum/rctl/pf axes — and it REUSES the
