@@ -244,6 +244,17 @@ wired yet; mapped here as candidate kinds. Ordered by how cleanly they'd land:
 
 ## Cross-cutting / smaller
 
+- [ ] **Weave aether DURATION LITERALS into the aeo DSL** (Paul 2026-06-27).
+      Aether has first-class duration literals — `2000ms`, `10s`, `200ms` —
+      typed `Duration` (i64 ns), verified to compile in aeo's toolchain. aeo's
+      time-ish setters take raw int MS today: `health_interval(ms: int)`,
+      `health_budget(n)`, and the new netpolicy connect-timeout. Replacing those
+      with Duration-typed setters (`health_interval(1s)` not `(1000)`) is a real
+      ergonomics + correctness win (no more "is this ms or s?"). Plan: a Duration
+      param + a `_dur_ms(d)` that converts to the int ms config stores; keep an
+      int overload for back-compat. Start with health_interval; the netpolicy
+      egress() could take an optional connect-timeout as a Duration.
+
 - [x] **NOT A BUG: "single-container doesn't boot" was a test-harness artifact.**
       Investigated 2026-06-27 and traced to the END: a 1-node compose DOES boot
       fine (`aeo up justdb.ae` -> [db] up -> container RUNNING). The earlier

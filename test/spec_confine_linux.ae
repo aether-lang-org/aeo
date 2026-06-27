@@ -5,7 +5,7 @@
 // (fork-bomb refused under --pids-limit); this pins the pure rendering off-box.
 
 import aeocha
-import confine_linux (cgroup_flags, security_flags, net_flags, confine_string, _kv_value)
+import confine_linux (cgroup_flags, security_flags, net_flags, net_flags2, net_kind, confine_string, _kv_value)
 import std.string   // bare: aeocha's inlined asserts call string.copy unqualified
 
 main() {
@@ -41,12 +41,22 @@ main() {
             }
         }
 
-        aeocha.describe("axis 3 — netpolicy (the pf peer)") {
-            aeocha.it("deny_egress -> --network none (no outbound)") callback {
-                aeocha.assert_str_eq(fw, net_flags("egress:DENY-ALL", "aeo-sys"), "--network none", "deny_egress -> none")
+        aeocha.describe("axis 3 — netpolicy (the pf peer), THREE per-flow tiers") {
+            aeocha.it("net_kind classifies none / internal / shared") callback {
+                aeocha.assert_str_eq(fw, net_kind("egress:DENY-ALL"), "none", "deny_egress -> none")
+                aeocha.assert_str_eq(fw, net_kind("egress->db:6379"), "internal", "peer egress -> internal")
+                aeocha.assert_str_eq(fw, net_kind("ingress:6379"), "shared", "ingress only -> shared")
+                aeocha.assert_str_eq(fw, net_kind(""), "shared", "no policy -> shared")
             }
-            aeocha.it("otherwise the shared aeo net") callback {
-                aeocha.assert_str_eq(fw, net_flags("ingress:6379", "aeo-sys"), "--network aeo-sys", "shared net")
+            aeocha.it("deny_egress -> --network none (no outbound at all)") callback {
+                aeocha.assert_str_eq(fw, net_flags("egress:DENY-ALL", "aeo-sys"), "--network none", "none")
+            }
+            aeocha.it("peer egress -> the INTERNAL net (intra-only, no phone-home)") callback {
+                aeocha.assert_str_eq(fw, net_flags2("egress->db:6379", "aeo-sys", "aeo-sys-int"),
+                    "--network aeo-sys-int", "internal net")
+            }
+            aeocha.it("ingress/no-policy -> the shared aeo net (intra + egress)") callback {
+                aeocha.assert_str_eq(fw, net_flags("ingress:6379", "aeo-sys"), "--network aeo-sys", "shared")
             }
         }
 

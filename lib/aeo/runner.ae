@@ -258,15 +258,19 @@ driver_up(nm: string, k: string) -> string {
             _ = audit.record(nm, k, "attest-pass", pin)
             img = attest.pinned_ref(img, pin)      // run-by-digest
         }
-        // HOST container: put it on a per-system shared network so peers resolve
-        // each other BY NAME (app -> db:6379). env() pairs (e.g. REDIS_HOST=db)
-        // are injected so the workload reaches its dependency's container.
+        // HOST container networks: a SHARED net (intra + external egress) and an
+        // INTERNAL net (intra only — no host/internet, the per-flow netpolicy
+        // "internal" tier). Peers resolve each other BY NAME on either. env()
+        // pairs (e.g. REDIS_HOST=db) reach the dependency's container.
         net = "aeo-${compose.get_system(nm)}"
+        inet = "aeo-${compose.get_system(nm)}-int"
         _ne = driver_linux.network_ensure(net, "")
+        _nei = driver_linux.network_ensure_internal(inet, "")
         // CONFINEMENT (the Linux peer of rctl/Capsicum/pf): render limit{} caps,
         // constrain{} hardening, and netpolicy to podman flags via confine_linux,
-        // so a composition's confinement is substrate-portable.
-        confine = _confine_flags(nm, net)
+        // so a composition's confinement is substrate-portable. A node with
+        // peer-only egress lands on the internal net (can't phone home).
+        confine = _confine_flags(nm, net, inet)
         // FORENSICS: record the posture this node booted WITH (the audit trail —
         // what was confined/attested is then provable after the fact).
         if string_length(confine) > 0 {
@@ -374,11 +378,36 @@ _engine_of(k: string) -> string {
 // The substrate-portable seam: the SAME grammar that lib/rctl renders to FreeBSD
 // rctl rules, here renders to Linux cgroup/seccomp/network flags. "" if the node
 // declared no confinement.
-_confine_flags(nm: string, net: string) -> string {
+_confine_flags(nm: string, net: string, inet: string) -> string {
     rctl = compose.get_rctl(nm)
     constraints = compose.get_constraints(nm)
     netpolicy = compose.get_netpolicy(nm)
-    return confine_linux.confine_string(rctl, constraints, netpolicy, net)
+    // A node that is the TARGET of any peer egress (egress->nm) must join the
+    // INTERNAL net so its internal-confined callers can reach it (peers must share
+    // a network). Synthesize an internal marker into its policy for net placement
+    // — unless it already opts out with deny_egress (none wins).
+    if _is_egress_target(nm) == 1 {
+        if string_contains(netpolicy, "egress:DENY-ALL") == 0 {
+            netpolicy = "${netpolicy}, egress->_internal_peer:0"
+        }
+    }
+    return confine_linux.confine_string2(rctl, constraints, netpolicy, net, inet)
+}
+
+// _is_egress_target(nm) — 1 if any node declares egress->nm:* (so nm serves an
+// internal-confined caller and must share its internal net).
+_is_egress_target(nm: string) -> int {
+    needle = "egress->${nm}:"
+    n = compose.count()
+    i = 0
+    while i < n {
+        other = compose.name_at(i)
+        if string_contains(compose.get_netpolicy(other), needle) == 1 {
+            return 1
+        }
+        i = i + 1
+    }
+    return 0
 }
 
 // _container_image encodes a build failure as a leading "ERR:" sentinel
@@ -464,7 +493,15 @@ _enforce_netpolicy(nm: string) {
         return
     }
     if host.family() != "bsd" {
-        println("aeo: [${nm}] netpolicy declared but pf is FreeBSD-only — NOT enforced on this host")
+        // On Linux, a CONTAINER's netpolicy IS enforced — confine_linux already
+        // placed it on the right network (none/internal/shared) at up time. Report
+        // that, don't warn. Non-container kinds have no Linux netpolicy path yet.
+        k = compose.get_kind(nm)
+        if _is_container(k) == 1 {
+            println("aeo: [${nm}] netpolicy enforced via container network (${confine_linux.net_kind(compose.get_netpolicy(nm))})")
+        } else {
+            println("aeo: [${nm}] netpolicy declared but only pf(FreeBSD)/container enforce it — NOT enforced for kind=${k}")
+        }
         return
     }
     rules = compose.pf_rules_for(nm)

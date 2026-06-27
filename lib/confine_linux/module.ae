@@ -24,7 +24,8 @@ import std.list
 import std.string (string_length, string_contains, string_index_of, string_substring)
 
 exports (
-    cgroup_flags, security_flags, net_flags, confine_argv, confine_string,
+    cgroup_flags, security_flags, net_flags, net_flags2, net_kind,
+    confine_argv, confine_string, confine_string2,
     _kv_value, _split_csv
 )
 
@@ -82,15 +83,47 @@ security_flags(constraints: string, netpolicy: string) -> string {
     return out
 }
 
-// ---- axis 3: network policy (deny_egress -> no network) ----
-// deny_egress() = "reaches out to NOTHING" -> --network none (a pure server with
-// no outbound; if compromised it CANNOT phone home). Otherwise the node joins the
-// shared aeo net (peers resolve by name). egress/ingress whitelisting beyond
-// on/off is a follow-up (podman has no per-flow filter without extra tooling;
-// --network none vs shared is the v0 deny-default).
-net_flags(netpolicy: string, net: string) -> string {
+// ---- axis 3: network policy (THREE tiers, per-flow) ----
+// podman has no per-FLOW firewall rootless, but its per-NETWORK isolation gives
+// three meaningful tiers (proven on Bazzite), and the netpolicy grammar maps onto
+// them cleanly — every egress(target,...) names a PEER resource (not an external
+// host), so "has egress flows" == "needs intra-net only, NOT the internet":
+//
+//   deny_egress()              -> "none"     : --network none (no net at all).
+//   egress->PEER flows, no ext -> "internal" : an --internal podman net — peers
+//                                 resolve + reach each other BY NAME, but the node
+//                                 CANNOT reach the host/internet (can't phone home).
+//   no netpolicy               -> "shared"   : the shared aeo net (intra + egress).
+//
+// net_kind classifies; net_flags renders the --network choice. The driver creates
+// the right network (network_ensure / network_ensure_internal) to match.
+net_kind(netpolicy: string) -> string {
     if string_contains(netpolicy, "egress:DENY-ALL") == 1 {
+        return "none"
+    }
+    // any declared egress flow (egress->peer:port) means intra-only confinement:
+    // the node may reach named peers but not the outside.
+    if string_contains(netpolicy, "egress->") == 1 {
+        return "internal"
+    }
+    return "shared"
+}
+
+// net_flags — the --network choice. `net` is the shared net name; `inet` the
+// internal net name (the driver passes both, having ensured whichever applies).
+net_flags(netpolicy: string, net: string) -> string {
+    return net_flags2(netpolicy, net, net)
+}
+net_flags2(netpolicy: string, net: string, inet: string) -> string {
+    k = net_kind(netpolicy)
+    if k == "none" {
         return "--network none"
+    }
+    if k == "internal" {
+        if string_length(inet) > 0 {
+            return "--network ${inet}"
+        }
+        return "--network ${net}"
     }
     if string_length(net) > 0 {
         return "--network ${net}"
@@ -112,9 +145,14 @@ confine_argv(rctl: string, constraints: string, netpolicy: string, net: string) 
 // the driver/runner splice directly; avoids a list-ptr round-trip). "" if the
 // node declared no confinement.
 confine_string(rctl: string, constraints: string, netpolicy: string, net: string) -> string {
+    return confine_string2(rctl, constraints, netpolicy, net, net)
+}
+// confine_string2 — like confine_string, with a distinct INTERNAL net name so a
+// per-flow "internal" netpolicy lands on the --internal podman network.
+confine_string2(rctl: string, constraints: string, netpolicy: string, net: string, inet: string) -> string {
     out = cgroup_flags(rctl)
     out = _append(out, security_flags(constraints, netpolicy))
-    out = _append(out, net_flags(netpolicy, net))
+    out = _append(out, net_flags2(netpolicy, net, inet))
     return out
 }
 

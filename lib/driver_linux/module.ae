@@ -26,7 +26,7 @@ import std.fs (write_atomic)
 
 exports (
     name, engine_resolve,
-    up, up_net, up_confined, network_ensure, down, probe, exec_capture, build, build_entrypoint, built_tag,
+    up, up_net, up_confined, network_ensure, network_ensure_internal, down, probe, exec_capture, build, build_entrypoint, built_tag,
     ps_running_argv, run_argv, run_argv_net, run_argv_confined, stop_argv, rm_argv, exec_health_argv,
     build_argv
 )
@@ -180,6 +180,26 @@ network_ensure(net: string, engine_pref: string) -> string {
     list_free(av)
     if status != 0 {
         return "aeo: network create '${net}' failed: ${out}"
+    }
+    return ""
+}
+
+// network_ensure_internal — like network_ensure but creates an `--internal`
+// network: containers on it resolve + reach EACH OTHER by name, but CANNOT reach
+// the host/internet. The per-flow netpolicy "internal" tier (a node with declared
+// peer egress but no external need -> can't phone home). Idempotent.
+network_ensure_internal(net: string, engine_pref: string) -> string {
+    eng = engine_resolve(engine_pref)
+    if eng == "" {
+        return "aeo: no container engine for network '${net}'"
+    }
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "${eng} network exists ${net} 2>/dev/null || ${eng} network create --internal ${net} >/dev/null 2>&1")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    if status != 0 {
+        return "aeo: internal network create '${net}' failed: ${out}"
     }
     return ""
 }
