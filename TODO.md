@@ -138,8 +138,14 @@ driver picks rctl/Capsicum/pf on FreeBSD vs cgroups/seccomp/network on Linux).
 - [x] **grammar reuse achieved**: limit{}+constrain{} render to BOTH substrates.
       lib/confine_linux (spec_confine_linux 10); driver_linux up_confined;
       runner._confine_flags. Demo: examples/silly_addition_confined.ae.
-- [ ] Follow-up: per-flow container netpolicy (egress(target,port)/ingress_from)
-      — the v0 is on/off (--network none vs shared). Also: --cpus from pcpu.
+- [x] **per-flow container netpolicy** — DONE + LIVE 2026-06-27. 3 tiers via
+      podman per-network isolation: deny_egress->none, peer egress->--internal net
+      (reach peers by name, NOT the internet), ingress/none->shared. net_kind
+      classifies; egress targets pulled onto the internal net. LIVE: app
+      (egress->db) reaches db but CANNOT reach the internet. SIDESTEPS the pf+
+      if_bridge bug (§1) — podman routed nets, no bridge filter. spec 12.
+- [ ] Follow-up: --cpus from pcpu (limit_cpu); finer ingress_from peer-scoping
+      (v0 internal-net is per-system, not per-pair).
 
 ## Lifecycle & state ops (snapshot / rollback / backup / prune / exec / restart)
 Day-2 operability for a STANDING deployment: capture point-in-time state, restore
