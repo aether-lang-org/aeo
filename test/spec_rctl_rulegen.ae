@@ -30,7 +30,7 @@ main() {
 
         aeocha.describe("the caps are recorded") {
             aeocha.it("get_rctl accumulates every limit_* setter") callback {
-                aeocha.assert_str_eq(fw, get_rctl("db_vm"),
+                aeocha.assert_str_eq(get_rctl("db_vm"),
                     "memoryuse=2G, pcpu=150, maxproc=512, openfiles=4096",
                     "all four caps recorded in order")
             }
@@ -39,17 +39,17 @@ main() {
         aeocha.describe("rendered as rctl rules for a jail subject") {
             aeocha.it("each cap becomes jail:<vm>:RES:deny=AMT") callback {
                 r = rules_for("db_vm", "jail")
-                aeocha.assert_true(fw, _has(r, "jail:db_vm:memoryuse:deny=2G"), "memory cap")
-                aeocha.assert_true(fw, _has(r, "jail:db_vm:pcpu:deny=150"), "cpu cap (150% = 1.5 cores)")
-                aeocha.assert_true(fw, _has(r, "jail:db_vm:maxproc:deny=512"), "fork-bomb ceiling")
-                aeocha.assert_true(fw, _has(r, "jail:db_vm:openfiles:deny=4096"), "fd ceiling")
+                aeocha.assert_true(_has(r, "jail:db_vm:memoryuse:deny=2G"), "memory cap")
+                aeocha.assert_true(_has(r, "jail:db_vm:pcpu:deny=150"), "cpu cap (150% = 1.5 cores)")
+                aeocha.assert_true(_has(r, "jail:db_vm:maxproc:deny=512"), "fork-bomb ceiling")
+                aeocha.assert_true(_has(r, "jail:db_vm:openfiles:deny=4096"), "fd ceiling")
             }
         }
 
         aeocha.describe("the subject is parameterized (bhyve VM = a process)") {
             aeocha.it("renders for a process subject too") callback {
                 r = rules_for("db_vm", "process")
-                aeocha.assert_true(fw, _has(r, "process:db_vm:memoryuse:deny=2G"),
+                aeocha.assert_true(_has(r, "process:db_vm:memoryuse:deny=2G"),
                     "same caps, process subject — for a bhyve hypervisor process")
             }
         }
@@ -57,7 +57,7 @@ main() {
         aeocha.describe("a node with no limits") {
             aeocha.it("renders nothing (no caps -> no rules)") callback {
                 r = rules_for("unlimited_vm", "jail")
-                aeocha.assert_str_eq(fw, r, "", "no limit{} -> empty ruleset")
+                aeocha.assert_str_eq(r, "", "no limit{} -> empty ruleset")
             }
         }
 
@@ -68,19 +68,19 @@ main() {
         aeocha.describe("never-cap-the-orchestrator guard") {
             aeocha.it("rules_for REFUSES a user subject (empty, not a user: rule)") callback {
                 r = rules_for("db_vm", "user")
-                aeocha.assert_str_eq(fw, r, "", "user subject -> no rules emitted")
+                aeocha.assert_str_eq(r, "", "user subject -> no rules emitted")
             }
             aeocha.it("rules_for REFUSES loginclass too") callback {
                 r = rules_for("db_vm", "loginclass")
-                aeocha.assert_str_eq(fw, r, "", "loginclass subject -> no rules")
+                aeocha.assert_str_eq(r, "", "loginclass subject -> no rules")
             }
             aeocha.it("apply REFUSES a user subject LOUDLY (error, not silent no-op)") callback {
                 e = apply("db_vm", "user")
-                aeocha.assert_true(fw, _has(e, "REFUSED"), "apply returns a REFUSED error for user subject")
+                aeocha.assert_true(_has(e, "REFUSED"), "apply returns a REFUSED error for user subject")
             }
             aeocha.it("jail + process subjects ARE allowed") callback {
-                aeocha.assert_true(fw, _has(rules_for("db_vm", "jail"), "jail:db_vm:"), "jail allowed")
-                aeocha.assert_true(fw, _has(rules_for("db_vm", "process"), "process:db_vm:"), "process allowed")
+                aeocha.assert_true(_has(rules_for("db_vm", "jail"), "jail:db_vm:"), "jail allowed")
+                aeocha.assert_true(_has(rules_for("db_vm", "process"), "process:db_vm:"), "process allowed")
             }
         }
     }

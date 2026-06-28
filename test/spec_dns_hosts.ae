@@ -22,7 +22,7 @@ main() {
     aeocha.describe(fw, "aeo-owned naming -> dnsmasq hosts file") {
         aeocha.describe("dns_hosts() emits the name->IP mappings") {
             aeocha.it("maps each resource name to its IP (dnsmasq hosts format)") callback {
-                aeocha.assert_str_eq(fw, dns_hosts(),
+                aeocha.assert_str_eq(dns_hosts(),
                     "172.16.0.50  db_vm\n172.16.0.51  python_vm",
                     "the addn-hosts file aeo writes; dnsmasq serves it")
             }

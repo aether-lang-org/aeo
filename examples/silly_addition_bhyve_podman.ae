@@ -204,19 +204,19 @@ _mode_check() -> string {
                 ln4 = "  bhyve python_vm [guest=${gi}, cpus=2, mem=2G, confined: disk(/zroot/vm/python_vm/disk0.img)=rd,wr, net(tap1)=rd,wr, console(nmdm-python_vm)=rd,wr, net{egress->db_vm:6379, ingress:8080; deny rest}]\n"
                 ln5 = "    container app [entrypoint(docker.io/library/python:3-alpine), expose=8080] -> db"
                 want = string_concat(string_concat(string_concat(ln1, ln2), string_concat(ln3, ln4)), ln5)
-                aeocha.assert_str_eq(fw, describe_tree(), want, "resolved tree snapshot")
+                aeocha.assert_str_eq(describe_tree(), want, "resolved tree snapshot")
             }
 
             aeocha.it("each VM's constrain block names ITS OWN VM (no floating block)") callback {
                 // The constraints live directly on the VM the constrain(vm){}
                 // block named — db_vm's grants on db_vm, python_vm's on python_vm.
-                aeocha.assert_str_eq(fw, get_suspended("db_vm"), "1", "db_vm suspended")
-                aeocha.assert_str_eq(fw, get_started("db_vm"), "1", "db_vm resumed")
-                aeocha.assert_str_eq(fw, get_constraints("db_vm"),
+                aeocha.assert_str_eq(get_suspended("db_vm"), "1", "db_vm suspended")
+                aeocha.assert_str_eq(get_started("db_vm"), "1", "db_vm resumed")
+                aeocha.assert_str_eq(get_constraints("db_vm"),
                     "disk(/zroot/vm/db_vm/disk0.img)=rd,wr, net(tap0)=rd,wr, console(nmdm-db_vm)=rd,wr",
                     "db_vm's own fd grants")
-                aeocha.assert_str_eq(fw, get_suspended("python_vm"), "1", "python_vm suspended")
-                aeocha.assert_str_eq(fw, get_constraints("python_vm"),
+                aeocha.assert_str_eq(get_suspended("python_vm"), "1", "python_vm suspended")
+                aeocha.assert_str_eq(get_constraints("python_vm"),
                     "disk(/zroot/vm/python_vm/disk0.img)=rd,wr, net(tap1)=rd,wr, console(nmdm-python_vm)=rd,wr",
                     "python_vm's own fd grants (DIFFERENT from db_vm's)")
             }
@@ -224,7 +224,7 @@ _mode_check() -> string {
             aeocha.it("python_vm's workload-mode network is a deny-all whitelist") callback {
                 // egress only to redis, ingress only on 8080; everything else
                 // is denied (pf, separate from the Capsicum fd grants).
-                aeocha.assert_str_eq(fw, get_netpolicy("python_vm"),
+                aeocha.assert_str_eq(get_netpolicy("python_vm"),
                     "egress->db_vm:6379, ingress:8080",
                     "may reach db_vm:6379 + accept 8080 — and NOTHING else")
             }
@@ -234,7 +234,7 @@ _mode_check() -> string {
                 // python_vm alone — a 3rd/4th VM is DENIED (the port answers
                 // exactly one client). Plus egress to NOTHING, so a compromised
                 // redis can't phone home. Both explicit + asserted, not silent.
-                aeocha.assert_str_eq(fw, get_netpolicy("db_vm"),
+                aeocha.assert_str_eq(get_netpolicy("db_vm"),
                     "ingress:6379<-python_vm, egress:DENY-ALL",
                     "6379 from python_vm only (no 3rd VM); zero outbound")
             }
@@ -269,8 +269,8 @@ _mode_smoke() -> string {
     aeocha.describe(fw, "post-deploy smoke") {
         aeocha.it("the service answers correctly") callback {
             base = _base()
-            aeocha.expect_http_get_body_eq(fw, "${base}/add/2/2", "4", "2 + 2 = 4")
-            aeocha.expect_http_get_body_eq(fw, "${base}/add/40/2", "42", "40 + 2 = 42")
+            aeocha.expect_http_get_body_eq("${base}/add/2/2", "4", "2 + 2 = 4")
+            aeocha.expect_http_get_body_eq("${base}/add/40/2", "42", "40 + 2 = 42")
         }
     }
     aeocha.run_summary(fw)
@@ -288,13 +288,13 @@ _mode_suite() -> string {
     aeocha.describe(fw, "live deployment (full suite)") {
         aeocha.it("app computes arithmetic over HTTP (2+2=4, 2+3=5, 40+2=42)") callback {
             base = _base()
-            aeocha.expect_http_get_body_eq(fw, "${base}/add/2/2", "4", "2 + 2 = 4")
-            aeocha.expect_http_get_body_eq(fw, "${base}/add/2/3", "5", "2 + 3 = 5")
-            aeocha.expect_http_get_body_eq(fw, "${base}/add/40/2", "42", "40 + 2 = 42")
+            aeocha.expect_http_get_body_eq("${base}/add/2/2", "4", "2 + 2 = 4")
+            aeocha.expect_http_get_body_eq("${base}/add/2/3", "5", "2 + 3 = 5")
+            aeocha.expect_http_get_body_eq("${base}/add/40/2", "42", "40 + 2 = 42")
         }
         aeocha.it("app serves from the db cache (poke redis, read it back)") callback {
             _redis_set(_ip(), "add:2:3", "CACHED99")
-            aeocha.expect_http_get_body_eq(fw, "${_base()}/add/2/3", "CACHED99", "2+3 -> cached value")
+            aeocha.expect_http_get_body_eq("${_base()}/add/2/3", "CACHED99", "2+3 -> cached value")
         }
     }
     aeocha.run_summary(fw)

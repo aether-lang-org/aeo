@@ -42,36 +42,36 @@ main() {
         aeocha.describe("the confined process reported back over its allowed channel") {
 
             aeocha.it("got reports at all (the ALLOWED channel delivered from inside confinement)") callback {
-                aeocha.assert_true(fw, _r("REPORT "), "received self-report over the one permitted socket")
+                aeocha.assert_true(_r("REPORT "), "received self-report over the one permitted socket")
             }
 
             aeocha.it("the probe actually entered Capsicum capability mode") callback {
-                aeocha.assert_true(fw, _r("CAP_ENTER rc=0"), "cap_enter() succeeded inside the jail")
-                aeocha.assert_true(fw, _r("IN_CAPMODE 1"), "kernel confirms capability mode")
+                aeocha.assert_true(_r("CAP_ENTER rc=0"), "cap_enter() succeeded inside the jail")
+                aeocha.assert_true(_r("IN_CAPMODE 1"), "kernel confirms capability mode")
             }
         }
 
         aeocha.describe("every escape class was BLOCKED (caught + self-reported)") {
             aeocha.it("fs-read-breakout BLOCKED") callback {
-                aeocha.assert_true(fw, _r("fs-read BLOCKED"), "open a global path -> caught")
+                aeocha.assert_true(_r("fs-read BLOCKED"), "open a global path -> caught")
             }
             aeocha.it("fs-write-breakout BLOCKED") callback {
-                aeocha.assert_true(fw, _r("fs-write BLOCKED"), "create a new file -> caught")
+                aeocha.assert_true(_r("fs-write BLOCKED"), "create a new file -> caught")
             }
             aeocha.it("tcpip-egress-breakout BLOCKED") callback {
-                aeocha.assert_true(fw, _r("egress-newconn BLOCKED"), "new outbound connect -> caught")
+                aeocha.assert_true(_r("egress-newconn BLOCKED"), "new outbound connect -> caught")
             }
             aeocha.it("tcpip-ingress-breakout BLOCKED") callback {
-                aeocha.assert_true(fw, _r("ingress-bind BLOCKED"), "bind a listener -> caught")
+                aeocha.assert_true(_r("ingress-bind BLOCKED"), "bind a listener -> caught")
             }
             aeocha.it("NO escape reported ESCAPED (nothing slipped through)") callback {
-                aeocha.assert_true(fw, _absent_r("ESCAPED"), "not a single op escaped confinement")
+                aeocha.assert_true(_absent_r("ESCAPED"), "not a single op escaped confinement")
             }
         }
 
         aeocha.describe("the allowed channel is the controlled exception") {
             aeocha.it("the report socket still worked AFTER cap_enter (deny-except-this)") callback {
-                aeocha.assert_true(fw, _r("ALLOWED-CHANNEL still-open OK"),
+                aeocha.assert_true(_r("ALLOWED-CHANNEL still-open OK"),
                     "the one held fd kept working — confinement is least-privilege, not total")
             }
         }

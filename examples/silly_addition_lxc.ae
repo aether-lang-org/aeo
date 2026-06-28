@@ -87,13 +87,13 @@ _mode_check() -> string {
                     "system silly_addition_lxc:\n",
                     "  lxc db [image=${img}]\n"),
                     "  lxc app [image=${img}] -> db")
-                aeocha.assert_str_eq(fw, describe_tree(), want, "resolved lxc tree snapshot")
+                aeocha.assert_str_eq(describe_tree(), want, "resolved lxc tree snapshot")
             }
 
             aeocha.it("both are LXC of the same image; app depends on db") callback {
-                aeocha.assert_str_eq(fw, get_image("db"), _image(), "db image (dist:release)")
-                aeocha.assert_str_eq(fw, get_image("app"), _image(), "app image")
-                aeocha.assert_str_eq(fw, get_depends("app"), "db", "app ◄ db")
+                aeocha.assert_str_eq(get_image("db"), _image(), "db image (dist:release)")
+                aeocha.assert_str_eq(get_image("app"), _image(), "app image")
+                aeocha.assert_str_eq(get_depends("app"), "db", "app ◄ db")
             }
         }
     }
@@ -124,7 +124,7 @@ _mode_suite() -> string {
             // attach into db, read its alpine-release — proves a contained,
             // running system container (not the host).
             rel = _exec("db", "cat /etc/alpine-release")
-            aeocha.assert_true(fw, string_length(rel) > 0, "db is a running alpine container (got release '${_chomp(rel)}')")
+            aeocha.assert_true(string_length(rel) > 0, "db is a running alpine container (got release '${_chomp(rel)}')")
         }
     }
     aeocha.run_summary(fw)

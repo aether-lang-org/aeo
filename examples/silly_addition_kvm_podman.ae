@@ -118,13 +118,13 @@ _mode_check() -> string {
                 ln4 = "  kvm app_vm [image=${a}]\n"
                 ln5 = "    container app [entrypoint(docker.io/library/python:3-alpine), expose=8080] -> db"
                 want = string_concat(string_concat(string_concat(ln1, ln2), string_concat(ln3, ln4)), ln5)
-                aeocha.assert_str_eq(fw, describe_tree(), want, "resolved kvm+podman tree snapshot")
+                aeocha.assert_str_eq(describe_tree(), want, "resolved kvm+podman tree snapshot")
             }
 
             aeocha.it("each container is nested INSIDE its own VM (the host edge)") callback {
-                aeocha.assert_str_eq(fw, get_host("db"), "db_vm", "db lives inside db_vm")
-                aeocha.assert_str_eq(fw, get_host("app"), "app_vm", "app lives inside app_vm")
-                aeocha.assert_str_eq(fw, get_depends("app"), "db", "app ◄ db (cross-VM by name)")
+                aeocha.assert_str_eq(get_host("db"), "db_vm", "db lives inside db_vm")
+                aeocha.assert_str_eq(get_host("app"), "app_vm", "app lives inside app_vm")
+                aeocha.assert_str_eq(get_depends("app"), "db", "app ◄ db (cross-VM by name)")
             }
         }
     }
@@ -150,8 +150,8 @@ _mode_suite() -> string {
     aeocha.describe(fw, "live kvm+podman (HTTP)") {
         aeocha.it("the /add service answers over HTTP") callback {
             base = _base()
-            aeocha.expect_http_get_body_eq(fw, "${base}/add/2/2", "4", "2 + 2 = 4")
-            aeocha.expect_http_get_body_eq(fw, "${base}/add/40/2", "42", "40 + 2 = 42")
+            aeocha.expect_http_get_body_eq("${base}/add/2/2", "4", "2 + 2 = 4")
+            aeocha.expect_http_get_body_eq("${base}/add/40/2", "42", "40 + 2 = 42")
         }
     }
     aeocha.run_summary(fw)

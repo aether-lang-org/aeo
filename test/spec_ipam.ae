@@ -17,9 +17,9 @@ main() {
                 reset_bindings("specsys")
                 a = resolve_ip("specsys", "db_vm")
                 b = resolve_ip("specsys", "python_vm")
-                aeocha.assert_str_eq(fw, a, "172.16.0.10", "db_vm -> first free (.10, after the .1 gateway)")
-                aeocha.assert_str_eq(fw, b, "172.16.0.11", "python_vm -> next free (.11)")
-                aeocha.assert_true(fw, _ne(a, b), "two resources get DISTINCT addresses")
+                aeocha.assert_str_eq(a, "172.16.0.10", "db_vm -> first free (.10, after the .1 gateway)")
+                aeocha.assert_str_eq(b, "172.16.0.11", "python_vm -> next free (.11)")
+                aeocha.assert_true(_ne(a, b), "two resources get DISTINCT addresses")
             }
         }
 
@@ -29,22 +29,22 @@ main() {
                 first  = resolve_ip("specsys", "db_vm")
                 again  = resolve_ip("specsys", "db_vm")
                 again2 = resolve_ip("specsys", "db_vm")
-                aeocha.assert_str_eq(fw, again,  first, "2nd run: same IP")
-                aeocha.assert_str_eq(fw, again2, first, "3rd run: STILL same IP")
+                aeocha.assert_str_eq(again,  first, "2nd run: same IP")
+                aeocha.assert_str_eq(again2, first, "3rd run: STILL same IP")
             }
             aeocha.it("the binding is persisted to the file (survives a fresh process)") callback {
                 dump = bindings_dump("specsys")
-                aeocha.assert_true(fw, _has(dump, "db_vm  172.16.0.10"), "db_vm binding written to ./.aeo")
-                aeocha.assert_true(fw, _has(dump, "python_vm  172.16.0.11"), "python_vm binding written")
+                aeocha.assert_true(_has(dump, "db_vm  172.16.0.10"), "db_vm binding written to ./.aeo")
+                aeocha.assert_true(_has(dump, "python_vm  172.16.0.11"), "python_vm binding written")
             }
         }
 
         aeocha.describe("RESET: the explicit 'fresh IPs' gesture") {
             aeocha.it("reset clears the bindings; next resolve re-allocates") callback {
                 reset_bindings("specsys")
-                aeocha.assert_str_eq(fw, bindings_dump("specsys"), "", "bindings cleared")
+                aeocha.assert_str_eq(bindings_dump("specsys"), "", "bindings cleared")
                 fresh = resolve_ip("specsys", "db_vm")
-                aeocha.assert_str_eq(fw, fresh, "172.16.0.10", "re-allocates from the bottom after reset")
+                aeocha.assert_str_eq(fresh, "172.16.0.10", "re-allocates from the bottom after reset")
             }
         }
     }

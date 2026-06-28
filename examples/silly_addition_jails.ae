@@ -117,23 +117,23 @@ _mode_check() -> string {
                     "system silly_addition_jails:\n",
                     "  jail db [dataset=zroot/jails/db]\n"),
                     "  jail app [dataset=zroot/jails/app] -> db")
-                aeocha.assert_str_eq(fw, describe_tree(), want, "resolved jail tree snapshot")
+                aeocha.assert_str_eq(describe_tree(), want, "resolved jail tree snapshot")
             }
 
             aeocha.it("each jail names its dataset + IP") callback {
-                aeocha.assert_str_eq(fw, get_dataset("db"), "zroot/jails/db", "db dataset")
-                aeocha.assert_str_eq(fw, get_ip("db"), "172.16.0.10", "db ip")
-                aeocha.assert_str_eq(fw, get_dataset("app"), "zroot/jails/app", "app dataset")
-                aeocha.assert_str_eq(fw, get_depends("app"), "db", "app depends on db")
+                aeocha.assert_str_eq(get_dataset("db"), "zroot/jails/db", "db dataset")
+                aeocha.assert_str_eq(get_ip("db"), "172.16.0.10", "db ip")
+                aeocha.assert_str_eq(get_dataset("app"), "zroot/jails/app", "app dataset")
+                aeocha.assert_str_eq(get_depends("app"), "db", "app depends on db")
             }
 
             aeocha.it("each jail carries its OWN rctl resource caps (exhaustion-DoS guard)") callback {
                 // The exhaustion-containment axis — what aeo enforces live on a
                 // jail node. db is capped tighter (a store shouldn't fork-bomb).
-                aeocha.assert_str_eq(fw, get_rctl("db"),
+                aeocha.assert_str_eq(get_rctl("db"),
                     "memoryuse=512M, maxproc=32",
                     "db: 512M + 32 procs (fork-bomb ceiling)")
-                aeocha.assert_str_eq(fw, get_rctl("app"),
+                aeocha.assert_str_eq(get_rctl("app"),
                     "memoryuse=1G, maxproc=128",
                     "app: 1G + 128 procs — its own, different caps")
             }
@@ -165,14 +165,14 @@ _mode_suite() -> string {
     fw = aeocha.init()
     aeocha.describe(fw, "live jails (boot + containment)") {
         aeocha.it("both jails are running (jls)") callback {
-            aeocha.assert_str_eq(fw, _jls_running("db"), "1", "db jail running")
-            aeocha.assert_str_eq(fw, _jls_running("app"), "1", "app jail running")
+            aeocha.assert_str_eq(_jls_running("db"), "1", "db jail running")
+            aeocha.assert_str_eq(_jls_running("app"), "1", "app jail running")
         }
         aeocha.it("a jailed process sees ONLY its own root (the boundary contains)") callback {
             // jexec ls / inside db — must NOT show host dirs (usr, etc, home).
             root_listing = _jexec_capture("db", "/rescue/ls /")
-            aeocha.assert_true(fw, _contains(root_listing, "rescue"), "jail root has /rescue")
-            aeocha.assert_true(fw, _absent(root_listing, "home"), "jail does NOT see host /home (contained)")
+            aeocha.assert_true(_contains(root_listing, "rescue"), "jail root has /rescue")
+            aeocha.assert_true(_absent(root_listing, "home"), "jail does NOT see host /home (contained)")
         }
     }
     aeocha.run_summary(fw)

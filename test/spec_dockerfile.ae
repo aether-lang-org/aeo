@@ -36,33 +36,33 @@ main() {
 
         aeocha.it("builds the image from the inline Dockerfile, runs it, reads the baked-in marker") callback {
             if _no_engine() == 1 {
-                aeocha.assert_true(fw, 1, "skipped — no container engine on PATH")
+                aeocha.assert_true(1, "skipped — no container engine on PATH")
             } else {
                 // build
                 berr = driver_linux.build("myapp", DF(), "")
-                aeocha.assert_str_eq(fw, berr, "", "build succeeds")
+                aeocha.assert_str_eq(berr, "", "build succeeds")
                 tag = driver_linux.built_tag("myapp")
                 // run + alive
                 uerr = driver_linux.up("myapp", tag, "sleep 600", 0, "")
-                aeocha.assert_str_eq(fw, uerr, "", "run succeeds")
-                aeocha.assert_eq(fw, driver_linux.probe("myapp", "", ""), 1, "myapp alive")
+                aeocha.assert_str_eq(uerr, "", "run succeeds")
+                aeocha.assert_eq(driver_linux.probe("myapp", "", ""), 1, "myapp alive")
                 // the baked-in marker proves the image is OURS (built from the
                 // heredoc), not a pulled stock image.
                 marker = driver_linux.exec_capture("myapp", "cat /etc/aeo-marker", "")
-                aeocha.assert_str_eq(fw, marker, "aeo-built-this", "baked-in marker")
+                aeocha.assert_str_eq(marker, "aeo-built-this", "baked-in marker")
                 // and it still computes
-                aeocha.assert_str_eq(fw, driver_linux.exec_capture("myapp", "echo $((2+2))", ""), "4", "2+2=4")
+                aeocha.assert_str_eq(driver_linux.exec_capture("myapp", "echo $((2+2))", ""), "4", "2+2=4")
             }
         }
 
         aeocha.it("is gone after driver down") callback {
             if _no_engine() == 1 {
-                aeocha.assert_true(fw, 1, "skipped — no container engine")
+                aeocha.assert_true(1, "skipped — no container engine")
             } else {
                 driver_linux.build("myapp", DF(), "")
                 driver_linux.up("myapp", driver_linux.built_tag("myapp"), "sleep 600", 0, "")
                 driver_linux.down("myapp", "")
-                aeocha.assert_eq(fw, driver_linux.probe("myapp", "", ""), 0, "myapp gone")
+                aeocha.assert_eq(driver_linux.probe("myapp", "", ""), 0, "myapp gone")
             }
         }
     }

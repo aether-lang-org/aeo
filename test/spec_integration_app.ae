@@ -43,21 +43,21 @@ main() {
 
         aeocha.it("builds + runs the service and computes 2+3=5, 40+2=42 over HTTP") callback {
             if _no_engine() == 1 {
-                aeocha.assert_true(fw, 1, "skipped — no container engine on PATH")
+                aeocha.assert_true(1, "skipped — no container engine on PATH")
             } else {
                 driver_linux.down(NAME(), "")
                 // build the service image from the inline Dockerfile
                 berr = driver_linux.build(NAME(), DF(), "")
-                aeocha.assert_str_eq(fw, berr, "", "build (Python stdlib image)")
+                aeocha.assert_str_eq(berr, "", "build (Python stdlib image)")
                 // run it with the port exposed to the host
                 tag = driver_linux.built_tag(NAME())
                 uerr = driver_linux.up(NAME(), tag, "", PORT(), "")
-                aeocha.assert_str_eq(fw, uerr, "", "up (expose 8080)")
+                aeocha.assert_str_eq(uerr, "", "up (expose 8080)")
                 // wait for the http.server to bind, then curl FROM THE HOST
                 base = "http://localhost:8080"
-                aeocha.assert_str_eq(fw, _wait_http("${base}/add/0/0", 40), "yes", "service reachable")
-                aeocha.expect_http_get_body_eq(fw, "${base}/add/2/3", "5", "GET /add/2/3 = 5")
-                aeocha.expect_http_get_body_eq(fw, "${base}/add/40/2", "42", "GET /add/40/2 = 42")
+                aeocha.assert_str_eq(_wait_http("${base}/add/0/0", 40), "yes", "service reachable")
+                aeocha.expect_http_get_body_eq("${base}/add/2/3", "5", "GET /add/2/3 = 5")
+                aeocha.expect_http_get_body_eq("${base}/add/40/2", "42", "GET /add/40/2 = 42")
             }
         }
     }

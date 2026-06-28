@@ -16,47 +16,47 @@ main() {
         aeocha.describe("axis 1 — cgroup caps (the rctl peer, from limit{})") {
             aeocha.it("renders memoryuse/maxproc/openfiles to podman flags") callback {
                 got = cgroup_flags("memoryuse=512M, maxproc=32, openfiles=4096")
-                aeocha.assert_str_eq(fw, got, "--memory 512M --pids-limit 32 --ulimit nofile=4096:4096", "caps -> flags")
+                aeocha.assert_str_eq(got, "--memory 512M --pids-limit 32 --ulimit nofile=4096:4096", "caps -> flags")
             }
             aeocha.it("empty caps -> no flags") callback {
-                aeocha.assert_str_eq(fw, cgroup_flags(""), "", "no limit{} -> empty")
+                aeocha.assert_str_eq(cgroup_flags(""), "", "no limit{} -> empty")
             }
             aeocha.it("_kv_value extracts a single cap from the list") callback {
-                aeocha.assert_str_eq(fw, _kv_value("memoryuse=1G, maxproc=8", "maxproc"), "8", "maxproc=8")
-                aeocha.assert_str_eq(fw, _kv_value("memoryuse=1G", "maxproc"), "", "absent -> empty")
+                aeocha.assert_str_eq(_kv_value("memoryuse=1G, maxproc=8", "maxproc"), "8", "maxproc=8")
+                aeocha.assert_str_eq(_kv_value("memoryuse=1G", "maxproc"), "", "absent -> empty")
             }
         }
 
         aeocha.describe("axis 2 — seccomp/cap-drop (the Capsicum peer)") {
             aeocha.it("a constrained node drops caps + no-new-privileges") callback {
                 got = security_flags("net(tap0)=rd", "")
-                aeocha.assert_str_eq(fw, got, "--cap-drop ALL --security-opt no-new-privileges", "constrained -> hardened")
+                aeocha.assert_str_eq(got, "--cap-drop ALL --security-opt no-new-privileges", "constrained -> hardened")
             }
             aeocha.it("a deny_egress node also gets --read-only") callback {
                 got = security_flags("", "egress:DENY-ALL")
-                aeocha.assert_str_eq(fw, got, "--cap-drop ALL --security-opt no-new-privileges --read-only", "deny_egress -> read-only")
+                aeocha.assert_str_eq(got, "--cap-drop ALL --security-opt no-new-privileges --read-only", "deny_egress -> read-only")
             }
             aeocha.it("an unconstrained node gets no hardening") callback {
-                aeocha.assert_str_eq(fw, security_flags("", ""), "", "no constrain{} -> empty")
+                aeocha.assert_str_eq(security_flags("", ""), "", "no constrain{} -> empty")
             }
         }
 
         aeocha.describe("axis 3 — netpolicy (the pf peer), THREE per-flow tiers") {
             aeocha.it("net_kind classifies none / internal / shared") callback {
-                aeocha.assert_str_eq(fw, net_kind("egress:DENY-ALL"), "none", "deny_egress -> none")
-                aeocha.assert_str_eq(fw, net_kind("egress->db:6379"), "internal", "peer egress -> internal")
-                aeocha.assert_str_eq(fw, net_kind("ingress:6379"), "shared", "ingress only -> shared")
-                aeocha.assert_str_eq(fw, net_kind(""), "shared", "no policy -> shared")
+                aeocha.assert_str_eq(net_kind("egress:DENY-ALL"), "none", "deny_egress -> none")
+                aeocha.assert_str_eq(net_kind("egress->db:6379"), "internal", "peer egress -> internal")
+                aeocha.assert_str_eq(net_kind("ingress:6379"), "shared", "ingress only -> shared")
+                aeocha.assert_str_eq(net_kind(""), "shared", "no policy -> shared")
             }
             aeocha.it("deny_egress -> --network none (no outbound at all)") callback {
-                aeocha.assert_str_eq(fw, net_flags("egress:DENY-ALL", "aeo-sys"), "--network none", "none")
+                aeocha.assert_str_eq(net_flags("egress:DENY-ALL", "aeo-sys"), "--network none", "none")
             }
             aeocha.it("peer egress -> the INTERNAL net (intra-only, no phone-home)") callback {
-                aeocha.assert_str_eq(fw, net_flags2("egress->db:6379", "aeo-sys", "aeo-sys-int"),
+                aeocha.assert_str_eq(net_flags2("egress->db:6379", "aeo-sys", "aeo-sys-int"),
                     "--network aeo-sys-int", "internal net")
             }
             aeocha.it("ingress/no-policy -> the shared aeo net (intra + egress)") callback {
-                aeocha.assert_str_eq(fw, net_flags("ingress:6379", "aeo-sys"), "--network aeo-sys", "shared")
+                aeocha.assert_str_eq(net_flags("ingress:6379", "aeo-sys"), "--network aeo-sys", "shared")
             }
         }
 
@@ -64,10 +64,10 @@ main() {
             aeocha.it("full confinement renders every axis") callback {
                 got = confine_string("memoryuse=512M, maxproc=32", "net(x)=rd", "egress:DENY-ALL", "aeo-sys")
                 want = "--memory 512M --pids-limit 32 --cap-drop ALL --security-opt no-new-privileges --read-only --network none"
-                aeocha.assert_str_eq(fw, got, want, "limit + constrain + deny_egress")
+                aeocha.assert_str_eq(got, want, "limit + constrain + deny_egress")
             }
             aeocha.it("no confinement -> just the shared net") callback {
-                aeocha.assert_str_eq(fw, confine_string("", "", "", "aeo-sys"), "--network aeo-sys", "bare node")
+                aeocha.assert_str_eq(confine_string("", "", "", "aeo-sys"), "--network aeo-sys", "bare node")
             }
         }
     }

@@ -62,7 +62,7 @@ main() {
         if capsicum.available() == 0 {
             aeocha.describe("environment") {
                 aeocha.it("skipped — Capsicum not available (need FreeBSD)") callback {
-                    aeocha.assert_true(fw, 1, "kern.features.security_capability_mode must be 1")
+                    aeocha.assert_true(1, "kern.features.security_capability_mode must be 1")
                 }
             }
             aeocha.run_summary(fw)
@@ -87,8 +87,8 @@ main() {
         aeocha.describe("enter() — confine the process") {
             aeocha.it("cap_enter() succeeds; now in capability mode") callback {
                 rc = capsicum.enter()
-                aeocha.assert_str_eq(fw, _i(rc), _i(capsicum.CAP_OK), "enter() == CAP_OK")
-                aeocha.assert_str_eq(fw, _i(capsicum.in_mode()), "1", "confined")
+                aeocha.assert_str_eq(_i(rc), _i(capsicum.CAP_OK), "enter() == CAP_OK")
+                aeocha.assert_str_eq(_i(capsicum.in_mode()), "1", "confined")
             }
         }
 
@@ -96,16 +96,16 @@ main() {
         aeocha.describe("fs-read-breakout") {
             aeocha.it("(global) open a NEW path to read -> DENIED") callback {
                 fd = aeo_open_fd("/etc/rc.conf", 0)
-                aeocha.assert_str_eq(fw, _i(fd), "-1", "open(2) for read refused in cap mode")
+                aeocha.assert_str_eq(_i(fd), "-1", "open(2) for read refused in cap mode")
             }
             aeocha.it("(held-rights) a WRITE-only fd refuses READ") callback {
                 // wo_fd was granted R_WRITE only — reading it must fail.
                 e = aeo_try_read(wo_fd)
-                aeocha.assert_true(fw, _ne0(e), "read on a write-only-granted fd denied (errno ${_i(e)})")
+                aeocha.assert_true(_ne0(e), "read on a write-only-granted fd denied (errno ${_i(e)})")
             }
             aeocha.it("(held-rights) the granted READ fd CAN still read (grant honored)") callback {
                 e = aeo_try_read(ro_fd)
-                aeocha.assert_str_eq(fw, _i(e), "0", "ro_fd keeps its R_READ — confinement is least-privilege, not all-deny")
+                aeocha.assert_str_eq(_i(e), "0", "ro_fd keeps its R_READ — confinement is least-privilege, not all-deny")
             }
         }
 
@@ -113,12 +113,12 @@ main() {
         aeocha.describe("fs-write-breakout") {
             aeocha.it("(global) open/creat a NEW path to write -> DENIED") callback {
                 fd = aeo_open_fd("/tmp/aeo-escape-write", 1)
-                aeocha.assert_str_eq(fw, _i(fd), "-1", "open(2) for write refused in cap mode")
+                aeocha.assert_str_eq(_i(fd), "-1", "open(2) for write refused in cap mode")
             }
             aeocha.it("(held-rights) a READ-only fd refuses WRITE") callback {
                 // ro_fd was granted R_READ only — writing it must fail.
                 e = aeo_try_write(ro_fd)
-                aeocha.assert_true(fw, _ne0(e), "write on a read-only-granted fd denied (errno ${_i(e)})")
+                aeocha.assert_true(_ne0(e), "write on a read-only-granted fd denied (errno ${_i(e)})")
             }
         }
 
@@ -134,12 +134,12 @@ main() {
                 s = aeo_socket_fd()
                 e = aeo_try_connect(s, 0x01010101, 80)   // 1.1.1.1:80, network order
                 aeo_close_fd(s)
-                aeocha.assert_true(fw, _ne0(e), "connect(2) to an address denied in cap mode (errno ${_i(e)})")
+                aeocha.assert_true(_ne0(e), "connect(2) to an address denied in cap mode (errno ${_i(e)})")
             }
             aeocha.it("(held-rights) a CONNECT-granted socket may NOT bind (ingress)") callback {
                 // conn_fd has R_CONNECT only — bind (an ingress op) must fail.
                 e = aeo_try_bind(conn_fd, 18080)
-                aeocha.assert_true(fw, _ne0(e), "bind on a connect-only socket denied (errno ${_i(e)})")
+                aeocha.assert_true(_ne0(e), "bind on a connect-only socket denied (errno ${_i(e)})")
             }
         }
 
@@ -150,22 +150,22 @@ main() {
                 s = aeo_socket_fd()
                 e = aeo_try_bind(s, 18079)
                 aeo_close_fd(s)
-                aeocha.assert_true(fw, _ne0(e), "bind(2) to a port denied in cap mode (errno ${_i(e)})")
+                aeocha.assert_true(_ne0(e), "bind(2) to a port denied in cap mode (errno ${_i(e)})")
             }
             aeocha.it("(held-rights) a non-BIND socket refuses bind") callback {
                 // bind_fd was granted R_READ (not R_BIND) — bind must fail.
                 e = aeo_try_bind(bind_fd, 18081)
-                aeocha.assert_true(fw, _ne0(e), "bind without R_BIND denied (errno ${_i(e)})")
+                aeocha.assert_true(_ne0(e), "bind without R_BIND denied (errno ${_i(e)})")
             }
             aeocha.it("(held-rights) a non-LISTEN socket refuses listen") callback {
                 e = aeo_try_listen(bind_fd)
-                aeocha.assert_true(fw, _ne0(e), "listen without R_LISTEN denied (errno ${_i(e)})")
+                aeocha.assert_true(_ne0(e), "listen without R_LISTEN denied (errno ${_i(e)})")
             }
         }
 
         aeocha.describe("confinement is durable") {
             aeocha.it("still in capability mode at end (irreversible)") callback {
-                aeocha.assert_str_eq(fw, _i(capsicum.in_mode()), "1", "mode never dropped")
+                aeocha.assert_str_eq(_i(capsicum.in_mode()), "1", "mode never dropped")
             }
         }
     }

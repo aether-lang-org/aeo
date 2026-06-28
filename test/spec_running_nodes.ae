@@ -47,38 +47,38 @@ main() {
 
         aeocha.it("boots a node that is alive (up + probe)") callback {
             if _no_engine() == 1 {
-                aeocha.assert_true(fw, 1, "skipped — no container engine on PATH")
+                aeocha.assert_true(1, "skipped — no container engine on PATH")
             } else {
-                aeocha.assert_eq(fw, driver_linux.probe("aeo-calc", "", ""), 1, "calc alive")
+                aeocha.assert_eq(driver_linux.probe("aeo-calc", "", ""), 1, "calc alive")
             }
         }
 
         aeocha.it("a node COMPUTES: 2+2=4 and 40+2=42 (exec_capture)") callback {
             if _no_engine() == 1 {
-                aeocha.assert_true(fw, 1, "skipped — no container engine")
+                aeocha.assert_true(1, "skipped — no container engine")
             } else {
-                aeocha.assert_str_eq(fw, driver_linux.exec_capture("aeo-calc", "echo $((2 + 2))", ""), "4", "2+2=4")
-                aeocha.assert_str_eq(fw, driver_linux.exec_capture("aeo-calc", "echo $((40 + 2))", ""), "42", "40+2=42")
+                aeocha.assert_str_eq(driver_linux.exec_capture("aeo-calc", "echo $((2 + 2))", ""), "4", "2+2=4")
+                aeocha.assert_str_eq(driver_linux.exec_capture("aeo-calc", "echo $((40 + 2))", ""), "42", "40+2=42")
             }
         }
 
         aeocha.it("two nodes COMMUNICATE across the shared network") callback {
             if _no_engine() == 1 {
-                aeocha.assert_true(fw, 1, "skipped — no container engine")
+                aeocha.assert_true(1, "skipped — no container engine")
             } else {
                 _run_on_net("aeo-server", "while true; do echo 42 | nc -l -p 8080; done")
                 sleep(2000)   // let the listener bind
                 got = driver_linux.exec_capture("aeo-calc", "nc aeo-server 8080", "")
-                aeocha.assert_str_eq(fw, got, "42", "calc reaches server -> 42")
+                aeocha.assert_str_eq(got, "42", "calc reaches server -> 42")
             }
         }
 
         aeocha.it("a node is GONE after driver down") callback {
             if _no_engine() == 1 {
-                aeocha.assert_true(fw, 1, "skipped — no container engine")
+                aeocha.assert_true(1, "skipped — no container engine")
             } else {
                 driver_linux.down("aeo-calc", "")
-                aeocha.assert_eq(fw, driver_linux.probe("aeo-calc", "", ""), 0, "calc gone")
+                aeocha.assert_eq(driver_linux.probe("aeo-calc", "", ""), 0, "calc gone")
             }
         }
     }

@@ -134,14 +134,14 @@ _mode_check() -> string {
                     "system silly_addition_containers:\n",
                     "  container db [image=docker.io/library/redis:alpine, expose=6379]\n"),
                     "  container app [entrypoint(docker.io/library/python:3-alpine), expose=8080] -> db")
-                aeocha.assert_str_eq(fw, describe_tree(), want, "resolved container tree snapshot")
+                aeocha.assert_str_eq(describe_tree(), want, "resolved container tree snapshot")
             }
 
             aeocha.it("db is stock redis on 6379; app exposes 8080 + depends on db") callback {
-                aeocha.assert_str_eq(fw, get_image("db"), "docker.io/library/redis:alpine", "db image")
-                aeocha.assert_str_eq(fw, string_from_int(get_expose("db")), "6379", "db port")
-                aeocha.assert_str_eq(fw, string_from_int(get_expose("app")), "8080", "app port")
-                aeocha.assert_str_eq(fw, get_depends("app"), "db", "app ◄ db")
+                aeocha.assert_str_eq(get_image("db"), "docker.io/library/redis:alpine", "db image")
+                aeocha.assert_str_eq(string_from_int(get_expose("db")), "6379", "db port")
+                aeocha.assert_str_eq(string_from_int(get_expose("app")), "8080", "app port")
+                aeocha.assert_str_eq(get_depends("app"), "db", "app ◄ db")
             }
         }
     }
@@ -169,8 +169,8 @@ _mode_smoke() -> string {
     aeocha.describe(fw, "post-deploy smoke") {
         aeocha.it("the service answers correctly") callback {
             base = _base()
-            aeocha.expect_http_get_body_eq(fw, "${base}/add/2/2", "4", "2 + 2 = 4")
-            aeocha.expect_http_get_body_eq(fw, "${base}/add/40/2", "42", "40 + 2 = 42")
+            aeocha.expect_http_get_body_eq("${base}/add/2/2", "4", "2 + 2 = 4")
+            aeocha.expect_http_get_body_eq("${base}/add/40/2", "42", "40 + 2 = 42")
         }
     }
     aeocha.run_summary(fw)
@@ -187,9 +187,9 @@ _mode_suite() -> string {
     aeocha.describe(fw, "live containers (full suite)") {
         aeocha.it("app computes arithmetic over HTTP (2+2=4, 2+3=5, 40+2=42)") callback {
             base = _base()
-            aeocha.expect_http_get_body_eq(fw, "${base}/add/2/2", "4", "2 + 2 = 4")
-            aeocha.expect_http_get_body_eq(fw, "${base}/add/2/3", "5", "2 + 3 = 5")
-            aeocha.expect_http_get_body_eq(fw, "${base}/add/40/2", "42", "40 + 2 = 42")
+            aeocha.expect_http_get_body_eq("${base}/add/2/2", "4", "2 + 2 = 4")
+            aeocha.expect_http_get_body_eq("${base}/add/2/3", "5", "2 + 3 = 5")
+            aeocha.expect_http_get_body_eq("${base}/add/40/2", "42", "40 + 2 = 42")
         }
     }
     aeocha.run_summary(fw)
