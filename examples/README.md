@@ -12,16 +12,21 @@ substrate (or the confinement) — read any one, then diff it against another to
 see exactly what a different backend, or turning on `constrain{}`/`limit{}`,
 changes.
 
-## The grid
+## The grid — alternative compositions of the same thing
+
+The same two-tier app, composed every which way. Each row is one substrate
+(or confinement) realization of that identical workload — so the grid *is* the
+set of alternative compositions, side by side. Pick any two rows and diff them:
+what changes is the substrate, never the app.
 
 | Demo | Host | VM | Container | Cell |
 |---|---|---|---|---|
-| `silly_addition_bhyve_podman.ae` | FreeBSD | bhyve VM | podman (inside) | **+VMM +podman** |
-| `silly_addition_kvm_podman.ae`   | Linux   | KVM VM   | podman (inside) | **+VMM +podman** |
-| `silly_addition_kvm.ae`          | Linux   | KVM VM   | —               | **+VMM −podman** |
-| `silly_addition_containers.ae`   | Linux   | —        | podman (host)   | **−VMM +podman** |
-| `silly_addition_lxc.ae`          | Linux   | —        | LXC (system)    | host-native isolation (Linux) |
-| `silly_addition_jails.ae`        | FreeBSD | jail     | —               | host-native isolation (FreeBSD) |
+| [`silly_addition_bhyve_podman.ae`](silly_addition_bhyve_podman.ae) | FreeBSD | bhyve VM | podman (inside) | **+VMM +podman** |
+| [`silly_addition_kvm_podman.ae`](silly_addition_kvm_podman.ae)   | Linux   | KVM VM   | podman (inside) | **+VMM +podman** |
+| [`silly_addition_kvm.ae`](silly_addition_kvm.ae)          | Linux   | KVM VM   | —               | **+VMM −podman** |
+| [`silly_addition_containers.ae`](silly_addition_containers.ae)   | Linux   | —        | podman (host)   | **−VMM +podman** |
+| [`silly_addition_lxc.ae`](silly_addition_lxc.ae)          | Linux   | —        | LXC (system)    | host-native isolation (Linux) |
+| [`silly_addition_jails.ae`](silly_addition_jails.ae)        | FreeBSD | jail     | —               | host-native isolation (FreeBSD) |
 
 `−VMM −podman` is **not** a cell — a compute node has to run *somewhere*, so "no
 VM, no container" is degenerate.
@@ -59,9 +64,9 @@ specs + ipam assert against that string.)
 
 ## Confinement: the impregnable axis (live)
 
-This is no longer a "future axis" — the Linux container confinement is **built
-and live-proven**, from the *same* `limit{}` + `constrain{}` grammar that renders
-to rctl/Capsicum/pf on FreeBSD (substrate-portable confinement):
+The Linux container confinement is **built and live-proven**, from the *same*
+`limit{}` + `constrain{}` grammar that renders to rctl/Capsicum/pf on FreeBSD
+(substrate-portable confinement):
 
 - **cgroup caps** (the rctl peer) — `limit_mem`/`limit_maxproc` → `--memory`/
   `--pids-limit`. Proven: a fork-bomb inside a capped node is *refused*.
