@@ -1,8 +1,9 @@
-# aeo examples — the substrate grid
+# aeo examples — one app, deployed every which way
 
 Each `silly_addition_*.ae` here is the **same two-tier app** — a `db` cache (redis)
 and an `app` that serves `/add/N/M` over HTTP, `app` depending on `db` — deployed
-on a **different substrate**. The core six span the orchestration matrix —
+on a **different substrate** (the thing it runs on: a VM, a container, a jail, or
+some combination). The core six span the orchestration matrix —
 **with/without a VM (VMM)** × **with/without containers (podman)**, plus the
 host-native isolation tiers (Linux LXC, FreeBSD jails) — across both host OSes
 aeo targets. A seventh (`confined`) layers the confinement vocabulary on top.
@@ -12,11 +13,11 @@ substrate (or the confinement) — read any one, then diff it against another to
 see exactly what a different backend, or turning on `constrain{}`/`limit{}`,
 changes.
 
-## The grid — alternative compositions of the same thing
+## The line-up — the same app, deployed every which way
 
 The same two-tier app, composed every which way. Each row is one substrate
-(or confinement) realization of that identical workload — so the grid *is* the
-set of alternative compositions, side by side. Pick any two rows and diff them:
+(or confinement) realization of that identical workload — the table *is* the
+set of alternatives, side by side. Pick any two rows and diff them:
 what changes is the substrate, never the app.
 
 | Demo | Host | VM | Container | Cell |
@@ -116,7 +117,7 @@ each file **on purpose** — these are self-contained, like every standalone pro
 repeating its own `main()`. **Do NOT** factor it into a common module: that breaks
 the single-file property that is the whole point.
 
-## Live-proven status (what's actually been run, not just modeled)
+## Live-proven status (what's actually been run)
 
 - **containers** — full `aeo up` → `2+2=4` over HTTP, *with the cross-container
   cache working* (a value poked into redis read back through app), live on
@@ -144,7 +145,7 @@ keep-N). All seven demos pass `check` standalone and build via both doors.
 ## Other examples here
 
 - `recipe_realize/` — proves the `image_recipe` realizer end-to-end via `aeo up`
-  (the golden-image build/clone path), separate from the substrate grid.
+  (the golden-image build/clone path), separate from the line-up above.
 - `_parked/` — smaller single-tier demos (jail-only, vm-only, an all-Linux
-  two-tier), strict subsets of the grid demos. Revive with
+  two-tier), strict subsets of the line-up demos. Revive with
   `git mv examples/_parked/<x> examples/`.
