@@ -33,7 +33,7 @@ exports (
     system,
     bhyve_vm, freebsd_vm, get_flavor, kvm_vm,
     resource,
-    container, docker, lxc, kvm, jail, bhyve,
+    container, docker, lxc, kvm, jail, bhyve, bwrap,
     image, command, dockerfile, health, dataset, ip, depends, env, get_env, attest, get_attest,
     cpus, memory, nic, expose,
     guest_image, network, ssh_key,
@@ -177,6 +177,7 @@ lxc(nm: string)       -> string { return resource(nm, "lxc") }
 kvm(nm: string)       -> string { return resource(nm, "kvm") }
 jail(nm: string)      -> string { return resource(nm, "jail") }
 bhyve(nm: string)     -> string { return resource(nm, "bhyve") }
+bwrap(nm: string)     -> string { return resource(nm, "bwrap") }
 
 // Inner setters — `_ctx: ptr` is the resource name pushed by resource().
 // `${_ctx}` interpolates it back to the name string for the config key.
@@ -941,6 +942,15 @@ _details(nm: string) -> string {
         mm = config.get("aeo.cmp.memory.${nm}")
         if string_length(mm) > 0 {
             det = _join(det, "mem=${mm}")
+        }
+    }
+    // bwrap's defining attribute IS its command (a sandbox has no image init),
+    // so surface it in the tree. Scoped to bwrap so no other kind's snapshot
+    // shifts; image() on a bwrap node is an optional rootfs and still shows below.
+    if get_kind(nm) == "bwrap" {
+        bc = get_command(nm)
+        if string_length(bc) > 0 {
+            det = _join(det, "command=${bc}")
         }
     }
     img = get_image(nm)

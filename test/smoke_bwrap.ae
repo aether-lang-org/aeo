@@ -1,0 +1,98 @@
+// Smoke test: drive the bubblewrap sandbox driver end-to-end against the real
+// `bwrap` binary. up → probe(running) → probe(health ok/fail) → exec → down →
+// probe(gone). Sandboxes the host userland (no image) and runs a long-lived
+// `sleep` so probe sees it alive.
+//
+// Linux-only (bwrap needs user namespaces) and UNPRIVILEGED — no sudo, no setup.
+// On macOS / a host without bubblewrap it SKIPs. Run inside the Linux VM:
+//   ae build test/smoke_bwrap.ae -o /tmp/smoke_bwrap --lib lib && /tmp/smoke_bwrap
+
+import driver_bwrap
+
+main() {
+    if driver_bwrap.available() == 0 {
+        println("SKIP: bwrap not on PATH (install bubblewrap; Linux-only)")
+        return
+    }
+
+    nm = "aeo-smoke-bwrap"
+
+    // Start clean.
+    driver_bwrap.down(nm)
+
+    // up with a long-lived command so probe sees the sandbox alive.
+    e1 = driver_bwrap.up(nm, "", "sleep 120")
+    if e1 != "" {
+        println("FAIL up: ${e1}")
+        return
+    }
+    println("PASS up")
+
+    // probe running (no health)
+    al = driver_bwrap.probe(nm, "", "")
+    if al != 1 {
+        println("FAIL probe-running: alive=${al}")
+        driver_bwrap.down(nm)
+        return
+    }
+    println("PASS probe-running")
+
+    // probe with a health command that succeeds in a fresh sandbox
+    ah = driver_bwrap.probe(nm, "true", "")
+    if ah != 1 {
+        println("FAIL probe-health-ok: alive=${ah}")
+        driver_bwrap.down(nm)
+        return
+    }
+    println("PASS probe-health-ok")
+
+    // probe with a health command that fails
+    af = driver_bwrap.probe(nm, "false", "")
+    if af != 0 {
+        println("FAIL probe-health-fail: expected 0, got alive=${af}")
+        driver_bwrap.down(nm)
+        return
+    }
+    println("PASS probe-health-fail")
+
+    // exec_capture in a fresh, identically-confined sandbox: in the new PID
+    // namespace, PID 1 is bwrap itself (the namespace init that reaps zombies) —
+    // on the host PID 1 is systemd/init, never bwrap. /proc/1/comm == "bwrap" is
+    // the version-stable proof we're contained (the sandboxed shell is PID 2).
+    init1 = driver_bwrap.exec_capture(nm, "cat /proc/1/comm")
+    if init1 != "bwrap" {
+        println("FAIL exec-capture: expected pid-namespace init 'bwrap', got '${init1}'")
+        driver_bwrap.down(nm)
+        return
+    }
+    println("PASS exec-capture (own pid namespace; init is bwrap, not the host)")
+
+    // exec_capture: net is unshared, so the sandbox has no outbound — the lightest
+    // tier gets deny_egress for free. Loopback-only `ip`/`cat` proof is distro-
+    // dependent, so just confirm the read-only host userland is visible.
+    rel = driver_bwrap.exec_capture(nm, "test -d /usr && echo bound")
+    if rel != "bound" {
+        println("FAIL exec-capture-rootfs: host /usr not bound (got '${rel}')")
+        driver_bwrap.down(nm)
+        return
+    }
+    println("PASS exec-capture-rootfs (host /usr bound read-only)")
+
+    // down
+    e2 = driver_bwrap.down(nm)
+    if e2 != "" {
+        println("FAIL down: ${e2}")
+        return
+    }
+    println("PASS down")
+
+    // probe gone
+    ag = driver_bwrap.probe(nm, "", "")
+    if ag != 0 {
+        println("FAIL probe-gone: expected 0, got alive=${ag}")
+        return
+    }
+    println("PASS probe-gone")
+
+    println("=== driver_bwrap: ALL PASS ===")
+}

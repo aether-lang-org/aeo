@@ -1,0 +1,318 @@
+// lib/driver_bwrap — bubblewrap (bwrap) UNPRIVILEGED sandbox backend.
+//
+// The lightest "contain a process" tier, below driver_lxc/driver_linux. bwrap
+// (the Flatpak sandbox engine, https://github.com/containers/bubblewrap) spawns
+// a process inside fresh Linux namespaces with NO host setup: no sudoers, no
+// bridge, no idmap, no daemon. It runs ROOTLESS via user namespaces. That is the
+// whole appeal — a node kind that boots anywhere a normal user can run bwrap.
+//
+// Unlike podman/lxc there is no daemon and no named-container registry, so this
+// driver supplies the persistence aeo's contract needs the same way driver_vm
+// does for qemu: a long-running sandboxed process tracked by a PIDFILE.
+//
+//   up    — if the pidfile names a live process, no-op; else launch
+//           `bwrap <sandbox opts> -- /bin/sh -c COMMAND` in the background and
+//           record its pid. COMMAND is required (a sandbox has no image init).
+//   down  — kill the recorded pid (the bwrap process is the sandbox; killing it
+//           tears down every namespace child) + remove the pidfile. Absent ==
+//           success.
+//   probe — 1 if the recorded pid is alive (kill -0); with a health command, a
+//           FRESH bwrap running it must also exit 0.
+//   exec  — a FRESH bwrap with the SAME sandbox profile runs `cmd`, stdout
+//           captured. bwrap cannot re-enter a running sandbox unprivileged, so
+//           exec is an identically-confined ephemeral namespace, not a re-attach
+//           (correct for "make a node compute a value and read it back"; it does
+//           not share the running process's mutated /tmp or memory).
+//
+// Filesystem model: with no image() the sandbox binds the HOST userland
+// read-only (/usr + the usual symlinked dirs via --ro-bind-try) — the canonical
+// zero-setup bwrap idiom. image("/path/to/rootfs") instead binds that directory
+// as / . Either way /proc, /dev and a tmpfs /tmp are fresh, and --unshare-all
+// gives private user/pid/net/ipc/uts/cgroup namespaces (net unshared = no
+// outbound: deny_egress is free at this tier — the bridge-less containment the
+// host-config friction of jails/kvm-tap/LXC was blocking).
+//
+// All sandbox-flag assembly is the pure sandbox_argv() builder so it is fully
+// unit-testable without a Linux kernel; only up/down/probe/exec shell out. (bwrap
+// is Linux-only — it needs user namespaces — so the LIVE paths run only on a
+// Linux host; the argv half is authored + tested anywhere, including macOS.)
+
+import std.os (run_capture, os_which)
+import std.list
+import std.string (string_length, string_char_at, string_from_char, string_from_int, string_get_int, string_trim)
+
+exports (
+    name,
+    available, up, down, probe, exec_capture,
+    sandbox_argv, pidfile_for, logfile_for, _shq
+)
+
+name() -> string { return "bwrap" }
+
+// 1 if `bwrap` is on PATH (Linux with bubblewrap installed), else 0. The
+// host-capability check — like driver_linux.engine_resolve, it lets a caller
+// SKIP cleanly off a bwrap-less host instead of importing std.os itself.
+available() -> int {
+    p = os_which("bwrap")
+    if p == null {
+        return 0
+    }
+    if p == "" {
+        return 0
+    }
+    return 1
+}
+
+// Where a sandbox's pidfile / log live. The pidfile is how up/down/probe across
+// separate aeo invocations find the running bwrap process (mirrors driver_vm).
+pidfile_for(res_name: string) -> string {
+    return "/tmp/aeo-bwrap-${res_name}.pid"
+}
+logfile_for(res_name: string) -> string {
+    return "/tmp/aeo-bwrap-${res_name}.log"
+}
+
+// --- pure argv builder (unit-testable; the actual bwrap flags) ---------------
+//
+// bwrap --unshare-all --new-session
+//       [no image]  --ro-bind /usr /usr --ro-bind-try {/bin,/sbin,/lib,/lib64,
+//                    /etc} ...
+//       [rootfs]    --bind ROOTFS /
+//       --proc /proc --dev /dev --tmpfs /tmp
+//       -- /bin/sh -c CMD
+//
+// rootfs "" -> sandbox the host userland (read-only). Non-empty -> bind that
+// directory as the new root. --new-session blocks the TIOCSTI terminal-injection
+// escape; --unshare-all (implies --unshare-user-try) is what makes it rootless.
+// --die-with-parent is deliberately OMITTED: up() backgrounds the process and the
+// launching shell exits, so the pidfile — not the parent link — is the lifecycle
+// handle (the same reason driver_vm tracks a pid).
+sandbox_argv(rootfs: string, cmd: string) -> ptr {
+    av = list_new()
+    list_add(av, "--unshare-all")
+    list_add(av, "--new-session")
+    if string_length(rootfs) > 0 {
+        list_add(av, "--bind")
+        list_add(av, rootfs)
+        list_add(av, "/")
+    } else {
+        // Host userland, read-only. /usr is required; the rest are --ro-bind-try
+        // so a distro that symlinks (e.g. /bin -> /usr/bin) or lacks /lib64 still
+        // builds a working sandbox instead of failing on an absent path.
+        list_add(av, "--ro-bind")
+        list_add(av, "/usr")
+        list_add(av, "/usr")
+        _ro_try(av, "/bin")
+        _ro_try(av, "/sbin")
+        _ro_try(av, "/lib")
+        _ro_try(av, "/lib64")
+        _ro_try(av, "/etc")
+    }
+    list_add(av, "--proc")
+    list_add(av, "/proc")
+    list_add(av, "--dev")
+    list_add(av, "/dev")
+    list_add(av, "--tmpfs")
+    list_add(av, "/tmp")
+    list_add(av, "--")
+    list_add(av, "/bin/sh")
+    list_add(av, "-c")
+    list_add(av, cmd)
+    return av
+}
+
+// append `--ro-bind-try PATH PATH` (bind read-only if it exists, else skip).
+_ro_try(av: ptr, path: string) {
+    list_add(av, "--ro-bind-try")
+    list_add(av, path)
+    list_add(av, path)
+}
+
+// --- exec'ing entry points ---------------------------------------------------
+
+// Bring the sandbox up idempotently. `image` is an optional rootfs directory
+// ("" = sandbox the host userland); `cmd` is the (required) process to run.
+// Returns "" on success else an error.
+up(res_name: string, image: string, cmd: string) -> string {
+    if probe(res_name, "", "") == 1 {
+        return ""
+    }
+    if available() == 0 {
+        return "aeo: bwrap not found on PATH (install bubblewrap: apt/dnf install bubblewrap; Linux-only)"
+    }
+    bin = os_which("bwrap")
+    if string_length(cmd) == 0 {
+        return "aeo: bwrap '${res_name}' has no command() set (a sandbox has no image init — give it a process to run)"
+    }
+    pf = pidfile_for(res_name)
+    log = logfile_for(res_name)
+    av = sandbox_argv(image, cmd)
+    bg = _bg_command(bin, av, pf, log)
+    list_free(av)
+    // /bin/sh -c '<bwrap line> & echo $! > pidfile' — background the sandbox and
+    // record its pid. run_capture returns as soon as the foreground `echo` is
+    // done; bwrap keeps running (reparented to init), tracked by the pidfile.
+    sh = list_new()
+    list_add(sh, "-c")
+    list_add(sh, bg)
+    _out, _status, err = run_capture("/bin/sh", sh, null)
+    list_free(sh)
+    if err != "" {
+        return "aeo: bwrap spawn failed for '${res_name}': ${err}"
+    }
+    // The pid must have been recorded; an immediately-dead sandbox (bad command,
+    // missing /usr) is the common first-run failure — point at the log.
+    if _read_pid(res_name) <= 0 {
+        return "aeo: bwrap '${res_name}' did not start (see ${log})"
+    }
+    return ""
+}
+
+// Tear down: kill the recorded pid + drop the pidfile. Absent == success.
+down(res_name: string) -> string {
+    pid = _read_pid(res_name)
+    if pid > 0 {
+        _kill(pid)
+    }
+    _rm_pidfile(res_name)
+    return ""
+}
+
+// Liveness. 1 if the recorded pid is alive (kill -0) and, when `health` is
+// given, a fresh identically-confined bwrap running it exits 0. Plain int (like
+// the other drivers' probe).
+probe(res_name: string, health: string, _unused: string) -> int {
+    if _pid_alive(res_name) == 0 {
+        return 0
+    }
+    if string_length(health) == 0 {
+        return 1
+    }
+    out, status = _run_sandboxed(res_name, health)
+    if status == 0 {
+        return 1
+    }
+    return 0
+}
+
+// exec_capture — run `cmd` in a fresh sandbox with this node's confinement and
+// return its stdout ("" on failure). The per-node operability primitive for
+// `aeo exec <bwrap> <cmd>`. NB: a fresh namespace, not the running process's
+// (bwrap has no unprivileged re-attach) — identical confinement, clean state.
+exec_capture(res_name: string, cmd: string) -> string {
+    out, status = _run_sandboxed(res_name, cmd)
+    if status != 0 {
+        return ""
+    }
+    return string_trim(out)
+}
+
+// Run `cmd` synchronously in a fresh bwrap carrying this node's rootfs profile.
+// The node's image() is not threaded through the driver dispatch for exec/probe,
+// so the sandbox here uses the host-userland profile (rootfs ""); a rootfs node's
+// live exec is a follow-up once the dispatch carries image() to driver_exec.
+// Returns (stdout, status); status non-zero (or spawn failure) means "failed".
+_run_sandboxed(res_name: string, cmd: string) -> {
+    fail_out = ""
+    fail_st = 1
+    if available() == 0 {
+        return fail_out, fail_st
+    }
+    bin = os_which("bwrap")
+    av = sandbox_argv("", cmd)
+    out, status, err = run_capture(bin, av, null)
+    list_free(av)
+    if err != "" {
+        return fail_out, fail_st
+    }
+    return out, status
+}
+
+// --- pidfile + process + shell helpers ---------------------------------------
+
+// Build the `/bin/sh -c` body that backgrounds the bwrap line and records its
+// pid. Each argv token is single-quote escaped because the node's command() is
+// arbitrary operator text (unlike driver_vm's controlled VM argv, which it
+// space-joins raw). `echo $!` captures the bwrap pid directly (we background the
+// bwrap process itself, not a wrapper), so down/probe act on the real sandbox.
+_bg_command(bin: string, argv: ptr, pf: string, log: string) -> string {
+    line = _shq(bin)
+    n = list_size(argv)
+    i = 0
+    while i < n {
+        a = list_get_raw(argv, i)
+        line = "${line} ${_shq(a)}"
+        i = i + 1
+    }
+    return "${line} </dev/null >${log} 2>&1 & echo $! > ${pf}"
+}
+
+// POSIX single-quote a string: wrap in '...', and render each embedded ' as the
+// '\'' idiom (close-quote, escaped-quote, reopen-quote). Makes any token safe to
+// splice into an `sh -c` command, no matter what metacharacters it carries.
+_shq(s: string) -> string {
+    out = "'"
+    i = 0
+    n = string_length(s)
+    while i < n {
+        c = string_char_at(s, i)
+        if c == 39 {
+            out = "${out}'\\''"
+        } else {
+            out = "${out}${string_from_char(c)}"
+        }
+        i = i + 1
+    }
+    return "${out}'"
+}
+
+_read_pid(res_name: string) -> int {
+    pf = pidfile_for(res_name)
+    av = list_new()
+    list_add(av, pf)
+    out, status, err = run_capture("/bin/cat", av, null)
+    list_free(av)
+    if err != "" {
+        return 0
+    }
+    if status != 0 {
+        return 0
+    }
+    // string_get_int tolerates the pidfile's trailing newline; junk -> 0.
+    return string_get_int(out)
+}
+
+// 1 if the sandbox's recorded pid is alive (kill -0), else 0.
+_pid_alive(res_name: string) -> int {
+    pid = _read_pid(res_name)
+    if pid <= 0 {
+        return 0
+    }
+    av = list_new()
+    list_add(av, "-0")
+    list_add(av, string_from_int(pid))
+    out, status, err = run_capture("/bin/kill", av, null)
+    list_free(av)
+    if err != "" {
+        return 0
+    }
+    if status == 0 {
+        return 1
+    }
+    return 0
+}
+
+_kill(pid: int) {
+    av = list_new()
+    list_add(av, string_from_int(pid))
+    _o, _s, _e = run_capture("/bin/kill", av, null)
+    list_free(av)
+}
+
+_rm_pidfile(res_name: string) {
+    av = list_new()
+    list_add(av, "-f")
+    list_add(av, pidfile_for(res_name))
+    _o, _s, _e = run_capture("/bin/rm", av, null)
+    list_free(av)
+}

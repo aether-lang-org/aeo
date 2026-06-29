@@ -28,6 +28,7 @@ what changes is the substrate, never the app.
 | [`silly_addition_containers.ae`](silly_addition_containers.ae)   | Linux   | —        | podman (host)   | **−VMM +podman** |
 | [`silly_addition_lxc.ae`](silly_addition_lxc.ae)          | Linux   | —        | LXC (system)    | host-native isolation (Linux) |
 | [`silly_addition_jails.ae`](silly_addition_jails.ae)        | FreeBSD | jail     | —               | host-native isolation (FreeBSD) |
+| [`silly_addition_bwrap.ae`](silly_addition_bwrap.ae)        | Linux   | —        | bwrap (sandbox) | unprivileged, zero host setup |
 
 `−VMM −podman` is **not** a cell — a compute node has to run *somewhere*, so "no
 VM, no container" is degenerate.

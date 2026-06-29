@@ -25,5 +25,8 @@
 /tmp/
 *.swp
 
+# Aether LSP server log (per-dev tooling artifact)
+aether-lsp.log
+
 # iterative-dev sticky IP bindings (lib/ipam) — per-dev, not committed
 .aeo/
