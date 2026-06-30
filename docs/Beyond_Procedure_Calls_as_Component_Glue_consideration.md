@@ -78,36 +78,45 @@ paper claims for `→`.
 
 ## 4. The two deliberate divergences — aeo's contribution over the paper
 
-### 4.1 Directionality: contained-reaches-OUT, not container-reaches-IN
+### 4.1 A resident deputy with no workload surface — not "the contained talks back"
 
-This is the big one — but state it carefully, because the paper is not a
-containment system and doesn't claim to be. What L42 *actually* does is **remote
-directory sync over SFTP**: an `SSHConnection{ host:, user: }` yields a store
-representing a *remote filesystem*, and the same `|=` sync runs against it. There
-is no "guest," no "contained," no isolation boundary in the paper at all. The
-mechanism is simply *the orchestrator reaches into a remote resource* — it holds
-the credentials (`user:`) and has network reach to `host:` (both literally in the
-listing).
+This is the big one, and it's easy to state backwards. First, what the paper does:
+L42 is **remote directory sync over SFTP** — an `SSHConnection{ host:, user: }`
+yields a store for a *remote filesystem*, and `|=` syncs against it. There is no
+"guest," no "contained," no isolation boundary in the paper at all; it just
+reaches a remote machine's files, holding the credentials.
 
-Now **transplant that mechanism into aeo's setting** and it becomes the
-antipattern: a remote resource is no longer just another machine's filesystem but
-a *contained's* interior, and orchestrator-reaches-in is then exactly the
-LiveConnect / DOM-monkey-patching disaster that
-[The Principles of Containment](https://paulhammant.com/2016/12/14/principles-of-containment/)
-forbids — plus it forces aeo to hold guest credentials and have network reach
-into the interior. The antipattern is aeo's *contrast when the shape is imported
-into containment*, not a sin the paper commits in its own (boundary-free) domain.
+Now the containment model, stated correctly (per
+[The Principles of Containment](https://paulhammant.com/2016/12/14/principles-of-containment/)):
+**a container orchestrating the thing it contains is entirely legitimate, and
+always was** — reaching in to boot/halt/configure the contained is what authority
+over the contained *means*. What containment forbids is the **contained's own
+workload chatting back up on its own terms** — the contained process declaring
+"actually I'll have four more deps please," negotiating, initiating conversation
+with its container. The contained gets what the container gives it; it does not
+renegotiate.
 
-`aeo-agent` **inverts the flow on containment grounds** (`docs/aeo-agent.md`
-§"Why an agent, not ssh"): the contained reaches OUT and the parent listens; the
-parent messages a *resident* agent, never *through* the boundary. The contained
-"only suspects it is contained" and reaches back only where configured — the
-agent's one endpoint.
+So the interesting property of aeo is **not** "aeo reverses the flow so the
+contained talks back" (that would be the *violation*). It is that `aeo-agent` is
+the **container's deputy, resident inside the node**: it enacts the container's
+will and reports health, but it exposes **zero ABI surface** to the node's other
+processes — the workload (Python code, whatever runs there) gets no channel to
+the parent through it. The agent serves the container, never the workload; the
+workload "only suspects it is contained" and has no means to reach out. The agent
+*physically* dialing out to report is a transport detail, not the contained
+negotiating — because the agent acts for the *container*, and the workload can't
+speak on its channel.
 
-So aeo keeps the paper's protocol-with-pluggable-transport factoring but
-**reverses the directionality**. The reversal is the novelty: it's a containment
-property the paper neither has nor needs (Objective-S isn't a containment system).
-This is the thing to be proud of and to defend.
+What makes "no workload surface" enforceable rather than aspirational: the
+parent↔agent channel is encrypted + mutually authenticated with **one-time
+per-agent keys — no CA, no trust root** (design-intent; see `docs/aeo-agent.md`
+§"Channel security"). The workload can't forge onto the channel because it lacks
+the key, and there is no issuer to mis-issue against. Single-parent enforcement
+falls out of "one key pair, no authority above it."
+
+This is a containment property the paper neither has nor needs (Objective-S isn't
+a containment system) — but the contribution is the *resident-deputy + no-surface*
+shape, not a directionality flip that lets the contained speak freely.
 
 ### 4.2 No `→` operator, no general MOP at the front door
 
@@ -120,8 +129,8 @@ blur the aeb/aeo seam.
 
 ## 5. Directions the paper *legitimizes* — SHOULD do
 
-Ranked by leverage. All respect the aeb/aeo factoring and the containment
-inversion.
+Ranked by leverage. All respect the aeb/aeo factoring and the resident-deputy
+containment model (§4.1).
 
 ### 5.1 Land the recursion — the headline build
 
@@ -152,10 +161,13 @@ The protocol carries a per-agent `token` from day one, but v0 only *warns* on
 mismatch (`bin/aeo-agent.ae` `_handle`; `lib/protocol` header). The design
 explicitly says the HTTP transport makes "single-parent, securely" *enforcement,
 not a redesign* — the field is already in the wire format, so the pivot is
-non-breaking. Building `transport_http` with fail-closed single-parent auth turns
-a documented promise into a live security axis, and it pairs naturally with the
-containment inversion (a contained that reaches out to exactly one authenticated
-parent endpoint). Self-contained and already scoped.
+non-breaking. Building `transport_http` with fail-closed auth turns a documented
+promise into a live security axis — and the right shape is **one-time per-agent
+keys, no CA / no trust root** (§4.1): the token becomes a freshly-minted keypair
+the parent pins at bootstrap, mutual-auth on it, dead when the agent dies.
+Single-parent enforcement falls out of "one key pair, no authority above it," and
+the no-workload-surface property becomes enforceable (the workload lacks the key).
+Self-contained and already scoped.
 
 ### 5.4 Agent-side self-attestation (the paper's "standing connection," used)
 
@@ -191,16 +203,20 @@ five-verb protocol is the *only* connection abstraction aeo should have, and it
 lives one boundary down (in the node), not at the front door. Keep the front door
 imperative-runtime with health-gated handles.
 
-### 6.2 Do NOT build an SSH-reach-in remote driver (L42's mechanism, in containment)
+### 6.2 Do NOT build an SSH-into-the-guest remote driver (prefer the resident deputy)
 
-The obvious "remote substrate" move — an SSH driver that dials into a guest and
-runs `podman` there — is L42's reach-into-a-remote-resource mechanism applied to
-a *contained*, which is *exactly* the directionality `aeo-agent` was built to
-reject (§4.1). (In the paper L42 is harmless remote-filesystem sync; the problem
-is only what it becomes across a containment boundary.) It violates Principles of Containment, forces aeo to hold guest
-credentials, and gives it network reach into the interior. The agent **replaces**
-this idea; it is not a fallback to keep around. If "remote" is wanted, it is the
-agent reaching out, never the orchestrator reaching in.
+To be precise — the objection is *not* "the container must never reach into the
+contained"; orchestrating the contained is legitimate (§4.1). The objection to an
+SSH driver that dials into a guest and runs `podman` there is narrower and still
+decisive: it makes aeo hold **long-lived guest credentials** and carry a standing
+**interior network path** that the contained workload shares — and it gives no
+resident deputy, so no *no-workload-surface* and no one-time-key guarantee. The
+`aeo-agent` deputy gets the same orchestration done with **no standing
+credentials** (one-time keys, minted per agent, dead when the agent dies) and
+**zero surface to the workload**. So: same authority over the contained, none of
+the credential/interior-reach liabilities. Prefer the deputy; don't keep an
+ssh-in driver as a fallback. (In the paper L42 is harmless remote-filesystem
+sync; this concern only arises across a containment boundary.)
 
 ### 6.3 Do NOT add a config-file parser to "match" the paper's stores
 
@@ -219,9 +235,10 @@ axis of merit.
 ### 6.5 Do NOT let the paper's guest-side stores tempt guest-side *enforcement*
 
 The paper happily puts stores *inside* the guest (file/SSH/HTTP) and reaches them.
-For a containment system that is fine for *reporting* (the agent reaches out) but
-must NOT slide into *enforcement* (a guest firewalling itself). Host-pf does the
-denying; a compromised guest must not be able to disable its own confinement.
+For a containment system that is fine for *reporting* (the resident deputy reports
+health on the container's behalf) but must NOT slide into *enforcement* (a guest
+firewalling itself). Host-pf does the denying; a compromised guest must not be
+able to disable its own confinement.
 This is the live temptation for the FreeBSD `if_bridge` red axis — solving that
 bug at the host is the job, not pushing netpolicy into the guest. (Bug planned in
 `docs/if_bridge-pf-delivery-bug.md`.)
@@ -229,13 +246,15 @@ bug at the host is the job, not pushing netpolicy into the guest. (Bug planned i
 ## 7. One-line takeaway
 
 aeo and the paper share a thesis (config IS code, connector ≠ variant, protocol
-over replaceable transport) and aeo's contribution is the **containment-driven
-reversal of directionality** — same factoring, opposite flow. The work the paper
-*legitimizes* is finishing the agent (recursion, fail-closed transport,
-self-attestation). The work it makes *seductive but wrong* is importing
-`→`/general-MOP/SSH-reach-in to the front door — or letting its guest-side stores
-tempt guest-side *enforcement* (§6.5). Build the agent out; keep the front door
-narrow; keep enforcement at the host.
+over replaceable transport) and aeo's contribution is the **resident-deputy
+containment model** — the container's agent lives inside the node, enacts the
+container's will and reports health, but exposes zero surface to the workload and
+holds no standing credentials (one-time keys, no CA). The work the paper
+*legitimizes* is finishing the agent (recursion, fail-closed one-time-key
+transport, self-attestation). The work it makes *seductive but wrong* is importing
+`→`/general-MOP to the front door, an ssh-into-the-guest driver (§6.2), or
+guest-side *enforcement* (§6.5). Build the agent out; keep the front door narrow;
+keep enforcement at the host.
 
 *(The FreeBSD `if_bridge` red axis is the higher-priority infra task overall, but
 it is a pre-existing aeo bug unrelated to this paper — planned in

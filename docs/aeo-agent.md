@@ -27,11 +27,18 @@ guest's internals.
 
 `aeo-agent` inverts it to the correct directionality:
 
-- **The contained reaches OUT, the container receives.** On boot the agent
-  dials the parent ("I'm `app`, I'm up, here's my health") — the contained
-  *reports*; the parent *listens*. The contained "only suspects it is
-  contained" (the post's phrase) and reaches back *only where configured* —
-  the agent's one endpoint.
+- **The agent is the container's deputy *inside* the node — not the contained
+  talking back.** This distinction is load-bearing. Containment *always* allowed
+  the container to orchestrate the contained; what it forbids is the *contained's
+  own workload* opening chat upward ("actually I'll have four more deps please").
+  The agent is **not** that: it enacts the outer container's will (boot/halt/probe)
+  and reports health, but it exposes **zero ABI surface** to the node's other
+  processes — the Python workload (or whatever runs in the node) gets no channel
+  to the parent through the agent. The agent serves the container, never the
+  workload. On boot it dials the parent ("I'm `app`, up, here's my health") — a
+  *report* on a single pre-configured endpoint, not a negotiation. The workload
+  "only suspects it is contained" (the post's phrase) and has no means to reach
+  out at all.
 - **The parent messages IN to a resident agent, not through the boundary.**
   aeo doesn't push commands across the kernel boundary; it sends a message to
   an agent already inside, which acts locally. The boundary is crossed by a
@@ -100,6 +107,34 @@ The agent dials out; the parent listens. Candidates, cheapest first:
 
 The message types are aeo's existing ones (`Boot`/`Probe`/`Halt` + a report
 back), so the transport is just a pipe for already-defined messages.
+
+## Channel security — one-time keys, no CA (design-intent, NOT built)
+
+> Status: **requirement, not yet implemented.** v0 (`bin/aeo-agent.ae`) uses the
+> file transport with a *warn-level* shared token. The properties below are the
+> design target the `transport_http` pivot must meet; today's code does not yet
+> enforce them. Keep the proven-vs-modeled line honest.
+
+Two properties make "the agent serves the container, never the workload" real
+rather than aspirational:
+
+1. **No surface to the node's other processes.** The agent must not expose an
+   API/port/socket that the contained workload can call to reach the parent. The
+   agent is co-resident with the workload but offers it nothing — its only
+   channel is to the container, and the workload cannot speak on it.
+
+2. **One-time keys, no trust root, no CA.** The parent↔agent channel is encrypted
+   and mutually authenticated with a **freshly-generated per-agent keypair**
+   stamped at bootstrap — *not* a public-CA certificate and *not* a long-lived
+   private CA. There is no issuer and no root to pin: the parent trusts exactly
+   the one key it minted for this agent, and the agent trusts exactly the one
+   parent key. Single-parent enforcement falls straight out of "one key pair, no
+   authority above it," and there is no key material that outlives the agent — so
+   WebPKI mis-issuance / CA compromise is simply not in the threat model (there's
+   no CA to compromise). This is the cryptographic form of the per-agent `token`
+   already in `lib/protocol`; the `transport_http` "fail-closed, single-parent"
+   pivot is where the token *becomes* the one-time key, and warn-on-mismatch
+   becomes reject-on-mismatch.
 
 ## What this changes
 

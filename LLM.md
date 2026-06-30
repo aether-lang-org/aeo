@@ -213,25 +213,25 @@ is load-bearing: Aether's module `var` had a string of cross-import soundness bu
 > abstraction "requires serialized representations, which have to be parsed,
 > generated and accessed via the POSIX APIs … a form of packaging mismatch."
 > **Where aeo diverges — the part that's genuinely ours:** Objective-S gets this
-> via a polymorphic connection operator `→` backed by a metaobject protocol, and
-> its remote story (L42) is `SSHConnection`-based remote *filesystem* sync over
-> SFTP — the orchestrator reaches into a remote resource, holding its credentials.
-> (The paper has no containment boundary; it's just remote directory sync.) **aeo
-> reverses the directionality on containment grounds.** Import L42's reach-in
-> *into a containment setting* and it becomes the LiveConnect / DOM-monkey-patching
-> antipattern Principles-of-Containment forbids (reaching into a *contained's*
-> innards). So `lib/protocol/` + `aeo-agent`
-> (`bin/aeo-agent.ae`) keep the paper's best idea — *a stable verb set with a
-> replaceable transport beneath it* (`boot/halt/probe/announce/report` over
+> via a polymorphic connection operator `→` backed by a metaobject protocol; its
+> remote story (L42) is plain `SSHConnection` remote *filesystem* sync over SFTP
+> (no containment boundary — just remote directory sync, holding the credentials).
+> aeo's contribution is **not** a directionality flip (containment *always*
+> allowed the container to orchestrate the contained; what it forbids is the
+> *contained's workload* chatting back up — "I'll have four more deps please").
+> aeo's contribution is the **resident-deputy** shape: `lib/protocol/` +
+> `aeo-agent` (`bin/aeo-agent.ae`) keep the paper's best idea — *a stable verb set
+> with a replaceable transport beneath it* (`boot/halt/probe/announce/report` over
 > `transport_file` now, `transport_http` later): a metaobject protocol in
-> miniature — but invert the flow: **the contained reaches OUT and the parent
-> listens; the parent messages a resident agent, never through the boundary.** The
-> agent IS the standing live connection the paper describes via `→`, made concrete
-> *and* containment-safe: the runner is just the depth-0 agent, the same actor
-> protocol one boundary down. The front door still has **no `→` operator** and
-> shells to aeb for static structure. So: same protocol-with-pluggable-transport
-> factoring, opposite directionality — and the reversal is the novelty over the
-> paper, not a retreat from it. (See `docs/aeo-agent.md`.)
+> miniature — and put it inside the node as the **container's deputy**. The agent
+> enacts the container's will + reports health, but exposes **zero ABI surface to
+> the node's other processes** (the workload gets no upward channel through it) and
+> the parent channel is mutually authenticated with **one-time per-agent keys — no
+> CA, no trust root** (design-intent, not built: v0 is file-transport + warn-level
+> token). The agent IS the standing live connection the paper describes via `→`,
+> made concrete *and* containment-safe (workload can't speak on it, can't forge
+> onto it). The runner is just the depth-0 agent. The front door still has **no
+> `→` operator** and shells to aeb for static structure. (See `docs/aeo-agent.md`.)
 
 > Historical note: early design docs (and old versions of this file) describe a
 > `cap` threaded through every handle — `jail(cap, "db")`, `aeo(cap)` DI. That
