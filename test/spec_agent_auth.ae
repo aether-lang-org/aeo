@@ -1,0 +1,75 @@
+// spec_agent_auth.ae — the bank-courier auth core (lib/agent_auth).
+//
+// Proves the mint + constant-time-verify the aeo-agent channel will use: a
+// freshly-minted CSPRNG secret, HMAC-keyed verification, fail-closed on an empty
+// secret. All stock stdlib (std.nanoid + std.cryptography.hmac) — wiring, not
+// new crypto. (Wire transport + TLS are separate; this is the auth core.)
+//
+//   sh test/run-spec.sh test/spec_agent_auth.ae
+//
+// Covers:
+//   - mint_secret yields a non-empty secret, and two mints DIFFER (it's random)
+//   - verify accepts the matching secret
+//   - verify REJECTS a wrong secret
+//   - verify is FAIL-CLOSED: an empty configured secret denies everything
+//   - mac is stable for the same secret (deterministic keyed MAC)
+
+import aeocha
+import agent_auth (mint_secret, verify, mac)
+import std.string (string_length, string_from_int)
+import std.string   // bare form: inlined aeocha calls bare `copy` unqualified
+
+main() {
+    fw = aeocha.init()
+
+    aeocha.describe(fw, "lib/agent_auth — bank-courier mint + verify") {
+
+        aeocha.describe("mint") {
+            aeocha.it("mints a non-empty secret") callback {
+                s = mint_secret()
+                aeocha.assert_str_eq(string_from_int(_nonempty(s)), "1", "secret is non-empty")
+            }
+            aeocha.it("two mints differ (it's actually random)") callback {
+                a = mint_secret()
+                b = mint_secret()
+                aeocha.assert_str_eq(string_from_int(_streq(a, b)), "0", "distinct secrets")
+            }
+        }
+
+        aeocha.describe("verify (constant-time)") {
+            aeocha.it("accepts the matching secret") callback {
+                s = mint_secret()
+                aeocha.assert_str_eq(string_from_int(verify(s, s)), "1", "match -> allow")
+            }
+            aeocha.it("rejects a wrong secret") callback {
+                s = mint_secret()
+                w = mint_secret()
+                aeocha.assert_str_eq(string_from_int(verify(s, w)), "0", "mismatch -> deny")
+            }
+            aeocha.it("is fail-closed: empty configured secret denies all") callback {
+                aeocha.assert_str_eq(string_from_int(verify("", "anything")), "0", "no key -> deny")
+                aeocha.assert_str_eq(string_from_int(verify("", "")), "0", "empty vs empty -> deny")
+            }
+        }
+
+        aeocha.describe("mac") {
+            aeocha.it("is stable for the same secret") callback {
+                m1 = mac("courier-key-xyz")
+                m2 = mac("courier-key-xyz")
+                aeocha.assert_str_eq(m1, m2, "same secret -> same MAC")
+            }
+        }
+    }
+
+    aeocha.run_summary(fw)
+}
+
+// helpers (aeocha asserts on strings; turn predicates into "0"/"1")
+_nonempty(s: string) -> int {
+    if string_length(s) > 0 { return 1 }
+    return 0
+}
+_streq(a: string, b: string) -> int {
+    if a == b { return 1 }
+    return 0
+}

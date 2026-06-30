@@ -80,14 +80,33 @@ while [ "$got_outer" -eq 0 ] || [ "$got_inner" -eq 0 ]; do
     sleep 0.1
 done
 
+echo "got_outer=$got_outer got_inner=$got_inner"
+
+# Phase 2 — AUTH: a command bearing a WRONG token must be REFUSED (fail-closed).
+# Send a boot for a fresh node `intruder` with a bogus token; assert NO report
+# for it ever appears in outer's outbox (the agent drops it, keeps serving).
+printf 'boot %s %s\n' "WRONG-TOKEN" "intruder" > "$RV/inbox/outer/$(printf '%06d' "$seq").cmd"; seq=$((seq+1))
+got_intruder=0
+i=0
+while [ "$i" -lt 30 ]; do            # ~3s — long enough for a report to show if it would
+    i=$((i+1))
+    for f in "$RV"/outbox/outer/*.cmd; do
+        [ -e "$f" ] || continue
+        case "$(cat "$f")" in
+            *"intruder"*) got_intruder=1 ;;
+        esac
+    done
+    sleep 0.1
+done
+
 echo "--- outer.log ---"; cat "$RV/outer.log"
 echo "--- inner.log ---"; cat "$RV/inner.log"
 echo "---"
-echo "got_outer=$got_outer got_inner=$got_inner"
+echo "got_outer=$got_outer got_inner=$got_inner got_intruder=$got_intruder (want 1 1 0)"
 
-if [ "$got_outer" -eq 1 ] && [ "$got_inner" -eq 1 ]; then
-    echo "PASS: recursion converged — inner's report relayed up through outer to root"
+if [ "$got_outer" -eq 1 ] && [ "$got_inner" -eq 1 ] && [ "$got_intruder" -eq 0 ]; then
+    echo "PASS: recursion converged AND wrong-token boot was refused (fail-closed)"
     exit 0
 fi
-echo "FAIL: recursion did not converge"
+echo "FAIL: convergence=$got_outer/$got_inner intruder-refused=$([ $got_intruder -eq 0 ] && echo yes || echo NO)"
 exit 1

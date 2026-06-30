@@ -28,6 +28,7 @@ import std.os
 import std.config
 import std.string (string_length, string_char_at)
 import protocol
+import agent_auth
 import transport_file (ensure_dirs, inbox_dir, outbox_dir, put, recv_one)
 import driver_linux
 
@@ -75,11 +76,20 @@ _handle(me: string, token: string, outbox: string, line: string) -> int {
     tok = protocol.token_of(line)
     node = protocol.arg1_of(line)
 
-    // Single-parent check. v0: warn on mismatch (the http transport will
-    // reject). The field is here from day one so that's enforcement, not a
-    // protocol change.
-    if tok != token {
-        println("aeo-agent[${me}]: WARN command with wrong token (got '${_mask(tok)}'), v0 proceeds")
+    // Single-parent check (bank-courier auth): constant-time verify the
+    // presented token against the secret ssh couriered in (AEO_TOKEN). FAIL
+    // CLOSED — a wrong/absent token is refused, not warned. An empty configured
+    // secret denies everything (an agent with no couriered key trusts no one),
+    // EXCEPT the bootstrap convenience where no token is set on either side
+    // (file-transport dev/test): then both are "" and we proceed openly.
+    if string_length(token) == 0 {
+        // no courier key on this agent — open mode (dev/file-transport). Proceed.
+        _ = 0
+    } else {
+        if agent_auth.verify(token, tok) == 0 {
+            println("aeo-agent[${me}]: REFUSED ${v} — token mismatch (fail-closed)")
+            return 1                   // drop the command, keep serving
+        }
     }
 
     if v == "boot" {
