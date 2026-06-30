@@ -231,12 +231,25 @@ Gaps:
 Surveyed both boxes 2026-06-27. Below what aeo drives today (full-qemu kvm,
 podman, LXC) sits a lighter tier — smaller VMs and unprivileged sandboxes. None
 wired yet; mapped here as candidate kinds. Ordered by how cleanly they'd land:
-- [ ] **bwrap (bubblewrap)** — the STANDOUT. Unprivileged sandbox (the Flatpak
+- [x] **bwrap (bubblewrap)** — the STANDOUT. Unprivileged sandbox (the Flatpak
       engine); installed on both boxes and proven to run ROOTLESS with zero host
       setup — no sudoers, no systemctl, no idmap/bridge dance (unlike jails/kvm-
       tap/LXC, which all needed grants + console). A driver_bwrap = aeo's
       no-privilege "contain this process" tier, runnable anywhere. Directly serves
       the containment thread without the host-config friction that's blocked us.
+      DONE (2026-06-29): lib/driver_bwrap (kind `bwrap`) wired through the runner
+      (up/down/probe/exec + linux host-gating) and the compose DSL verb. bwrap has
+      no daemon/named-container registry, so the driver tracks each sandbox by a
+      PIDFILE like driver_vm/kvm: up backgrounds `bwrap --unshare-all --new-session
+      <binds> -- /bin/sh -c CMD` (host userland ro-bound, or image() rootfs as /);
+      net unshared = deny_egress for free. command() is required (a sandbox has no
+      image init). exec/probe-health run a FRESH identically-confined bwrap (no
+      unprivileged re-attach exists). PURE half (sandbox_argv + the sh-quoting)
+      unit-tested off-box: test/spec_bwrap.ae + 9/9 on the macOS dev box. Example:
+      examples/silly_addition_bwrap.ae (PID-1 containment proof). LIVE up/probe/
+      exec still need a Linux box: run test/smoke_bwrap.ae where `bubblewrap` is
+      installed (it SKIPs cleanly off-Linux). Headline win realized: the only host
+      prereq is `apt/dnf install bubblewrap` — no sudoers, no bridge.
 - [ ] **systemd-nspawn** — a systemd-native system container (LXC's tier) but far
       less finicky: a rootfs + nspawn, no idmap/lxcbr0. Installed on both boxes;
       needs root. Possibly the LESS painful system-container path than driver_lxc.

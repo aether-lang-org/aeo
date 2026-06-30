@@ -23,6 +23,7 @@ import driver_linux
 import driver_lxc
 import driver_bsd
 import driver_vm
+import driver_bwrap
 import compose
 import ipam
 import pf
@@ -298,6 +299,12 @@ driver_up(nm: string, k: string) -> string {
     if k == "kvm" {
         return driver_vm.up("kvm", nm, compose.get_image(nm), compose.get_cpus(nm), compose.get_memory(nm), compose.get_nic(nm))
     }
+    if k == "bwrap" {
+        // UNPRIVILEGED bubblewrap sandbox (driver_bwrap): the lightest tier, no
+        // host setup. image() is an optional rootfs dir ("" = sandbox the host
+        // userland); command() is the (required) process the sandbox runs.
+        return driver_bwrap.up(nm, compose.get_image(nm), compose.get_command(nm))
+    }
     return "aeo: kind '${k}' has no up() driver on this host"
 }
 
@@ -331,6 +338,9 @@ driver_exec(nm: string, k: string, cmd: string) -> string {
     if k == "lxc" {
         return driver_lxc.exec_capture(nm, cmd)
     }
+    if k == "bwrap" {
+        return driver_bwrap.exec_capture(nm, cmd)
+    }
     return ""
 }
 
@@ -347,6 +357,9 @@ driver_down(nm: string, k: string) -> string {
     if k == "lxc" {
         return driver_lxc.down(nm)
     }
+    if k == "bwrap" {
+        return driver_bwrap.down(nm)
+    }
     return driver_linux.down(nm, _engine_of(k))
 }
 
@@ -362,6 +375,9 @@ driver_probe(nm: string, k: string, health: string) -> int {
     }
     if k == "lxc" {
         return driver_lxc.probe(nm, health, "")
+    }
+    if k == "bwrap" {
+        return driver_bwrap.probe(nm, health, "")
     }
     return driver_linux.probe(nm, health, _engine_of(k))
 }
@@ -1156,6 +1172,9 @@ _kind_runnable(k: string, fam: string) -> int {
         return _eq(fam, "linux")
     }
     if k == "kvm" {
+        return _eq(fam, "linux")
+    }
+    if k == "bwrap" {
         return _eq(fam, "linux")
     }
     return 0

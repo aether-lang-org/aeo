@@ -1,0 +1,81 @@
+// test/spec_bwrap.ae — the PURE half of lib/driver_bwrap: the bubblewrap argv
+// builder + the POSIX single-quote escaper. bwrap is Linux-only (needs user
+// namespaces), so the LIVE up/probe/down/exec paths run only on a Linux host;
+// THIS pins the substrate-independent rendering off-box (it runs anywhere ae
+// does, macOS included — exactly the "author + test the pure half on the Mac"
+// split the driver was written for). Live validation: test/smoke_bwrap.ae on a
+// box with `bubblewrap` installed.
+
+import aeocha
+import driver_bwrap (sandbox_argv, pidfile_for, logfile_for, name, _shq)
+import std.list
+import std.string   // bare: aeocha's inlined asserts call string.copy unqualified
+
+// join an argv list into a single space-separated string for assertion.
+_join(av: ptr) -> string {
+    out = ""
+    n = list_size(av)
+    i = 0
+    while i < n {
+        a = list_get_raw(av, i)
+        if i == 0 {
+            out = a
+        } else {
+            out = "${out} ${a}"
+        }
+        i = i + 1
+    }
+    return out
+}
+
+main() {
+    fw = aeocha.init()
+
+    aeocha.describe(fw, "driver_bwrap (unprivileged bubblewrap sandbox)") {
+
+        aeocha.describe("identity + lifecycle paths") {
+            aeocha.it("name is bwrap") callback {
+                aeocha.assert_str_eq(name(), "bwrap", "kind name")
+            }
+            aeocha.it("pidfile/log are per-node under /tmp") callback {
+                aeocha.assert_str_eq(pidfile_for("db"), "/tmp/aeo-bwrap-db.pid", "pidfile")
+                aeocha.assert_str_eq(logfile_for("db"), "/tmp/aeo-bwrap-db.log", "logfile")
+            }
+        }
+
+        aeocha.describe("sandbox_argv — host-userland profile (no image)") {
+            aeocha.it("unshares all, binds host userland read-only, fresh proc/dev/tmp") callback {
+                got = _join(sandbox_argv("", "echo hi"))
+                want = "--unshare-all --new-session --ro-bind /usr /usr --ro-bind-try /bin /bin --ro-bind-try /sbin /sbin --ro-bind-try /lib /lib --ro-bind-try /lib64 /lib64 --ro-bind-try /etc /etc --proc /proc --dev /dev --tmpfs /tmp -- /bin/sh -c echo hi"
+                aeocha.assert_str_eq(got, want, "host-userland sandbox")
+            }
+        }
+
+        aeocha.describe("sandbox_argv — rootfs profile (image set)") {
+            aeocha.it("binds the rootfs dir as / instead of the host userland") callback {
+                got = _join(sandbox_argv("/opt/rootfs", "/sbin/init"))
+                want = "--unshare-all --new-session --bind /opt/rootfs / --proc /proc --dev /dev --tmpfs /tmp -- /bin/sh -c /sbin/init"
+                aeocha.assert_str_eq(got, want, "rootfs sandbox")
+            }
+        }
+
+        aeocha.describe("_shq — POSIX single-quote escaping (sh -c safety)") {
+            aeocha.it("wraps a plain token in single quotes") callback {
+                aeocha.assert_str_eq(_shq("echo"), "'echo'", "plain")
+            }
+            aeocha.it("a token with spaces stays one shell word") callback {
+                aeocha.assert_str_eq(_shq("echo hi"), "'echo hi'", "spaces")
+            }
+            aeocha.it("an embedded single quote becomes the '\\'' idiom") callback {
+                // input: it's   ->   'it'\''s'
+                aeocha.assert_str_eq(_shq("it's"), "'it'\\''s'", "embedded quote")
+            }
+            aeocha.it("shell metacharacters are inert inside the quotes") callback {
+                aeocha.assert_str_eq(_shq("rm -rf / ; echo $HOME `id`"),
+                    "'rm -rf / ; echo $HOME `id`'", "metachars neutralised")
+            }
+        }
+    }
+
+    aeocha.run_summary(fw)
+}

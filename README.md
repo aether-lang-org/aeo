@@ -105,9 +105,10 @@ jobs, env)`): the openers (`container`, `jail`, …) and the block setters
 starting `app`; `aeo down` stops `app` before the `db` it depends on. The
 operator writes the tree once; direction is aeo's job.
 
-Kind verbs: `container` / `docker` / `lxc` / `kvm_vm` (Linux), `jail` /
-`bhyve_vm` / `freebsd_vm` (FreeBSD). Block setters (one arg per call — Aether is
-fixed-arity), grouped by what they declare:
+Kind verbs: `container` / `docker` / `lxc` / `kvm_vm` / `bwrap` (Linux), `jail` /
+`bhyve_vm` / `freebsd_vm` (FreeBSD). `bwrap` is the lightest tier — an
+unprivileged bubblewrap sandbox (no root, no host setup). Block setters (one arg
+per call — Aether is fixed-arity), grouped by what they declare:
 
 - **identity / lifecycle:** `image`, `command`, `entrypoint`, `dockerfile`,
   `health`, `depends`, `dataset`, `ip`, `env`, `expose`
@@ -218,6 +219,7 @@ lib/aeo/runner.ae     the fixed runner: the resource actor + bring-up/teardown e
 lib/compose/          the operator-facing compose DSL (config IS code)
 lib/driver_linux/     podman/docker backend (build/run/probe + the confinement flags)
 lib/driver_lxc/       real LXC system-container backend (lxc-create/start/attach)
+lib/driver_bwrap/     unprivileged bubblewrap sandbox backend (rootless; pidfile-tracked)
 lib/driver_vm/        KVM/qemu (Linux) + bhyve (FreeBSD) VM backend
 lib/driver_bsd/       FreeBSD jail backend (jail/jexec/jls over a ZFS dataset)
 lib/driver_stub/      fail-loud arm for unsupported host/kind
