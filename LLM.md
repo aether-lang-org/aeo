@@ -227,9 +227,12 @@ is load-bearing: Aether's module `var` had a string of cross-import soundness bu
 > inside the node as the **container's deputy**. The agent
 > enacts the container's will + reports health, but exposes **zero ABI surface to
 > the node's other processes** (the workload gets no upward channel through it) and
-> the parent channel is mutually authenticated with **one-time per-agent keys — no
-> CA, no trust root** (design-intent, not built: v0 is file-transport + warn-level
-> token). The agent IS the standing live connection the paper describes via `→`,
+> the parent channel runs over TLS authed by an **ssh-couriered one-time symmetric
+> secret — the 1970s bank-courier model, no CA, no keypair** (ssh is the motorbike:
+> bootstrap hand-delivers the key; design-intent — v0 is file-transport + warn-level
+> token; transport_http is drafted + fail-closed; all the crypto is stock stdlib —
+> `std.cryptography.drbg`/`hmac` + `std.http.server` h2-TLS — so it's wiring, not
+> inventing). The agent IS the standing live connection the paper describes via `→`,
 > made concrete *and* containment-safe (workload can't speak on it, can't forge
 > onto it). The runner is just the depth-0 agent. The front door still has **no
 > `→` operator** and shells to aeb for static structure. (See `docs/aeo-agent.md`.)

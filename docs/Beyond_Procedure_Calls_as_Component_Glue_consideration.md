@@ -109,10 +109,12 @@ negotiating — because the agent acts for the *container*, and the workload can
 speak on its channel.
 
 What makes "no workload surface" enforceable rather than aspirational: the
-parent↔agent channel is encrypted + mutually authenticated with **one-time
-per-agent keys — no CA, no trust root** (design-intent; see `docs/aeo-agent.md`
-§"Channel security"). The workload can't forge onto the channel because it lacks
-the key, and there is no issuer to mis-issue against. Single-parent enforcement
+parent↔agent channel runs over TLS and is authed by a **one-time symmetric secret
+the bootstrap ssh hand-couriers in — the 1970s bank-courier model, no CA, no
+keypair, no trust root** (design-intent; see `docs/aeo-agent.md` §"Channel
+security"). The workload can't forge onto the channel because it lacks the
+couriered secret, and there is no issuer to mis-issue against. Single-parent
+enforcement
 falls out of "one key pair, no authority above it."
 
 This is a containment property the paper neither has nor needs (Objective-S isn't
@@ -156,19 +158,29 @@ isn't read as "all green" — and as a reminder NOT to let the paper's guest-sid
 stores tempt a guest-side-enforcement side-step (that inverts the containment
 trust boundary; see §6.5).
 
-### 5.3 Move `transport_http` auth from bearer-token to one-time-key mutual auth
+### 5.3 Finish `transport_http` auth — the bank-courier model (wiring, not inventing)
 
 Most of this is already drafted. `lib/transport_http/` (on `std.http.server`,
 **not** ssh — ssh is bootstrap-only) is **fail-closed** today: `/dispatch` and
 `/ping` return 401 on a bad/absent token, `/health` stays open as the residence
-probe. The remaining work is the *auth shape*: today it's a **bearer token in the
-request body** (a shared secret); the §4.1 target is **one-time per-agent keys,
-no CA / no trust root** — a freshly-minted keypair the parent pins at bootstrap,
-mutual-auth on it, dead when the agent dies. Single-parent enforcement falls out
-of "one key pair, no authority above it," and the no-workload-surface property
-becomes cryptographically enforceable (the workload lacks the key). So this item
-is not "build transport_http" — it's **move transport_http's auth from
-bearer-token to one-time-key mutual auth.** Self-contained and scoped.
+probe. The auth model is the **1970s inter-bank key courier**, not PKI: ssh is the
+motorbike — the bootstrap session hand-delivers a **one-time symmetric secret**
+(minted on the host, installed in the agent, kept by the parent), and the standing
+HTTP channel is authed by it. No CA, no keypair, nothing to pin (§4.1).
+
+Three concrete steps, **all stock Aether stdlib — wiring, not new crypto**:
+1. **Mint + courier:** ssh-launch stamps a fresh `std.cryptography.drbg` secret
+   per agent per boot (replacing the static token); dead when the agent dies.
+2. **Verify constant-time:** check it with `std.cryptography.hmac` (`hmac_sha256`)
+   instead of the bare string compare in `token_ok`.
+3. **TLS the socket (required):** run the channel over `std.http.server`'s h2-TLS
+   (example `http-server-h2-tls.ae` exists) so the bearer secret isn't observable
+   on the wire — TLS for channel confidentiality, a self-signed/ephemeral cert,
+   identity carried by the couriered key (still no CA).
+
+The `contrib/cryptography` asymmetric suite (ed25519/p256/rsa/x25519, even ML-KEM)
+is deliberately **unused** — symmetric pre-shared key is the whole point. So this
+item is wiring existing stdlib, not inventing; self-contained and scoped.
 
 ### 5.4 Agent-side self-attestation (the paper's "standing connection," used)
 
@@ -254,9 +266,10 @@ aeo and the paper share a thesis (config IS code, connector ≠ variant, protoco
 over replaceable transport) and aeo's contribution is the **resident-deputy
 containment model** — the container's agent lives inside the node, enacts the
 container's will and reports health, but exposes zero surface to the workload and
-holds no standing credentials (one-time keys, no CA). The work the paper
-*legitimizes* is finishing the agent (recursion, fail-closed one-time-key
-transport, self-attestation). The work it makes *seductive but wrong* is importing
+holds no standing credentials (an ssh-couriered one-time symmetric secret over
+TLS — the bank-courier model, no CA). The work the paper *legitimizes* is
+finishing the agent (recursion, the couriered-secret transport, self-attestation).
+The work it makes *seductive but wrong* is importing
 `→`/general-MOP to the front door, an ssh-into-the-guest driver (§6.2), or
 guest-side *enforcement* (§6.5). Build the agent out; keep the front door narrow;
 keep enforcement at the host.

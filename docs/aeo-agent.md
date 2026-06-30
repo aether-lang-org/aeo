@@ -120,40 +120,60 @@ standing ssh credentials** and there is **no interior ssh path** the workload
 shares. `probe_health` after the launching ssh closes is exactly the residence
 (TSR) check.
 
-## Channel security — one-time keys, no CA (design-intent, NOT built)
+## Channel security — the bank-courier model (NOT PKI)
+
+The right mental model is **1970s inter-bank key exchange**: a key hand-carried
+by a trusted courier on a motorbike, not a certificate authority. This is the
+thing PKI *replaced* — and for this one channel the old way is strictly better,
+because aeo already has a courier.
+
+**ssh is the motorbike.** The bootstrap ssh session is an already-authenticated,
+encrypted, trusted ride into the node. So as ssh launches the agent it
+**hand-delivers a one-time secret**: the host mints a fresh random key, installs
+it as the agent's configured token, and keeps the matching copy. The key never
+crosses an untrusted network to get established — it rode in on the ssh courier.
+After that ssh leaves; the standing HTTP channel is authed by the couriered key.
+
+This is a **symmetric pre-shared key, not a keypair** — no CA, no certificate, no
+issuance, nothing to pin. Two parties, one secret, hand-carried.
 
 > Status (proven-vs-modeled, honest):
 > - `bin/aeo-agent.ae` v0 over **`transport_file`** uses a *warn-level* shared
 >   token (mismatch logs, still proceeds).
-> - **`transport_http`** is drafted and is already **fail-closed** on auth (401
->   when the token is absent/wrong; an unconfigured token denies). But its auth is
->   a **bearer token carried in the request body** — a shared secret, *not* the
->   one-time-key mutual auth below.
-> - The two properties below are the design TARGET. Property 1 (no surface) is
->   partly met by the endpoint split (`/health` open, `/dispatch`+`/ping` authed).
->   Property 2 (one-time keys, no CA) is **the remaining work**: move the HTTP
->   transport from bearer-token to mutual one-time-key auth.
+> - **`transport_http`** is drafted and **fail-closed** (401 when the token is
+>   absent/wrong; unconfigured token denies). Its auth is already a shared secret
+>   (`token_ok` / `set_serve_token`) — the *right shape*. What's missing is below.
+>
+> Every piece is **stock Aether stdlib — this is wiring, not inventing**:
+> mint the key with `std.cryptography.drbg` (CSPRNG); verify constant-time with
+> `std.cryptography.hmac` (`hmac_sha256`); run the socket over TLS via
+> `std.http.server`'s h2-TLS (see `aether/examples/stdlib/http-server-h2-tls.ae`,
+> integration tests `http_server_tls`). NO CA and NO keypair needed — the
+> `contrib/cryptography` asymmetric suite (ed25519/p256/rsa/x25519, even ML-KEM)
+> is deliberately unused here; symmetric pre-shared key is the whole point.
 
-Two properties make "the agent serves the container, never the workload" real
-rather than aspirational:
+Two properties make "the agent serves the container, never the workload" real,
+plus one gap to close:
 
 1. **No surface to the node's other processes.** The agent must not expose an
-   API/port/socket that the contained workload can call to reach the parent. The
-   agent is co-resident with the workload but offers it nothing — its only
-   channel is to the container, and the workload cannot speak on it.
+   API/port/socket the contained workload can call to reach the parent. It is
+   co-resident with the workload but offers it nothing — its only channel is to
+   the container, and the workload cannot speak on it. (Partly met today by the
+   endpoint split: `/health` open, `/dispatch`+`/ping` authed.)
 
-2. **One-time keys, no trust root, no CA.** The parent↔agent channel is encrypted
-   and mutually authenticated with a **freshly-generated per-agent keypair**
-   stamped at bootstrap — *not* a public-CA certificate and *not* a long-lived
-   private CA. There is no issuer and no root to pin: the parent trusts exactly
-   the one key it minted for this agent, and the agent trusts exactly the one
-   parent key. Single-parent enforcement falls straight out of "one key pair, no
-   authority above it," and there is no key material that outlives the agent — so
-   WebPKI mis-issuance / CA compromise is simply not in the threat model (there's
-   no CA to compromise). This is the cryptographic form of the per-agent `token`
-   already in `lib/protocol`; the `transport_http` "fail-closed, single-parent"
-   pivot is where the token *becomes* the one-time key, and warn-on-mismatch
-   becomes reject-on-mismatch.
+2. **One-time, ssh-couriered, dies with the agent.** The shared secret must be
+   *freshly minted per agent per boot* and delivered by the bootstrap ssh (not a
+   static or operator-chosen token), so no key material outlives the agent and
+   "single parent" falls out of "one secret, one courier." This is the gap from
+   today's code: the `token` cell exists and is checked, but it must become
+   ssh-minted-and-delivered + ephemeral. **No CA, no keypair — this is the bank
+   courier, done right.**
+
+3. **TLS on the socket (required).** The couriered secret is a *bearer* secret,
+   so the HTTP channel MUST run over TLS — otherwise the secret is observable /
+   replayable on the wire. TLS here is for *confidentiality of the channel*, not
+   identity (identity is the couriered key); a self-signed/ephemeral server cert
+   is fine — again, no CA. This is remaining work alongside (2).
 
 ## What this changes
 
