@@ -1,6 +1,9 @@
 # Aether / aeb build artifacts
 /target/
 /build/
+# built binaries (emitted at repo root by `ae build bin/<name>.ae`)
+/aeo
+/aeo-agent
 *.o
 *.d
 *.gcda

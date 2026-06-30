@@ -1,0 +1,44 @@
+// spec_protocol_delegate.ae — the recursion verb (`delegate`) of lib/protocol.
+//
+// `delegate <token> <child>` is how an agent is told to become a child's parent
+// and recurse one boundary down (bin/aeo-agent _delegate_child hands a boot DOWN
+// to the child's inbox and relays the child's report UP). This spec guards the
+// WIRE CONTRACT for that verb — encode -> parse round-trip — so a transport swap
+// or a protocol edit can't silently break recursion. The end-to-end convergence
+// (two real agents, file transport) is proven by test/agent-recursion.sh.
+//
+//   sh test/run-spec.sh test/spec_protocol_delegate.ae
+//
+// Covers:
+//   - encode_delegate produces a line whose verb/token/arg1 re-parse INTACT
+//   - delegate is distinct from boot (same node+token, different verb)
+
+import aeocha
+import protocol (encode_delegate, encode_boot, verb_of, token_of, arg1_of)
+import std.string   // bare form: inlined aeocha calls bare `copy` unqualified
+
+main() {
+    fw = aeocha.init()
+
+    aeocha.describe(fw, "lib/protocol — the delegate (recursion) verb") {
+
+        aeocha.describe("encode/parse round-trip") {
+            aeocha.it("a delegate line re-parses intact") callback {
+                line = encode_delegate("courier-secret", "inner")
+                aeocha.assert_str_eq(verb_of(line), "delegate", "verb = delegate")
+                aeocha.assert_str_eq(token_of(line), "courier-secret", "token survives")
+                aeocha.assert_str_eq(arg1_of(line), "inner", "child node survives")
+            }
+
+            aeocha.it("delegate is distinct from boot (parent recurses, not self-boots)") callback {
+                d = encode_delegate("t", "child")
+                b = encode_boot("t", "child")
+                aeocha.assert_str_eq(verb_of(d), "delegate", "delegate verb")
+                aeocha.assert_str_eq(verb_of(b), "boot", "boot verb")
+                aeocha.assert_str_eq(arg1_of(d), arg1_of(b), "same node, different verb")
+            }
+        }
+    }
+
+    aeocha.run_summary(fw)
+}

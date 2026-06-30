@@ -18,7 +18,7 @@
 // `recv_one` returns the next pending line ("" if none) and deletes its
 // file, so a poll loop drains the inbox one command at a time.
 
-import std.os (run_capture)
+import std.os (run_capture, getenv)
 import std.list
 import std.string (string_length, string_char_at, string_substring)
 import std.fs (write_atomic, mkdir_p)
@@ -29,8 +29,13 @@ exports (
 )
 
 // The rendezvous root. Overridable via the AEO_RENDEZVOUS env at the
-// agent/parent bootstrap; defaults to a well-known tmp dir.
+// agent/parent bootstrap; defaults to a well-known tmp dir. (getenv of an unset
+// var returns "" that `== ""` reports FALSE — guard on length, never `== ""`.)
 root() -> string {
+    v = getenv("AEO_RENDEZVOUS")
+    if string_length(v) > 0 {
+        return v
+    }
     return "/tmp/aeo-rendezvous"
 }
 

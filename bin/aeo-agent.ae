@@ -93,6 +93,15 @@ _handle(me: string, token: string, outbox: string, line: string) -> int {
         _ = put(outbox, _next(), protocol.encode_report(token, node, st))
         return 1
     }
+    if v == "delegate" {
+        // RECURSION: I am now <node>'s parent. Hand a boot DOWN to <node>'s
+        // agent (its inbox), wait for its report (its outbox), relay it UP. The
+        // child agent does the identical thing for ITS children — depth-agnostic.
+        println("aeo-agent[${me}]: delegate ${node} (handing down)")
+        st = _delegate_child(token, node)
+        _ = put(outbox, _next(), protocol.encode_report(token, node, st))
+        return 1
+    }
     if v == "probe" {
         alive = driver_linux.probe(node, "", "")
         st = "down"
@@ -119,10 +128,57 @@ _handle(me: string, token: string, outbox: string, line: string) -> int {
 // Bring a node up locally, INSIDE wherever this agent runs. v0 reads the
 // node's image/command from env the parent stamped (AEO_<NODE>_IMAGE /
 // _CMD); a richer agent will receive the full spec in the boot command.
+//
+// AEO_BOOT_NOOP=1 skips the driver and reports success — this lets the
+// RECURSION logic (delegate -> boot-down -> report-up) be proven WITHOUT a
+// container substrate (e.g. on a laptop with no podman). It isolates "the
+// orchestration tree converges" from "a real container ran"; the substrate is
+// tested separately, on a box that has one.
 _boot_node(node: string) -> string {
+    noop = _env_or("AEO_BOOT_NOOP", "")
+    if string_length(noop) > 0 {
+        println("aeo-agent: NOOP boot ${node} (AEO_BOOT_NOOP set)")
+        return ""
+    }
     img = _env_or("AEO_BOOT_IMAGE", "docker.io/library/busybox:latest")
     cmd = _env_or("AEO_BOOT_CMD", "sleep 600")
     return driver_linux.up(node, img, cmd, 0, "")
+}
+
+// Hand a boot DOWN to the child's agent and wait (bounded) for its report,
+// which I relay UP. The child's queues already exist (its own agent ran
+// ensure_dirs at its boot); if not, ensure them so the boot lands. Returns the
+// child's reported state, or "timeout" if no report arrives in the window.
+//
+// This is the whole of recursion: I message a RESIDENT child agent, I never
+// reach THROUGH the child — the child boots its own node (and its own children)
+// and reports back. Depth-agnostic, because the child runs this same code.
+_delegate_child(token: string, child: string) -> string {
+    ensure_dirs(child)
+    cin = inbox_dir(child)
+    cout = outbox_dir(child)
+    _ = put(cin, _next(), protocol.encode_boot(token, child))
+
+    // Poll the child's outbox for ITS report about itself. Bounded so a dead
+    // child can't hang the parent (same ~60s budget as the main loop).
+    waits = 0
+    while waits < 600 {
+        line = recv_one(cout)
+        if line != "" {
+            v = protocol.verb_of(line)
+            n = protocol.arg1_of(line)
+            if v == "report" {
+                if n == child {
+                    return protocol.arg2_of(line)   // "up" / "failed" / "down"
+                }
+            }
+            // an announce or an unrelated line: keep draining, don't count it
+        } else {
+            waits = waits + 1
+            sleep(100)
+        }
+    }
+    return "timeout"
 }
 
 // os.getenv returns NULL (not "") when unset, and null != "" — so guard on

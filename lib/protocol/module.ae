@@ -30,7 +30,7 @@
 import std.string (string_length, string_index_of, string_substring)
 
 exports (
-    encode_boot, encode_halt, encode_probe,
+    encode_boot, encode_delegate, encode_halt, encode_probe,
     encode_announce, encode_report,
     verb_of, token_of, arg1_of, arg2_of
 )
@@ -39,6 +39,15 @@ exports (
 
 encode_boot(token: string, node: string) -> string {
     return "boot ${token} ${node}"
+}
+// delegate — parent → agent: "you also own <child>; become ITS parent, boot it
+// (recursing into its own children) and relay its report up." This is the
+// recursion verb: an agent that receives `delegate` hands a `boot` DOWN to the
+// child's agent and relays the child's `report` back UP — depth-agnostic, because
+// the child agent does the identical thing for ITS children. (boot = "act as
+// yourself"; delegate = "act as parent to a child one level down".)
+encode_delegate(token: string, child: string) -> string {
+    return "delegate ${token} ${child}"
 }
 encode_halt(token: string, node: string) -> string {
     return "halt ${token} ${node}"
