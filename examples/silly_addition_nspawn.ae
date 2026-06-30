@@ -1,0 +1,209 @@
+// examples/silly_addition_nspawn.ae — the systemd-nspawn SYSTEM-CONTAINER cell:
+// the systemd-native peer of the LXC demo. Like LXC (and FreeBSD jails) it boots
+// a full-OS userland under its own root from a rootfs directory, but via
+// systemd-nspawn + machined instead of the classic lxc-* tools — far less finicky
+// (no idmap dance, no lxcbr0 bridge). machined registers each container as a
+// "machine" you drive with machinectl; the driver tracks it through a transient
+// systemd unit (no pidfile).
+//
+//   system("silly_addition_nspawn")  (a Linux SYSTEMD host with systemd-container)
+//     ├─ db   (nspawn) — a system container, command() as its payload
+//     └─ app  (nspawn) — a system container ──depends──► db
+//
+// vs the grid siblings:
+//   silly_addition_lxc.ae   = LXC system containers (the classic-tools peer)
+//   silly_addition_jails.ae = FreeBSD jails (the BSD system-container peer)
+//   silly_addition_bwrap.ae = bwrap — the UNPRIVILEGED tier below this one
+//   THIS one                = systemd-nspawn — the systemd-native system container
+//
+// HONEST scope: a stock rootfs has no redis/python pre-installed, so this demo
+// proves the SUBSTRATE — boot a rootfs under its own root, containment (each
+// container its own hostname/pid namespace via machined), and dependency
+// ordering — not the /add cache service (that needs in-container provisioning,
+// like the lxc demo). Each node runs a long-lived `sleep` payload; the live probe
+// reads the container hostname (nspawn sets it to the machine name).
+//
+// HOST PREREQS: a systemd host with `systemd-container`; root (the driver
+// self-sudos systemd-run/systemctl/machinectl — NOPASSWD them); and a populated
+// rootfs per node at /var/lib/machines/<name> (debootstrap / dnf --installroot).
+// No idmap, no bridge — that lighter setup than LXC is the point.
+//
+// SIBLING NOTE: shares the mode scaffold with the other demos by DESIGN — these
+// are deliberately SELF-CONTAINED. Do NOT factor the shared scaffold out.
+
+import aeocha
+import compose (system, nspawn)
+import compose (image, command, health, depends)
+import compose (get_image, get_command, get_depends, describe_tree)
+import std.string (string_length, string_from_int, string_concat, string_char_at, string_substring)
+import std.string   // bare too: inlined aeocha calls bare exports unqualified
+import std.os (getenv, run_capture)
+import std.list
+
+exports ( aeo_orchestration )
+
+// ---- the composition — two nspawn system containers, db <- app ----
+// Each boots a rootfs at /var/lib/machines/<name> and runs a long-lived `sleep`
+// payload so the machine stays up to be probed. app depends on db (ordering
+// edge). `image` is the rootfs directory; `command` is the payload. `aeo up`
+// calls this.
+aeo_orchestration() {
+    system("silly_addition_nspawn") {
+        db = nspawn("db") {
+            image(_rootfs("db"))
+            command("sleep 600")
+            health("true")
+        }
+        app = nspawn("app") {
+            image(_rootfs("app"))
+            command("sleep 600")
+            health("true")
+            depends("db")              // app starts after db (dependency-ordered)
+        }
+    }
+}
+
+// ---- MODES ----
+//   check  — (DEFAULT) data-model assertions only; no deploy. Runs anywhere.
+//   up     — `aeo up`, leave the containers STANDING. No checks.
+//   suite  — `aeo up` + a live containment probe, then TEAR DOWN.
+run_aeo(mode: string) -> string {
+    aeo_orchestration()
+    match (mode) {
+        "check" -> { return _mode_check() }
+        "up"    -> { return _mode_up() }
+        "suite" -> { return _mode_suite() }
+        _       -> { return "aeo: unknown AEO_MODE '${mode}' (check|up|suite)" }
+    }
+}
+
+// CHECK — data-model assertions, in-process, no deploy (the default).
+_mode_check() -> string {
+    fw = aeocha.init()
+
+    aeocha.describe(fw, "nspawn system containers: db <- app") {
+
+        aeocha.describe("declaration (data model)") {
+            aeocha.it("resolves to two nspawn containers with a dependency edge") callback {
+                rdb = _rootfs("db")
+                rapp = _rootfs("app")
+                want = string_concat(string_concat(
+                    "system silly_addition_nspawn:\n",
+                    "  nspawn db [command=sleep 600, image=${rdb}]\n"),
+                    "  nspawn app [command=sleep 600, image=${rapp}] -> db")
+                aeocha.assert_str_eq(describe_tree(), want, "resolved nspawn tree snapshot")
+            }
+
+            aeocha.it("both run a long-lived payload; app depends on db") callback {
+                aeocha.assert_str_eq(get_command("db"), "sleep 600", "db payload")
+                aeocha.assert_str_eq(get_depends("app"), "db", "app ◄ db")
+            }
+        }
+    }
+
+    aeocha.run_summary(fw)
+    return "check: nspawn data-model assertions complete"
+}
+
+// UP — deploy the containers, LEAVE THEM STANDING. No checks.
+_mode_up() -> string {
+    rc = _aeo_up()
+    if rc != 0 {
+        return "up: FAILED (aeo up rc=${string_from_int(rc)})"
+    }
+    return "up: nspawn system containers stood up + left running (no checks)"
+}
+
+// SUITE — deploy, a live CONTAINMENT probe (each container has its OWN hostname,
+// set by machined to the machine name), then TEAR DOWN.
+_mode_suite() -> string {
+    rc = _aeo_up()
+    if rc != 0 {
+        return "suite: deploy FAILED (rc=${string_from_int(rc)})"
+    }
+    fw = aeocha.init()
+    aeocha.describe(fw, "live nspawn (containment)") {
+        aeocha.it("each container runs under its OWN hostname (machined)") callback {
+            // nspawn sets the container hostname to the machine name — reading it
+            // back proves a contained, running system container (not the host).
+            hn = _chomp(_exec("db", "hostname"))
+            aeocha.assert_str_eq(hn, "db", "db is a contained machine (hostname '${hn}')")
+        }
+    }
+    aeocha.run_summary(fw)
+    _aeo_down()
+    return "suite: live containment probe ran, containers TORN DOWN"
+}
+
+main() {
+    m = getenv("AEO_MODE")
+    if string_length(m) == 0 {
+        m = "check"
+    }
+    println(run_aeo(m))
+}
+
+// ---- helpers ----
+
+// the rootfs directory for a node. AEO_NSPAWN_ROOTDIR overrides the base
+// (default /var/lib/machines, machined's conventional home).
+_rootfs(node: string) -> string {
+    base = getenv("AEO_NSPAWN_ROOTDIR")
+    if string_length(base) == 0 {
+        base = "/var/lib/machines"
+    }
+    return "${base}/${node}"
+}
+
+_aeo_up() -> int {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "AEO_HOME=${_aeo_home()} ${_aeo_bin()} up ${_dsl()}")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    return status
+}
+_aeo_down() {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "AEO_HOME=${_aeo_home()} ${_aeo_bin()} down ${_dsl()}")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+}
+// `aeo exec <dsl> <node> <cmd>` — capture a command's stdout from inside a node.
+_exec(node: string, cmd: string) -> string {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "AEO_HOME=${_aeo_home()} ${_aeo_bin()} exec ${_dsl()} ${node} ${cmd}")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    return out
+}
+_aeo_bin() -> string {
+    b = getenv("AEO")
+    if string_length(b) == 0 {
+        return "/tmp/aeo"
+    }
+    return b
+}
+_aeo_home() -> string {
+    h = getenv("AEO_HOME")
+    if string_length(h) == 0 {
+        return string_concat(getenv("HOME"), "/aeo")
+    }
+    return h
+}
+_dsl() -> string {
+    d = getenv("AEO_DSL")
+    if string_length(d) == 0 {
+        return "examples/silly_addition_nspawn.ae"
+    }
+    return d
+}
+// trim a trailing newline for tidy messages.
+_chomp(s: string) -> string {
+    n = string_length(s)
+    if n == 0 { return s }
+    if string_char_at(s, n - 1) == 10 { return string_substring(s, 0, n - 1) }
+    return s
+}

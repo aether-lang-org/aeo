@@ -31,6 +31,7 @@ what changes is the substrate, never the app.
 | [`silly_addition_lxc.ae`](silly_addition_lxc.ae)          | Linux   | —        | LXC (system)    | host-native isolation (Linux) |
 | [`silly_addition_jails.ae`](silly_addition_jails.ae)        | FreeBSD | jail     | —               | host-native isolation (FreeBSD) |
 | [`silly_addition_bwrap.ae`](silly_addition_bwrap.ae)        | Linux   | —        | bwrap (sandbox) | unprivileged, zero host setup |
+| [`silly_addition_nspawn.ae`](silly_addition_nspawn.ae)       | Linux   | —        | nspawn (system) | systemd-native system container |
 
 `−VMM −podman` is **not** a cell — a compute node has to run *somewhere*, so "no
 VM, no container" is degenerate.
@@ -66,6 +67,10 @@ specs + ipam assert against that string.)
   process" tier: a host process dropped into fresh namespaces, no daemon, no
   image pull, no host setup. Proves the substrate (rootless boot, a private pid
   namespace, net unshared) rather than the cache service.
+- **nspawn** — two **systemd-nspawn** system containers — the systemd-native LXC
+  peer: a full-OS rootfs booted under its own root, registered with machined, far
+  less finicky than classic LXC (no idmap, no lxcbr0). Proves the substrate (boot
+  + per-container hostname/pid namespace + ordering) rather than the cache service.
 - **confined** — the `containers` cell with all three Linux confinement axes on:
   `limit{}` → cgroup caps, `constrain{}` → cap-drop/seccomp, `deny_egress` →
   `--network none`. The showcase for "contain malware" on Linux.

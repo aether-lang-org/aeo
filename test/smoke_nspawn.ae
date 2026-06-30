@@ -1,0 +1,109 @@
+// Smoke test: drive the systemd-nspawn driver end-to-end against real machined.
+// up (boot a rootfs as a command payload) -> probe(active) -> probe(health
+// ok/fail) -> exec -> down -> probe(gone).
+//
+// Needs a SYSTEMD host with systemd-container + a populated rootfs, and root
+// (the driver self-sudos systemd-run/systemctl/machinectl — NOPASSWD them). It
+// does NOT run under Docker-on-macOS (nspawn rejects the Docker /run layout), so
+// this is the on-box (Bazzite) live check. SKIPs cleanly when the toolchain or
+// the rootfs is absent. Provision a throwaway rootfs once, e.g.:
+//   sudo dnf -y --releasever=41 --installroot=/var/lib/machines/aeo-smoke-nspawn \
+//       install systemd passwd dnf      # (or debootstrap stable <dir>)
+//
+//   ae build test/smoke_nspawn.ae -o /tmp/smoke_nspawn --lib lib && /tmp/smoke_nspawn
+
+import driver_nspawn
+import std.os (run_capture)
+import std.list
+
+// 1 if `path` is an existing directory (a populated rootfs to boot).
+_dir_exists(path: string) -> int {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "test -d ${path}")
+    _o, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    if err != "" {
+        return 0
+    }
+    if status == 0 {
+        return 1
+    }
+    return 0
+}
+
+main() {
+    if driver_nspawn.available() == 0 {
+        println("SKIP: systemd-nspawn toolchain absent (need systemd-container on a systemd host)")
+        return
+    }
+
+    nm = "aeo-smoke-nspawn"
+    rootfs = "/var/lib/machines/${nm}"
+    if _dir_exists(rootfs) == 0 {
+        println("SKIP: no rootfs at ${rootfs} (provision one — see header)")
+        return
+    }
+
+    // Start clean.
+    driver_nspawn.down(nm)
+
+    // up with a long-lived payload so probe sees the machine active.
+    e1 = driver_nspawn.up(nm, rootfs, "sleep 120")
+    if e1 != "" {
+        println("FAIL up: ${e1}")
+        return
+    }
+    println("PASS up")
+
+    al = driver_nspawn.probe(nm, "", "")
+    if al != 1 {
+        println("FAIL probe-active: alive=${al}")
+        driver_nspawn.down(nm)
+        return
+    }
+    println("PASS probe-active")
+
+    ah = driver_nspawn.probe(nm, "true", "")
+    if ah != 1 {
+        println("FAIL probe-health-ok: alive=${ah}")
+        driver_nspawn.down(nm)
+        return
+    }
+    println("PASS probe-health-ok")
+
+    af = driver_nspawn.probe(nm, "false", "")
+    if af != 0 {
+        println("FAIL probe-health-fail: expected 0, got alive=${af}")
+        driver_nspawn.down(nm)
+        return
+    }
+    println("PASS probe-health-fail")
+
+    // exec inside the live machine: nspawn sets the container hostname to the
+    // machine name, so `hostname` is a clean containment proof (it is NOT the
+    // host's hostname).
+    hn = driver_nspawn.exec_capture(nm, "hostname")
+    if hn != nm {
+        println("FAIL exec-capture: expected machine hostname '${nm}', got '${hn}'")
+        driver_nspawn.down(nm)
+        return
+    }
+    println("PASS exec-capture (machine hostname is ${hn}, not the host)")
+
+    e2 = driver_nspawn.down(nm)
+    if e2 != "" {
+        println("FAIL down: ${e2}")
+        return
+    }
+    println("PASS down")
+
+    ag = driver_nspawn.probe(nm, "", "")
+    if ag != 0 {
+        println("FAIL probe-gone: expected 0, got alive=${ag}")
+        return
+    }
+    println("PASS probe-gone")
+
+    println("=== driver_nspawn: ALL PASS ===")
+}

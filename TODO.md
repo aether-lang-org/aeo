@@ -250,9 +250,24 @@ wired yet; mapped here as candidate kinds. Ordered by how cleanly they'd land:
       exec still need a Linux box: run test/smoke_bwrap.ae where `bubblewrap` is
       installed (it SKIPs cleanly off-Linux). Headline win realized: the only host
       prereq is `apt/dnf install bubblewrap` — no sudoers, no bridge.
-- [ ] **systemd-nspawn** — a systemd-native system container (LXC's tier) but far
+- [x] **systemd-nspawn** — a systemd-native system container (LXC's tier) but far
       less finicky: a rootfs + nspawn, no idmap/lxcbr0. Installed on both boxes;
       needs root. Possibly the LESS painful system-container path than driver_lxc.
+      DONE (2026-06-30): lib/driver_nspawn (kind `nspawn`) wired through runner +
+      compose DSL. machined-managed (no pidfile): up runs `systemd-run
+      --unit=aeo-nspawn-NAME systemd-nspawn --machine=NAME --directory=ROOTFS`
+      with `--boot` (full system container) by default, or the node's command()
+      as the payload via `--as-pid2`. probe = `systemctl is-active`; exec =
+      `systemd-run --machine=NAME --pipe`; down = `machinectl terminate` + stop
+      the unit. Self-sudo (systemd-run/systemctl/machinectl NOPASSWD), mirroring
+      driver_lxc. image() is the (required) rootfs dir. PURE half (the argv
+      builders) unit-tested off-box: test/spec_nspawn.ae + a standalone harness on
+      macOS. LIVE up/probe/exec needs a real SYSTEMD host: run test/smoke_nspawn.ae
+      on Bazzite (nspawn refuses Docker's /run layout, so no Docker proof — it
+      SKIPs cleanly off a systemd host). Example: examples/silly_addition_nspawn.ae
+      (hostname-containment proof). Follow-up: rootfs provisioning (today image()
+      must point at an already-populated /var/lib/machines/<name>; lxc gets its
+      from the download template — nspawn could grow a machinectl pull-tar path).
 - [ ] **Firecracker** — the canonical "smaller VM": AWS microVM, ~125ms boot,
       minimal device model vs full qemu. A genuinely distinct VM substrate (the
       `kvm` kind is full-qemu). NOT installed — needs install + /dev/kvm.

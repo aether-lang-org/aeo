@@ -1,0 +1,254 @@
+// lib/driver_nspawn — systemd-nspawn SYSTEM-CONTAINER backend.
+//
+// The systemd-native peer of driver_lxc: a full-OS userland under its own root,
+// but far less finicky than classic LXC — no idmap dance, no lxcbr0 bridge to
+// stand up. nspawn boots a rootfs directory; systemd-machined registers it as a
+// running "machine" you drive with machinectl. That registry is the lifecycle
+// handle (so, unlike driver_bwrap/driver_vm, this driver tracks NO pidfile — the
+// transient systemd unit + machined own the process).
+//
+// Needs root (like driver_lxc/driver_bsd): the lifecycle tools run through
+// self-sudo (`sudo -n /usr/bin/<tool>`), the operator pre-authorizing them
+// NOPASSWD (systemd-run, systemctl, machinectl; see the sudoers note). nspawn
+// itself is launched BY systemd-run as a transient service, so it inherits that
+// privilege — no separate nspawn grant needed.
+//
+//   up    — if the unit is active, no-op; else `systemd-run --unit=aeo-nspawn-NAME
+//           systemd-nspawn --machine=NAME --directory=ROOTFS <payload>` where the
+//           payload is `--boot` (boot the rootfs's own init — the canonical
+//           system-container) unless command() is set, in which case the command
+//           runs as the container payload via `--as-pid2` (a stub init at pid 1
+//           reaps; the command is pid 2). ROOTFS (image()) is required.
+//   down  — `machinectl terminate NAME` + stop the transient unit. Absent ==
+//           success.
+//   probe — 1 if `systemctl is-active aeo-nspawn-NAME` reports "active" (+ an
+//           optional health command run INSIDE the machine exits 0).
+//   exec  — `systemd-run --machine=NAME --pipe --quiet /bin/sh -c CMD`, capturing
+//           stdout — runs the command inside the live container.
+//
+// All argv assembly is pure builders (unit-testable without a systemd host); only
+// up/down/probe/exec shell out. LIVE paths need a real systemd + machined host
+// (Bazzite); nspawn does NOT run under Docker-on-macOS (its mount-propagation
+// guard refuses the Docker /run layout), so the live suite is proved on-box.
+
+import std.os (run_capture)
+import std.list
+import std.string (string_length, string_contains, string_trim)
+
+exports (
+    name,
+    available, up, down, probe, exec_capture,
+    unit_name, run_argv, is_active_argv, exec_argv, terminate_argv, stop_argv
+)
+
+name() -> string { return "nspawn" }
+
+// The transient systemd unit that wraps a node's nspawn process. machinectl keys
+// on the machine NAME; systemctl keys on this unit. Both derive from res_name.
+unit_name(res_name: string) -> string {
+    return "aeo-nspawn-${res_name}"
+}
+
+// 1 if the systemd-nspawn toolchain is present (a systemd host). Mirrors
+// driver_bwrap.available — lets a caller SKIP cleanly off a non-systemd host.
+// `machinectl` ships in the same systemd-container package as systemd-nspawn, so
+// its presence stands in for the whole toolchain (and unlike `systemd-nspawn`,
+// it sits in /usr/bin on every distro). Checked WITHOUT sudo (a plain PATH test).
+available() -> int {
+    out, status, err = run_capture("/bin/sh", _sh1("command -v machinectl >/dev/null 2>&1 && command -v systemd-run >/dev/null 2>&1"), null)
+    if err != "" {
+        return 0
+    }
+    if status == 0 {
+        return 1
+    }
+    return 0
+}
+
+// --- pure argv builders (unit-testable; the actual tool invocations) ----------
+
+// systemd-run launch: run nspawn as a transient, named, garbage-collected unit.
+//   systemd-run --unit=aeo-nspawn-NAME --collect --quiet \
+//       /usr/bin/systemd-nspawn --machine=NAME --directory=ROOTFS \
+//       (--boot | --as-pid2 /bin/sh -c CMD)
+// cmd "" -> --boot the rootfs's own init (full system container). cmd non-empty
+// -> run it as the payload under a stub pid-1 init (--as-pid2).
+run_argv(res_name: string, rootfs: string, cmd: string) -> ptr {
+    av = list_new()
+    list_add(av, "--unit=${unit_name(res_name)}")
+    list_add(av, "--collect")
+    list_add(av, "--quiet")
+    list_add(av, "/usr/bin/systemd-nspawn")
+    list_add(av, "--machine=${res_name}")
+    list_add(av, "--directory=${rootfs}")
+    if string_length(cmd) == 0 {
+        list_add(av, "--boot")
+    } else {
+        list_add(av, "--as-pid2")
+        list_add(av, "/bin/sh")
+        list_add(av, "-c")
+        list_add(av, cmd)
+    }
+    return av
+}
+
+// `systemctl is-active aeo-nspawn-NAME` — prints "active" + exits 0 iff up.
+is_active_argv(res_name: string) -> ptr {
+    av = list_new()
+    list_add(av, "is-active")
+    list_add(av, unit_name(res_name))
+    return av
+}
+
+// `systemd-run --machine=NAME --pipe --quiet --collect /bin/sh -c CMD` — run a
+// command INSIDE the live machine and pipe its stdout back (synchronous).
+exec_argv(res_name: string, cmd: string) -> ptr {
+    av = list_new()
+    list_add(av, "--machine=${res_name}")
+    list_add(av, "--pipe")
+    list_add(av, "--quiet")
+    list_add(av, "--collect")
+    list_add(av, "/bin/sh")
+    list_add(av, "-c")
+    list_add(av, cmd)
+    return av
+}
+
+// `machinectl terminate NAME` — force-stop the machine (TERM then KILL).
+terminate_argv(res_name: string) -> ptr {
+    av = list_new()
+    list_add(av, "terminate")
+    list_add(av, res_name)
+    return av
+}
+
+// `systemctl stop aeo-nspawn-NAME` — stop/clean the transient unit.
+stop_argv(res_name: string) -> ptr {
+    av = list_new()
+    list_add(av, "stop")
+    list_add(av, unit_name(res_name))
+    return av
+}
+
+// --- exec'ing entry points ---------------------------------------------------
+
+// Bring the system container up idempotently. `image` is the rootfs DIRECTORY
+// (required — nspawn boots a populated tree, unlike bwrap's host-userland bind);
+// `cmd` "" -> --boot the rootfs init, else run cmd as the payload. Returns "" on
+// success else an error.
+up(res_name: string, image: string, cmd: string) -> string {
+    if probe(res_name, "", "") == 1 {
+        return ""
+    }
+    if available() == 0 {
+        return "aeo: systemd-nspawn toolchain not found (need systemd-container on a systemd host; Linux-only)"
+    }
+    if string_length(image) == 0 {
+        return "aeo: nspawn '${res_name}' has no image() set (want a rootfs directory, e.g. /var/lib/machines/${res_name})"
+    }
+    rav = run_argv(res_name, image, cmd)
+    out, status, err = _sudo("systemd-run", rav)
+    list_free(rav)
+    if err != "" {
+        return "aeo: systemd-run spawn failed for '${res_name}': ${err}"
+    }
+    if status != 0 {
+        return "aeo: 'systemd-run systemd-nspawn' failed for '${res_name}' (exit ${status}): ${out}"
+    }
+    // Confirm it actually reached active (systemd-run can return 0 yet the unit
+    // fail to boot — a bad rootfs, no init under --boot, etc.).
+    if probe(res_name, "", "") != 1 {
+        return "aeo: nspawn '${res_name}' did not become active after launch (rootfs '${image}' bootable? machined up?)"
+    }
+    return ""
+}
+
+// Tear down: terminate the machine + stop the transient unit. Absent == success.
+down(res_name: string) -> string {
+    tav = terminate_argv(res_name)
+    _to, _ts, _te = _sudo("machinectl", tav)
+    list_free(tav)
+    sav = stop_argv(res_name)
+    _so, _ss, _se = _sudo("systemctl", sav)
+    list_free(sav)
+    return ""
+}
+
+// Liveness. 1 if the unit is active and, when `health` is given, a command run
+// inside the machine exits 0. Plain int (like the other drivers' probe).
+probe(res_name: string, health: string, _unused: string) -> int {
+    iav = is_active_argv(res_name)
+    out, status, err = _sudo("systemctl", iav)
+    list_free(iav)
+    if err != "" {
+        return 0
+    }
+    // is-active exits 0 + prints "active" only when the unit is running. Match the
+    // word too (so "activating"/"inactive"/"failed" don't slip through on a quirk).
+    if status != 0 {
+        return 0
+    }
+    if string_contains(out, "active") == 0 {
+        return 0
+    }
+    if string_length(health) == 0 {
+        return 1
+    }
+    eav = exec_argv(res_name, health)
+    _ho, hstatus, herr = _sudo("systemd-run", eav)
+    list_free(eav)
+    if herr != "" {
+        return 0
+    }
+    if hstatus == 0 {
+        return 1
+    }
+    return 0
+}
+
+// exec_capture — run `cmd` inside the live machine via `systemd-run --machine`,
+// return its stdout ("" on failure). The per-node operability primitive for
+// `aeo exec <nspawn> <cmd>`.
+exec_capture(res_name: string, cmd: string) -> string {
+    eav = exec_argv(res_name, cmd)
+    out, status, err = _sudo("systemd-run", eav)
+    list_free(eav)
+    if err != "" {
+        return ""
+    }
+    if status != 0 {
+        return ""
+    }
+    return string_trim(out)
+}
+
+// --- privilege: self-sudo ----------------------------------------------------
+// `sudo -n /usr/bin/<tool> <args>` — systemd-run/systemctl/machinectl are the
+// operator's NOPASSWD grants. Builds the FULL argv [-n, /usr/bin/<tool>, ...argv]
+// and passes it DIRECTLY to run_capture (NOT interpolated into an `sh -c` string:
+// interpolating a stored list-element ptr yields its ADDRESS, not the string —
+// the bug that bit driver_bsd). Mirrors driver_lxc._sudo_lxc. Returns
+// (out, status, err).
+_sudo(tool: string, argv: ptr) -> {
+    full = list_new()
+    list_add(full, "-n")
+    list_add(full, "/usr/bin/${tool}")
+    n = list_size(argv)
+    i = 0
+    while i < n {
+        a = list_get_raw(argv, i)     // raw ptr to the stored string
+        _ = list_add_raw(full, a)     // copy the element ptr verbatim (no interp)
+        i = i + 1
+    }
+    out, status, err = run_capture("sudo", full, null)
+    list_free(full)
+    return out, status, err
+}
+
+// A one-element argv list holding `line` — for `run_capture("/bin/sh", _sh1(...))`.
+_sh1(line: string) -> ptr {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, line)
+    return av
+}

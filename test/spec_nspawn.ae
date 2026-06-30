@@ -1,0 +1,71 @@
+// test/spec_nspawn.ae — the PURE half of lib/driver_nspawn: the systemd-run /
+// systemctl / machinectl argv builders. nspawn is a systemd-host tool (it needs
+// systemd + machined, and refuses Docker's /run layout), so the LIVE up/probe/
+// down/exec paths run only on a real systemd box (Bazzite); THIS pins the
+// substrate-independent argv rendering off-box (runs anywhere ae does, macOS
+// included). Live validation: test/smoke_nspawn.ae on a systemd host.
+
+import aeocha
+import driver_nspawn (name, unit_name, run_argv, is_active_argv, exec_argv, terminate_argv, stop_argv)
+import std.list
+import std.string   // bare: aeocha's inlined asserts call string.copy unqualified
+
+// join an argv list into a single space-separated string for assertion.
+_join(av: ptr) -> string {
+    out = ""
+    n = list_size(av)
+    i = 0
+    while i < n {
+        a = list_get_raw(av, i)
+        if i == 0 {
+            out = a
+        } else {
+            out = "${out} ${a}"
+        }
+        i = i + 1
+    }
+    return out
+}
+
+main() {
+    fw = aeocha.init()
+
+    aeocha.describe(fw, "driver_nspawn (systemd-nspawn system container)") {
+
+        aeocha.describe("identity") {
+            aeocha.it("name is nspawn; the unit is per-node") callback {
+                aeocha.assert_str_eq(name(), "nspawn", "kind name")
+                aeocha.assert_str_eq(unit_name("db"), "aeo-nspawn-db", "transient unit")
+            }
+        }
+
+        aeocha.describe("run_argv — systemd-run wrapping systemd-nspawn") {
+            aeocha.it("no command -> --boot the rootfs's own init (system container)") callback {
+                got = _join(run_argv("db", "/var/lib/machines/db", ""))
+                want = "--unit=aeo-nspawn-db --collect --quiet /usr/bin/systemd-nspawn --machine=db --directory=/var/lib/machines/db --boot"
+                aeocha.assert_str_eq(got, want, "boot mode")
+            }
+            aeocha.it("command set -> run it as the payload via --as-pid2") callback {
+                got = _join(run_argv("app", "/srv/rootfs", "sleep 600"))
+                want = "--unit=aeo-nspawn-app --collect --quiet /usr/bin/systemd-nspawn --machine=app --directory=/srv/rootfs --as-pid2 /bin/sh -c sleep 600"
+                aeocha.assert_str_eq(got, want, "payload mode")
+            }
+        }
+
+        aeocha.describe("lifecycle argv — probe / exec / down") {
+            aeocha.it("is_active_argv queries the transient unit") callback {
+                aeocha.assert_str_eq(_join(is_active_argv("db")), "is-active aeo-nspawn-db", "systemctl is-active")
+            }
+            aeocha.it("exec_argv pipes a command INTO the live machine") callback {
+                aeocha.assert_str_eq(_join(exec_argv("db", "cat /etc/os-release")),
+                    "--machine=db --pipe --quiet --collect /bin/sh -c cat /etc/os-release", "systemd-run --machine")
+            }
+            aeocha.it("terminate + stop tear the machine + unit down") callback {
+                aeocha.assert_str_eq(_join(terminate_argv("db")), "terminate db", "machinectl terminate")
+                aeocha.assert_str_eq(_join(stop_argv("db")), "stop aeo-nspawn-db", "systemctl stop")
+            }
+        }
+    }
+
+    aeocha.run_summary(fw)
+}

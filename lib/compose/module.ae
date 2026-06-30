@@ -33,7 +33,7 @@ exports (
     system,
     bhyve_vm, freebsd_vm, get_flavor, kvm_vm,
     resource,
-    container, docker, lxc, kvm, jail, bhyve, bwrap,
+    container, docker, lxc, kvm, jail, bhyve, bwrap, nspawn,
     image, command, dockerfile, health, dataset, ip, depends, env, get_env, attest, get_attest,
     cpus, memory, nic, expose,
     guest_image, network, ssh_key,
@@ -178,6 +178,7 @@ kvm(nm: string)       -> string { return resource(nm, "kvm") }
 jail(nm: string)      -> string { return resource(nm, "jail") }
 bhyve(nm: string)     -> string { return resource(nm, "bhyve") }
 bwrap(nm: string)     -> string { return resource(nm, "bwrap") }
+nspawn(nm: string)    -> string { return resource(nm, "nspawn") }
 
 // Inner setters — `_ctx: ptr` is the resource name pushed by resource().
 // `${_ctx}` interpolates it back to the name string for the config key.
@@ -944,10 +945,11 @@ _details(nm: string) -> string {
             det = _join(det, "mem=${mm}")
         }
     }
-    // bwrap's defining attribute IS its command (a sandbox has no image init),
-    // so surface it in the tree. Scoped to bwrap so no other kind's snapshot
-    // shifts; image() on a bwrap node is an optional rootfs and still shows below.
-    if get_kind(nm) == "bwrap" {
+    // For the sandbox/system-container tiers the command IS a defining attribute
+    // (a bwrap sandbox has no image init; an nspawn node runs command() as its
+    // payload), so surface it in the tree. Scoped to these kinds so no other
+    // kind's snapshot shifts; image() (a rootfs for these) still shows below.
+    if _command_in_tree(get_kind(nm)) == 1 {
         bc = get_command(nm)
         if string_length(bc) > 0 {
             det = _join(det, "command=${bc}")
@@ -990,4 +992,18 @@ _join(acc: string, item: string) -> string {
         return item
     }
     return "${acc}, ${item}"
+}
+
+// 1 if `command=` should appear in the tree for this kind — the sandbox /
+// system-container tiers (bwrap, nspawn) where command() is a defining attribute.
+// Other kinds (container/jail/...) also carry commands but their snapshots
+// predate this and are asserted against by existing specs, so leave them be.
+_command_in_tree(kind: string) -> int {
+    if kind == "bwrap" {
+        return 1
+    }
+    if kind == "nspawn" {
+        return 1
+    }
+    return 0
 }

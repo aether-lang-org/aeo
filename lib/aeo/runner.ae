@@ -24,6 +24,7 @@ import driver_lxc
 import driver_bsd
 import driver_vm
 import driver_bwrap
+import driver_nspawn
 import compose
 import ipam
 import pf
@@ -305,6 +306,12 @@ driver_up(nm: string, k: string) -> string {
         // userland); command() is the (required) process the sandbox runs.
         return driver_bwrap.up(nm, compose.get_image(nm), compose.get_command(nm))
     }
+    if k == "nspawn" {
+        // systemd-nspawn SYSTEM container (driver_nspawn): the systemd-native LXC
+        // peer. image() is the (required) rootfs directory; command() "" -> --boot
+        // the rootfs init, else run command() as the container payload.
+        return driver_nspawn.up(nm, compose.get_image(nm), compose.get_command(nm))
+    }
     return "aeo: kind '${k}' has no up() driver on this host"
 }
 
@@ -341,6 +348,9 @@ driver_exec(nm: string, k: string, cmd: string) -> string {
     if k == "bwrap" {
         return driver_bwrap.exec_capture(nm, cmd)
     }
+    if k == "nspawn" {
+        return driver_nspawn.exec_capture(nm, cmd)
+    }
     return ""
 }
 
@@ -360,6 +370,9 @@ driver_down(nm: string, k: string) -> string {
     if k == "bwrap" {
         return driver_bwrap.down(nm)
     }
+    if k == "nspawn" {
+        return driver_nspawn.down(nm)
+    }
     return driver_linux.down(nm, _engine_of(k))
 }
 
@@ -378,6 +391,9 @@ driver_probe(nm: string, k: string, health: string) -> int {
     }
     if k == "bwrap" {
         return driver_bwrap.probe(nm, health, "")
+    }
+    if k == "nspawn" {
+        return driver_nspawn.probe(nm, health, "")
     }
     return driver_linux.probe(nm, health, _engine_of(k))
 }
@@ -1175,6 +1191,9 @@ _kind_runnable(k: string, fam: string) -> int {
         return _eq(fam, "linux")
     }
     if k == "bwrap" {
+        return _eq(fam, "linux")
+    }
+    if k == "nspawn" {
         return _eq(fam, "linux")
     }
     return 0
