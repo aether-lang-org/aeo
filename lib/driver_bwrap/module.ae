@@ -71,6 +71,11 @@ pidfile_for(res_name: string) -> string {
 logfile_for(res_name: string) -> string {
     return "/tmp/aeo-bwrap-${res_name}.log"
 }
+// bwrap writes its --info-fd JSON (incl. the host `child-pid`) here; up() reads
+// child-pid from it into the pidfile. See _bg_command for why $! is unusable.
+infofile_for(res_name: string) -> string {
+    return "/tmp/aeo-bwrap-${res_name}.info"
+}
 
 // --- pure argv builder (unit-testable; the actual bwrap flags) ---------------
 //
@@ -84,9 +89,11 @@ logfile_for(res_name: string) -> string {
 // rootfs "" -> sandbox the host userland (read-only). Non-empty -> bind that
 // directory as the new root. --new-session blocks the TIOCSTI terminal-injection
 // escape; --unshare-all (implies --unshare-user-try) is what makes it rootless.
-// --die-with-parent is deliberately OMITTED: up() backgrounds the process and the
-// launching shell exits, so the pidfile — not the parent link — is the lifecycle
-// handle (the same reason driver_vm tracks a pid).
+// --die-with-parent is deliberately OMITTED: up() is fire-and-forget (the
+// launching `sh -c` from run_capture exits the instant the foreground poll+record
+// is done), so die-with-parent would kill the sandbox immediately. The pidfile —
+// holding bwrap's real child-pid (from --info-fd, see _bg_command) — is the
+// lifecycle handle; down() SIGKILLs that pid and bwrap tears the sandbox down.
 sandbox_argv(rootfs: string, cmd: string) -> ptr {
     av = list_new()
     list_add(av, "--unshare-all")
@@ -146,12 +153,14 @@ up(res_name: string, image: string, cmd: string) -> string {
     }
     pf = pidfile_for(res_name)
     log = logfile_for(res_name)
+    info = infofile_for(res_name)
     av = sandbox_argv(image, cmd)
-    bg = _bg_command(bin, av, pf, log)
+    bg = _bg_command(bin, av, pf, log, info)
     list_free(av)
-    // /bin/sh -c '<bwrap line> & echo $! > pidfile' — background the sandbox and
-    // record its pid. run_capture returns as soon as the foreground `echo` is
-    // done; bwrap keeps running (reparented to init), tracked by the pidfile.
+    // /bin/sh -c '<bwrap --info-fd 3 line> & ... record child-pid' — background
+    // the sandbox and record its REAL pid (from bwrap's info-fd, not $!; see
+    // _bg_command). run_capture returns once the foreground poll+record is done;
+    // bwrap keeps running (reparented to init), tracked by the pidfile.
     sh = list_new()
     list_add(sh, "-c")
     list_add(sh, bg)
@@ -168,13 +177,14 @@ up(res_name: string, image: string, cmd: string) -> string {
     return ""
 }
 
-// Tear down: kill the recorded pid + drop the pidfile. Absent == success.
+// Tear down: SIGKILL the recorded child-pid + drop the pidfile/info. Absent == success.
 down(res_name: string) -> string {
     pid = _read_pid(res_name)
     if pid > 0 {
         _kill(pid)
     }
     _rm_pidfile(res_name)
+    _rm_infofile(res_name)
     return ""
 }
 
@@ -230,13 +240,26 @@ _run_sandboxed(res_name: string, cmd: string) -> {
 
 // --- pidfile + process + shell helpers ---------------------------------------
 
-// Build the `/bin/sh -c` body that backgrounds the bwrap line and records its
-// pid. Each argv token is single-quote escaped because the node's command() is
-// arbitrary operator text (unlike driver_vm's controlled VM argv, which it
-// space-joins raw). `echo $!` captures the bwrap pid directly (we background the
-// bwrap process itself, not a wrapper), so down/probe act on the real sandbox.
-_bg_command(bin: string, argv: ptr, pf: string, log: string) -> string {
-    line = _shq(bin)
+// Build the `/bin/sh -c` body that backgrounds the bwrap line and records the
+// sandbox's pid. Each argv token is single-quote escaped because the node's
+// command() is arbitrary operator text (unlike driver_vm's controlled VM argv,
+// which it space-joins raw).
+//
+// Why we DON'T just `echo $!`: under --unshare-all bwrap forks a reaper as the
+// namespace's pid 1, so its outer process re-execs and the launcher's `$!` names
+// a TRANSIENT pid that exits the instant setup finishes — the real sandbox lives
+// on under a different host pid. A pidfile holding that dead `$!` makes down()
+// unable to reap (process leak) and probe() report a live sandbox as dead.
+//
+// So instead we ask bwrap to TELL us the real pid: `--info-fd 3` writes a JSON
+// blob including `"child-pid": N` (N is the host-side pid of the sandboxed
+// process). We redirect fd 3 to an .info file, background bwrap, then poll the
+// file and extract the digits after `child-pid` into the pidfile. The poll loop
+// (≤2s) covers bwrap's brief namespace setup. `--info-fd 3` is injected only on
+// this launch path, not in sandbox_argv (the synchronous exec/probe path has no
+// fd 3 to write to).
+_bg_command(bin: string, argv: ptr, pf: string, log: string, info: string) -> string {
+    line = "${_shq(bin)} --info-fd 3"
     n = list_size(argv)
     i = 0
     while i < n {
@@ -244,7 +267,29 @@ _bg_command(bin: string, argv: ptr, pf: string, log: string) -> string {
         line = "${line} ${_shq(a)}"
         i = i + 1
     }
-    return "${line} </dev/null >${log} 2>&1 & echo $! > ${pf}"
+    // Assemble the shell body with string_concat, NOT "${...}" interpolation.
+    // Aether's interpolated-string lexer mangles shell redirect/background
+    // metacharacters (`&`, `2>&1`, `3>`): a "${var}" holding them renders EMPTY,
+    // so the bwrap+redirect segment silently vanished when built that way.
+    // string_concat carries the bytes through verbatim.
+    //
+    // Shape:  <bwrap --info-fd 3 ...> 3>INFO </dev/null >LOG 2>&1 & \
+    //         <poll INFO up to 2s> ; <sed child-pid -> PIDFILE>
+    s = string_concat(line, " 3>")
+    s = string_concat(s, info)
+    s = string_concat(s, " </dev/null >")
+    s = string_concat(s, log)
+    s = string_concat(s, " 2>&1 & ")
+    // poll: wait for bwrap to populate the info file (its namespace setup is brief).
+    s = string_concat(s, "i=0; while [ ! -s ")
+    s = string_concat(s, info)
+    s = string_concat(s, " ] && [ $i -lt 20 ]; do i=$((i+1)); sleep 0.1; done; ")
+    // record: extract the digits after "child-pid" into the pidfile.
+    s = string_concat(s, "sed -n 's/.*child-pid[^0-9]*\\([0-9][0-9]*\\).*/\\1/p' ")
+    s = string_concat(s, info)
+    s = string_concat(s, " > ")
+    s = string_concat(s, pf)
+    return s
 }
 
 // POSIX single-quote a string: wrap in '...', and render each embedded ' as the
@@ -302,10 +347,26 @@ _pid_alive(res_name: string) -> int {
     return 0
 }
 
+// Kill the sandbox via SIGKILL on the recorded child-pid. Two notes:
+//   - SIGKILL, not SIGTERM: bwrap's child is PID 1 in its own pid namespace, and
+//     PID 1 ignores catchable signals (incl. SIGTERM) unless it installs a
+//     handler — /bin/sh does not. SIGKILL can't be caught, so it always lands.
+//   - The recorded pid (bwrap's --info-fd `child-pid`) is the right handle:
+//     SIGKILL it and bwrap tears the whole sandbox down (the outer monitor exits
+//     once its child is gone). Verified: one `kill -KILL <pid>` leaves no procs.
 _kill(pid: int) {
     av = list_new()
+    list_add(av, "-KILL")
     list_add(av, string_from_int(pid))
     _o, _s, _e = run_capture("/bin/kill", av, null)
+    list_free(av)
+}
+
+_rm_infofile(res_name: string) {
+    av = list_new()
+    list_add(av, "-f")
+    list_add(av, infofile_for(res_name))
+    _o, _s, _e = run_capture("/bin/rm", av, null)
     list_free(av)
 }
 

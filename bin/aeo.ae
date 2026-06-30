@@ -32,6 +32,7 @@ import std.os (run_capture, run_supervised, getenv, argv0)
 import std.fs (write_atomic, mkdir_p)
 import std.list
 import std.string (string_length, string_concat)
+import std.io (stderr_write)
 
 extern aether_args_count() -> int
 extern aether_args_get(index: int) -> string
@@ -96,7 +97,7 @@ main() {
     }
 
     if compose_path == "" {
-        println("usage: aeo [up|down|status|dry-run|snapshot|rollback|exec|restart|backup|prune|audit] <compose.ae> [tag|node cmd...]")
+        _diag("usage: aeo [up|down|status|dry-run|snapshot|rollback|exec|restart|backup|prune|audit] <compose.ae> [tag|node cmd...]")
         exit(2)
     }
     if cmd != "up" {
@@ -110,7 +111,7 @@ main() {
                                     if cmd != "backup" {
                                         if cmd != "prune" {
                                             if cmd != "audit" {
-                                                println("aeo: unknown subcommand '${cmd}' (want up|down|status|dry-run|snapshot|rollback|exec|restart|backup|prune|audit)")
+                                                _diag("aeo: unknown subcommand '${cmd}' (want up|down|status|dry-run|snapshot|rollback|exec|restart|backup|prune|audit)")
                                                 exit(2)
                                             }
                                         }
@@ -125,8 +126,8 @@ main() {
     }
 
     home = getenv("AEO_HOME")
-    if home == "" {
-        println("aeo: AEO_HOME is not set (point it at the aeo tree holding lib/)")
+    if string_length(home) == 0 {
+        _diag("aeo: AEO_HOME is not set (point it at the aeo tree holding lib/)")
         exit(2)
     }
 
@@ -139,7 +140,7 @@ main() {
     // shim can bind-mount with SELinux relabel (:Z) — /tmp itself can't be
     // relabeled, but a project subdir can. See docs/build-in-container.md.
     work = getenv("AEO_WORK")
-    if work == "" {
+    if string_length(work) == 0 {
         work = "/tmp/aeo-build"
     }
     _ = _rmrf(work)
@@ -148,19 +149,19 @@ main() {
 
     // cp -r $AEO_HOME/lib/. $work/lib   (shell out — aeo shells freely)
     if _cp_r(string_concat(home, "/lib"), libdst) != 0 {
-        println("aeo: failed to stage lib/ from ${home}")
+        _diag("aeo: failed to stage lib/ from ${home}")
         exit(1)
     }
     // Install the operator's compose.ae as the aeo_compose module.
     cmpdir = string_concat(libdst, "/aeo_compose")
     _ = mkdir_p(cmpdir)
     if _cp(compose_path, string_concat(cmpdir, "/module.ae")) != 0 {
-        println("aeo: cannot read compose file '${compose_path}'")
+        _diag("aeo: cannot read compose file '${compose_path}'")
         exit(1)
     }
     // Copy the fixed runner to a top-level run.ae (entry outside lib/).
     if _cp(string_concat(home, "/lib/aeo/runner.ae"), string_concat(work, "/run.ae")) != 0 {
-        println("aeo: missing runner at ${home}/lib/aeo/runner.ae")
+        _diag("aeo: missing runner at ${home}/lib/aeo/runner.ae")
         exit(1)
     }
 
@@ -179,16 +180,16 @@ main() {
     list_add(bav, binnew)
     list_add(bav, "--lib")
     list_add(bav, libdst)
-    println("aeo: building composition")
+    _diag("aeo: building composition")
     bout, bstatus, berr = run_capture("ae", bav, null)
     list_free(bav)
     if berr != "" {
-        println("aeo: build spawn failed: ${berr}")
+        _diag("aeo: build spawn failed: ${berr}")
         exit(1)
     }
     if bstatus != 0 {
-        println("aeo: composition failed to build:")
-        println(bout)
+        _diag("aeo: composition failed to build:")
+        _diag(bout)
         exit(1)
     }
     // Recompute the paths: binnew was passed to list_add above and
@@ -196,7 +197,7 @@ main() {
     // now dangles (heap-string-into-list ownership — aeb/LLM.md). Fresh
     // concats for the rename.
     if _mv(string_concat(work, "/aeo-run.new"), string_concat(work, "/aeo-run")) != 0 {
-        println("aeo: failed to finalize built binary")
+        _diag("aeo: failed to finalize built binary")
         exit(1)
     }
 
@@ -237,13 +238,22 @@ main() {
     code, outcome = run_supervised(bin, rav, null, 1, 1, 0, 1)
     list_free(rav)
     if outcome != "exited" {
-        println("aeo: composition ${outcome}")
+        _diag("aeo: composition ${outcome}")
     }
     if outcome != "exited" {
-        println("aeo: composition ${outcome} (exit ${code})")
+        _diag("aeo: composition ${outcome} (exit ${code})")
         exit(code)
     }
     exit(code)
+}
+
+// Diagnostic line -> stderr (NOT stdout). The front-door rebuilds the
+// composition on every invocation, so these progress/status lines would
+// otherwise pollute stdout — corrupting `aeo exec`'s captured output (and any
+// other tooling that reads a subcommand's stdout). Data output (status --json,
+// exec stdout) comes from the spawned composition binary, never from here.
+_diag(msg: string) {
+    _ = stderr_write(string_concat(msg, "\n"))
 }
 
 // cp -r SRC/. DST  — copy directory contents. Returns 0 on success.
