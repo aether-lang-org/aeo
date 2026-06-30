@@ -1,0 +1,52 @@
+// test/spec_firecracker.ae — the PURE half of lib/driver_firecracker: the config
+// builder, the memory parser, and the artifact-path helpers. Firecracker needs
+// /dev/kvm to BOOT (Docker-on-macOS has none), but its config SCHEMA is validated
+// by the real binary BEFORE it opens /dev/kvm — so config_json() is proven against
+// real firecracker off-KVM (see the PR notes), and pinned here off-box too.
+// Live boot: test/smoke_firecracker.ae on a KVM host.
+
+import aeocha
+import driver_firecracker (name, mem_mib, kernel_path, rootfs_path, config_json, pidfile_for, sockfile_for)
+import std.string (string_contains)
+import std.string   // bare: aeocha's inlined asserts call string.copy unqualified
+
+main() {
+    fw = aeocha.init()
+
+    aeocha.describe(fw, "driver_firecracker (microVM)") {
+
+        aeocha.describe("identity + artifact layout") {
+            aeocha.it("name is firecracker; image() is a bundle dir") callback {
+                aeocha.assert_str_eq(name(), "firecracker", "kind name")
+                aeocha.assert_str_eq(kernel_path("/srv/mvm"), "/srv/mvm/vmlinux", "kernel in bundle")
+                aeocha.assert_str_eq(rootfs_path("/srv/mvm"), "/srv/mvm/rootfs.ext4", "rootfs in bundle")
+                aeocha.assert_str_eq(pidfile_for("db"), "/tmp/aeo-fc-db.pid", "pidfile")
+                aeocha.assert_str_eq(sockfile_for("db"), "/tmp/aeo-fc-db.sock", "api socket")
+            }
+        }
+
+        aeocha.describe("mem_mib — memory string -> Firecracker mem_size_mib (int MiB)") {
+            aeocha.it("parses M/G suffixes, bare numbers, and the empty default") callback {
+                aeocha.assert_eq(mem_mib("512M"), 512, "512M")
+                aeocha.assert_eq(mem_mib("1G"), 1024, "1G -> 1024 MiB")
+                aeocha.assert_eq(mem_mib("256"), 256, "bare -> MiB")
+                aeocha.assert_eq(mem_mib(""), 128, "empty -> 128 floor")
+                aeocha.assert_eq(mem_mib("2g"), 2048, "lowercase g")
+            }
+        }
+
+        aeocha.describe("config_json — the Firecracker config-file (schema proven vs real fc)") {
+            aeocha.it("carries boot-source, the root drive, and machine-config") callback {
+                got = config_json("/srv/mvm/vmlinux", "/srv/mvm/rootfs.ext4", 2, 256)
+                aeocha.assert_true(string_contains(got, "\"kernel_image_path\": \"/srv/mvm/vmlinux\"") == 1, "kernel path")
+                aeocha.assert_true(string_contains(got, "\"path_on_host\": \"/srv/mvm/rootfs.ext4\"") == 1, "rootfs path")
+                aeocha.assert_true(string_contains(got, "\"is_root_device\": true") == 1, "root device")
+                aeocha.assert_true(string_contains(got, "\"vcpu_count\": 2") == 1, "vcpus")
+                aeocha.assert_true(string_contains(got, "\"mem_size_mib\": 256") == 1, "mem MiB")
+                aeocha.assert_true(string_contains(got, "console=ttyS0") == 1, "serial console cmdline")
+            }
+        }
+    }
+
+    aeocha.run_summary(fw)
+}

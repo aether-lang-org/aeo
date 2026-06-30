@@ -268,11 +268,29 @@ wired yet; mapped here as candidate kinds. Ordered by how cleanly they'd land:
       (hostname-containment proof). Follow-up: rootfs provisioning (today image()
       must point at an already-populated /var/lib/machines/<name>; lxc gets its
       from the download template — nspawn could grow a machinectl pull-tar path).
-- [ ] **Firecracker** — the canonical "smaller VM": AWS microVM, ~125ms boot,
+- [x] **Firecracker** — the canonical "smaller VM": AWS microVM, ~125ms boot,
       minimal device model vs full qemu. A genuinely distinct VM substrate (the
-      `kvm` kind is full-qemu). NOT installed — needs install + /dev/kvm.
-      Cloud-hypervisor / crosvm are the same rust-vmm niche (crosvm IS ChromeOS's
-      VMM, not exposed to Crostini). More setup before a driver than bwrap/nspawn.
+      `kvm` kind is full-qemu). Cloud-hypervisor / crosvm are the same rust-vmm
+      niche (crosvm IS ChromeOS's VMM, not exposed to Crostini).
+      DONE (2026-06-30): lib/driver_firecracker (kind `firecracker`) wired through
+      runner + compose DSL. No daemon/named-VM registry, so it's pidfile-tracked
+      like the kvm arm of driver_vm: up writes a config.json (boot-source=vmlinux,
+      drive=rootfs.ext4, machine-config=vcpus/mem from cpus()/memory()) and
+      backgrounds `firecracker --api-sock SOCK --config-file CONFIG`; down SIGTERMs
+      the pid + drops socket/config; probe = pid alive. image() names a BUNDLE DIR
+      holding `vmlinux` + `rootfs.ext4` (one field, both artifacts). The pure
+      builders (config_json/mem_mib) are unit-tested (test/spec_firecracker.ae) AND
+      the generated config is SCHEMA-PROVEN against the real firecracker v1.10.1
+      binary in Docker — it accepts the config, machine-config, and both drives,
+      advancing to kernel-load (only a dummy-kernel magic-number error stops it; a
+      real vmlinux + /dev/kvm boots). Example: examples/silly_addition_firecracker.ae.
+      LIVE boot needs a KVM host: run test/smoke_firecracker.ae where /dev/kvm +
+      firecracker + a bundle exist (it SKIPs otherwise; Docker-on-macOS has no
+      /dev/kvm). KNOWN GAPS / follow-ups: (1) exec_capture is a no-op — a microVM
+      has no host-side exec; reaching the guest needs ssh/vsock over a tap (the
+      driver_vm ssh shape). (2) No networking yet (bare boot; a tap/CNI for guest
+      egress is next). (3) Artifact provisioning — image() must point at a
+      prebuilt vmlinux+rootfs bundle today.
 - [ ] **Raw primitives** — unshare (namespaces), chroot (the oldest container).
       Too low-level to be node kinds on their own; bwrap is the usable wrapper.
 

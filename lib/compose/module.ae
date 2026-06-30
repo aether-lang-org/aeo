@@ -33,7 +33,7 @@ exports (
     system,
     bhyve_vm, freebsd_vm, get_flavor, kvm_vm,
     resource,
-    container, docker, lxc, kvm, jail, bhyve, bwrap, nspawn,
+    container, docker, lxc, kvm, jail, bhyve, bwrap, nspawn, firecracker,
     image, command, dockerfile, health, dataset, ip, depends, env, get_env, attest, get_attest,
     cpus, memory, nic, expose,
     guest_image, network, ssh_key,
@@ -179,6 +179,7 @@ jail(nm: string)      -> string { return resource(nm, "jail") }
 bhyve(nm: string)     -> string { return resource(nm, "bhyve") }
 bwrap(nm: string)     -> string { return resource(nm, "bwrap") }
 nspawn(nm: string)    -> string { return resource(nm, "nspawn") }
+firecracker(nm: string) -> string { return resource(nm, "firecracker") }
 
 // Inner setters — `_ctx: ptr` is the resource name pushed by resource().
 // `${_ctx}` interpolates it back to the name string for the config key.

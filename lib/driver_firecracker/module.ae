@@ -1,0 +1,264 @@
+// lib/driver_firecracker — Firecracker microVM backend.
+//
+// The canonical "smaller VM": an AWS-built minimal-device-model VMM (~125ms
+// boot) — a genuinely distinct VM substrate from driver_vm's full qemu/bhyve.
+// Firecracker has no daemon and no named-VM registry, so (like driver_vm's kvm
+// path) this driver tracks each microVM by a PIDFILE.
+//
+// A microVM needs TWO artifacts: an uncompressed kernel (vmlinux) and a rootfs
+// (ext4). aeo's image() names a BUNDLE DIRECTORY holding both by convention —
+// `<image>/vmlinux` and `<image>/rootfs.ext4` — so one image() field carries the
+// whole microVM. cpus()/memory() size it.
+//
+//   up    — write a Firecracker config.json (boot-source=vmlinux, drive=rootfs,
+//           machine-config=vcpus/mem) and launch `firecracker --api-sock SOCK
+//           --config-file CONFIG` in the background, recording its pid. Firecracker
+//           is the process (no re-exec), so the launcher's pid IS the microVM.
+//   down  — kill the recorded pid + drop the pidfile/socket/config. Absent == ok.
+//   probe — 1 if the recorded pid is alive (kill -0).
+//   exec  — NOT yet supported: a microVM has no host-side exec primitive (no
+//           nsenter/jexec). Reaching in means ssh/vsock into the guest (needs a
+//           tap + guest sshd), the same shape as driver_vm's ssh path — a
+//           follow-up. Returns "" for now.
+//
+// Needs /dev/kvm (hardware virt). All config/argv assembly is pure builders
+// (config_json/mem_mib/the launch line), unit-testable AND schema-checkable by
+// the real firecracker binary off-KVM (it validates the JSON before opening
+// /dev/kvm). A live BOOT needs a KVM host (Bazzite); Docker-on-macOS has no
+// /dev/kvm, so the boot itself is proved on-box.
+
+import std.os (run_capture, os_which)
+import std.list
+import std.string (string_length, string_char_at, string_from_char, string_from_int, string_get_int, string_substring)
+import std.fs (write_atomic)
+
+exports (
+    name,
+    available, up, down, probe, exec_capture,
+    config_json, mem_mib, kernel_path, rootfs_path,
+    pidfile_for, sockfile_for, configfile_for, _shq
+)
+
+name() -> string { return "firecracker" }
+
+pidfile_for(res_name: string) -> string {
+    return "/tmp/aeo-fc-${res_name}.pid"
+}
+sockfile_for(res_name: string) -> string {
+    return "/tmp/aeo-fc-${res_name}.sock"
+}
+configfile_for(res_name: string) -> string {
+    return "/tmp/aeo-fc-${res_name}.json"
+}
+
+// The two artifacts inside an image() bundle directory.
+kernel_path(image: string) -> string {
+    return "${image}/vmlinux"
+}
+rootfs_path(image: string) -> string {
+    return "${image}/rootfs.ext4"
+}
+
+// 1 if `firecracker` is on PATH. Mirrors the other drivers' availability check;
+// null-safe (os_which returns null, not "", when absent on some platforms).
+available() -> int {
+    p = os_which("firecracker")
+    if p == null {
+        return 0
+    }
+    if p == "" {
+        return 0
+    }
+    return 1
+}
+
+// --- pure builders (unit-testable; schema-checkable by real firecracker) ------
+
+// Parse a memory string ("128M", "1G", "512", "2g") to an integer count of MiB
+// (Firecracker's mem_size_mib). No unit or unparseable -> treated as MiB. Empty
+// or zero -> 128 (a sane microVM floor).
+mem_mib(mem: string) -> int {
+    n = string_length(mem)
+    if n == 0 {
+        return 128
+    }
+    // split the trailing unit char (M/G, any case) from the leading number.
+    last = string_char_at(mem, n - 1)
+    num = mem
+    mult = 1
+    if last == 77 {                      // 'M'
+        num = string_substring(mem, 0, n - 1)
+    } else { if last == 109 {            // 'm'
+        num = string_substring(mem, 0, n - 1)
+    } else { if last == 71 {             // 'G'
+        num = string_substring(mem, 0, n - 1)
+        mult = 1024
+    } else { if last == 103 {            // 'g'
+        num = string_substring(mem, 0, n - 1)
+        mult = 1024
+    } } } }
+    v = string_get_int(num) * mult
+    if v <= 0 {
+        return 128
+    }
+    return v
+}
+
+// Build the Firecracker config-file JSON: boot-source (vmlinux + a serial-console
+// cmdline), one root drive (the ext4 rootfs), and machine-config (vcpus/mem). The
+// schema Firecracker validates BEFORE opening /dev/kvm — so this builder is
+// checkable against the real binary off-KVM.
+config_json(kernel: string, rootfs: string, vcpus: int, mem: int) -> string {
+    boot_args = "console=ttyS0 reboot=k panic=1 pci=off"
+    s = "{\n"
+    s = "${s}  \"boot-source\": { \"kernel_image_path\": \"${kernel}\", \"boot_args\": \"${boot_args}\" },\n"
+    s = "${s}  \"drives\": [ { \"drive_id\": \"rootfs\", \"path_on_host\": \"${rootfs}\", \"is_root_device\": true, \"is_read_only\": false } ],\n"
+    s = "${s}  \"machine-config\": { \"vcpu_count\": ${string_from_int(vcpus)}, \"mem_size_mib\": ${string_from_int(mem)} }\n"
+    s = "${s}}\n"
+    return s
+}
+
+// --- exec'ing entry points ---------------------------------------------------
+
+// Bring the microVM up idempotently. `image` is the bundle directory (vmlinux +
+// rootfs.ext4); `cpus`/`mem` size it. Returns "" on success else an error.
+up(res_name: string, image: string, cpus: int, mem: string) -> string {
+    if probe(res_name, "", "") == 1 {
+        return ""
+    }
+    if available() == 0 {
+        return "aeo: firecracker not found on PATH (install firecracker; needs /dev/kvm, Linux-only)"
+    }
+    if string_length(image) == 0 {
+        return "aeo: firecracker '${res_name}' has no image() set (want a bundle dir with vmlinux + rootfs.ext4)"
+    }
+    bin = os_which("firecracker")
+    vc = cpus
+    if vc <= 0 {
+        vc = 1
+    }
+    cfg = config_json(kernel_path(image), rootfs_path(image), vc, mem_mib(mem))
+    cfgpath = configfile_for(res_name)
+    werr = write_atomic(cfgpath, cfg, string_length(cfg))
+    if werr != "" {
+        return "aeo: cannot write firecracker config for '${res_name}': ${werr}"
+    }
+    // a stale api socket blocks startup — clear it first.
+    _rm(sockfile_for(res_name))
+    pf = pidfile_for(res_name)
+    log = "/tmp/aeo-fc-${res_name}.log"
+    bg = _bg_command(bin, sockfile_for(res_name), cfgpath, pf, log)
+    sh = list_new()
+    list_add(sh, "-c")
+    list_add(sh, bg)
+    _out, _status, err = run_capture("/bin/sh", sh, null)
+    list_free(sh)
+    if err != "" {
+        return "aeo: firecracker spawn failed for '${res_name}': ${err}"
+    }
+    if _read_pid(res_name) <= 0 {
+        return "aeo: firecracker '${res_name}' did not start (see ${log}; /dev/kvm present?)"
+    }
+    return ""
+}
+
+// Tear down: kill the recorded pid + drop the pidfile/socket/config. Absent == ok.
+down(res_name: string) -> string {
+    pid = _read_pid(res_name)
+    if pid > 0 {
+        _kill(pid)
+    }
+    _rm(pidfile_for(res_name))
+    _rm(sockfile_for(res_name))
+    _rm(configfile_for(res_name))
+    return ""
+}
+
+// Liveness. 1 if the recorded pid is alive (kill -0). `health` is accepted for
+// signature parity with the other drivers; a microVM has no host-side exec to
+// run it through yet (see exec_capture), so only the pid is checked.
+probe(res_name: string, health: string, _unused: string) -> int {
+    return _pid_alive(res_name)
+}
+
+// exec_capture — NOT yet supported for microVMs (no host-side exec primitive;
+// reaching the guest needs ssh/vsock, a follow-up). Returns "".
+exec_capture(res_name: string, cmd: string) -> string {
+    return ""
+}
+
+// --- pidfile + process + shell helpers ---------------------------------------
+
+// Build the `/bin/sh -c` body that backgrounds firecracker and records its pid.
+// Each argv token is single-quote escaped (paths are operator-controlled but may
+// hold spaces). `echo $!` is the firecracker pid directly — firecracker does not
+// fork-reexec (unlike bwrap under --unshare-all), so $! IS the microVM.
+_bg_command(bin: string, sock: string, cfg: string, pf: string, log: string) -> string {
+    line = "${_shq(bin)} --api-sock ${_shq(sock)} --config-file ${_shq(cfg)}"
+    return "${line} </dev/null >${log} 2>&1 & echo $! > ${pf}"
+}
+
+// POSIX single-quote a string: wrap in '...', rendering each embedded ' as '\''.
+_shq(s: string) -> string {
+    out = "'"
+    i = 0
+    n = string_length(s)
+    while i < n {
+        c = string_char_at(s, i)
+        if c == 39 {
+            out = "${out}'\\''"
+        } else {
+            out = "${out}${string_from_char(c)}"
+        }
+        i = i + 1
+    }
+    return "${out}'"
+}
+
+_read_pid(res_name: string) -> int {
+    av = list_new()
+    list_add(av, pidfile_for(res_name))
+    out, status, err = run_capture("/bin/cat", av, null)
+    list_free(av)
+    if err != "" {
+        return 0
+    }
+    if status != 0 {
+        return 0
+    }
+    return string_get_int(out)
+}
+
+_pid_alive(res_name: string) -> int {
+    pid = _read_pid(res_name)
+    if pid <= 0 {
+        return 0
+    }
+    av = list_new()
+    list_add(av, "-0")
+    list_add(av, string_from_int(pid))
+    out, status, err = run_capture("/bin/kill", av, null)
+    list_free(av)
+    if err != "" {
+        return 0
+    }
+    if status == 0 {
+        return 1
+    }
+    return 0
+}
+
+_kill(pid: int) {
+    av = list_new()
+    list_add(av, string_from_int(pid))
+    _o, _s, _e = run_capture("/bin/kill", av, null)
+    list_free(av)
+}
+
+_rm(path: string) {
+    av = list_new()
+    list_add(av, "-f")
+    list_add(av, path)
+    _o, _s, _e = run_capture("/bin/rm", av, null)
+    list_free(av)
+}

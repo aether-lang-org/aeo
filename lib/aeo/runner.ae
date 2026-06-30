@@ -25,6 +25,7 @@ import driver_bsd
 import driver_vm
 import driver_bwrap
 import driver_nspawn
+import driver_firecracker
 import compose
 import ipam
 import pf
@@ -312,6 +313,11 @@ driver_up(nm: string, k: string) -> string {
         // the rootfs init, else run command() as the container payload.
         return driver_nspawn.up(nm, compose.get_image(nm), compose.get_command(nm))
     }
+    if k == "firecracker" {
+        // Firecracker microVM (driver_firecracker): a minimal-device-model VMM.
+        // image() is a bundle dir (vmlinux + rootfs.ext4); cpus()/memory() size it.
+        return driver_firecracker.up(nm, compose.get_image(nm), compose.get_cpus(nm), compose.get_memory(nm))
+    }
     return "aeo: kind '${k}' has no up() driver on this host"
 }
 
@@ -351,6 +357,9 @@ driver_exec(nm: string, k: string, cmd: string) -> string {
     if k == "nspawn" {
         return driver_nspawn.exec_capture(nm, cmd)
     }
+    if k == "firecracker" {
+        return driver_firecracker.exec_capture(nm, cmd)
+    }
     return ""
 }
 
@@ -373,6 +382,9 @@ driver_down(nm: string, k: string) -> string {
     if k == "nspawn" {
         return driver_nspawn.down(nm)
     }
+    if k == "firecracker" {
+        return driver_firecracker.down(nm)
+    }
     return driver_linux.down(nm, _engine_of(k))
 }
 
@@ -394,6 +406,9 @@ driver_probe(nm: string, k: string, health: string) -> int {
     }
     if k == "nspawn" {
         return driver_nspawn.probe(nm, health, "")
+    }
+    if k == "firecracker" {
+        return driver_firecracker.probe(nm, health, "")
     }
     return driver_linux.probe(nm, health, _engine_of(k))
 }
@@ -1194,6 +1209,9 @@ _kind_runnable(k: string, fam: string) -> int {
         return _eq(fam, "linux")
     }
     if k == "nspawn" {
+        return _eq(fam, "linux")
+    }
+    if k == "firecracker" {
         return _eq(fam, "linux")
     }
     return 0

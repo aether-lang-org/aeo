@@ -1,0 +1,175 @@
+// examples/silly_addition_firecracker.ae — the Firecracker microVM cell: the
+// "smaller VM" tier. Where silly_addition_kvm.ae boots a FULL qemu VM, this boots
+// an AWS Firecracker microVM — a minimal device model, ~125ms boot — a genuinely
+// distinct VM substrate. Firecracker has no daemon/named-VM registry, so the
+// driver tracks each microVM by a pidfile (like the kvm arm of driver_vm).
+//
+//   system("silly_addition_firecracker")  (a Linux host with firecracker + /dev/kvm)
+//     ├─ db   (firecracker) — a microVM booted from a bundle (vmlinux + rootfs)
+//     └─ app  (firecracker) — a microVM ──depends──► db
+//
+// vs the grid siblings:
+//   silly_addition_kvm.ae         = full qemu/KVM VM (the VMM by itself)
+//   silly_addition_kvm_podman.ae  = full KVM VM running a container inside
+//   THIS one                      = Firecracker — the MINIMAL VM (microVM)
+//
+// HONEST scope: this proves the SUBSTRATE — boot a microVM from a kernel+rootfs
+// bundle, liveness, dependency ordering, teardown. It does NOT run the /add cache
+// service: a microVM has no host-side exec primitive (reaching the guest needs
+// ssh/vsock over a tap — a follow-up, like driver_vm's ssh path), so there is no
+// in-guest probe here. The HTTP arithmetic story lives in the podman/full-VM demos.
+//
+// HOST PREREQS: `firecracker` on PATH, /dev/kvm (hardware virt), and a microVM
+// BUNDLE per node at <image>/ holding `vmlinux` (uncompressed kernel) + an
+// `rootfs.ext4`. No host daemon, no bridge needed for the bare boot.
+//
+// SIBLING NOTE: shares the mode scaffold with the other demos by DESIGN — these
+// are deliberately SELF-CONTAINED. Do NOT factor the shared scaffold out.
+
+import aeocha
+import compose (system, firecracker)
+import compose (image, cpus, memory, depends)
+import compose (get_image, get_depends, describe_tree)
+import std.string (string_length, string_from_int, string_concat)
+import std.string   // bare too: inlined aeocha calls bare exports unqualified
+import std.os (getenv, run_capture)
+import std.list
+
+exports ( aeo_orchestration )
+
+// ---- the composition — two Firecracker microVMs, db <- app ----
+// Each boots a bundle at <base>/<name> (vmlinux + rootfs.ext4), sized by
+// cpus()/memory(). app depends on db (ordering edge). `aeo up` calls this.
+aeo_orchestration() {
+    system("silly_addition_firecracker") {
+        db = firecracker("db") {
+            image(_bundle("db"))
+            cpus(1)
+            memory("128M")
+        }
+        app = firecracker("app") {
+            image(_bundle("app"))
+            cpus(1)
+            memory("128M")
+            depends("db")              // app boots after db (dependency-ordered)
+        }
+    }
+}
+
+// ---- MODES ----
+//   check  — (DEFAULT) data-model assertions only; no deploy. Runs anywhere.
+//   up     — `aeo up`, leave the microVMs RUNNING. No checks.
+//   suite  — `aeo up` (boots both microVMs) then TEAR DOWN. No in-guest probe
+//            (a microVM has no host-side exec yet — see the header).
+run_aeo(mode: string) -> string {
+    aeo_orchestration()
+    match (mode) {
+        "check" -> { return _mode_check() }
+        "up"    -> { return _mode_up() }
+        "suite" -> { return _mode_suite() }
+        _       -> { return "aeo: unknown AEO_MODE '${mode}' (check|up|suite)" }
+    }
+}
+
+// CHECK — data-model assertions, in-process, no deploy (the default).
+_mode_check() -> string {
+    fw = aeocha.init()
+
+    aeocha.describe(fw, "firecracker microVMs: db <- app") {
+
+        aeocha.describe("declaration (data model)") {
+            aeocha.it("resolves to two microVMs with a dependency edge") callback {
+                bdb = _bundle("db")
+                bapp = _bundle("app")
+                want = string_concat(string_concat(
+                    "system silly_addition_firecracker:\n",
+                    "  firecracker db [image=${bdb}]\n"),
+                    "  firecracker app [image=${bapp}] -> db")
+                aeocha.assert_str_eq(describe_tree(), want, "resolved microVM tree snapshot")
+            }
+
+            aeocha.it("both are firecracker microVMs; app depends on db") callback {
+                aeocha.assert_str_eq(get_image("db"), _bundle("db"), "db bundle")
+                aeocha.assert_str_eq(get_depends("app"), "db", "app ◄ db")
+            }
+        }
+    }
+
+    aeocha.run_summary(fw)
+    return "check: firecracker data-model assertions complete"
+}
+
+// UP — boot the microVMs, LEAVE THEM RUNNING. No checks.
+_mode_up() -> string {
+    rc = _aeo_up()
+    if rc != 0 {
+        return "up: FAILED (aeo up rc=${string_from_int(rc)})"
+    }
+    return "up: firecracker microVMs booted + left running (no checks)"
+}
+
+// SUITE — boot both microVMs (the lifecycle proof), then TEAR DOWN.
+_mode_suite() -> string {
+    rc = _aeo_up()
+    if rc != 0 {
+        return "suite: deploy FAILED (rc=${string_from_int(rc)})"
+    }
+    _aeo_down()
+    return "suite: microVMs booted + TORN DOWN (no in-guest probe — microVM exec is a follow-up)"
+}
+
+main() {
+    m = getenv("AEO_MODE")
+    if string_length(m) == 0 {
+        m = "check"
+    }
+    println(run_aeo(m))
+}
+
+// ---- helpers ----
+
+// the microVM bundle directory for a node. AEO_FC_BUNDLEDIR overrides the base.
+_bundle(node: string) -> string {
+    base = getenv("AEO_FC_BUNDLEDIR")
+    if string_length(base) == 0 {
+        base = "/var/lib/aeo/mvm"
+    }
+    return "${base}/${node}"
+}
+
+_aeo_up() -> int {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "AEO_HOME=${_aeo_home()} ${_aeo_bin()} up ${_dsl()}")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    return status
+}
+_aeo_down() {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "AEO_HOME=${_aeo_home()} ${_aeo_bin()} down ${_dsl()}")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+}
+_aeo_bin() -> string {
+    b = getenv("AEO")
+    if string_length(b) == 0 {
+        return "/tmp/aeo"
+    }
+    return b
+}
+_aeo_home() -> string {
+    h = getenv("AEO_HOME")
+    if string_length(h) == 0 {
+        return string_concat(getenv("HOME"), "/aeo")
+    }
+    return h
+}
+_dsl() -> string {
+    d = getenv("AEO_DSL")
+    if string_length(d) == 0 {
+        return "examples/silly_addition_firecracker.ae"
+    }
+    return d
+}

@@ -1,0 +1,80 @@
+// Smoke test: drive the Firecracker microVM driver end-to-end against real KVM.
+// up (boot the bundle) -> probe(pid alive) -> down -> probe(gone).
+//
+// Needs `firecracker` on PATH, /dev/kvm (hardware virt), and a microVM bundle at
+// /var/lib/aeo/mvm holding `vmlinux` + `rootfs.ext4`. Docker-on-macOS has no
+// /dev/kvm, so this is the on-box (KVM host) live check; it SKIPs cleanly when
+// firecracker, /dev/kvm, or the bundle is absent. (The config builder itself is
+// proven against the real firecracker schema in Docker — see spec_firecracker.)
+//
+//   ae build test/smoke_firecracker.ae -o /tmp/smoke_fc --lib lib && /tmp/smoke_fc
+
+import driver_firecracker
+import std.os (run_capture)
+import std.list
+
+_exists(path: string) -> int {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "test -e ${path}")
+    _o, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    if err != "" {
+        return 0
+    }
+    if status == 0 {
+        return 1
+    }
+    return 0
+}
+
+main() {
+    if driver_firecracker.available() == 0 {
+        println("SKIP: firecracker not on PATH (install firecracker; Linux+KVM only)")
+        return
+    }
+    if _exists("/dev/kvm") == 0 {
+        println("SKIP: /dev/kvm absent (Firecracker needs hardware virt)")
+        return
+    }
+    bundle = "/var/lib/aeo/mvm"
+    if _exists("${bundle}/vmlinux") == 0 {
+        println("SKIP: no microVM bundle at ${bundle} (need vmlinux + rootfs.ext4)")
+        return
+    }
+
+    nm = "aeo-smoke-fc"
+
+    driver_firecracker.down(nm)
+
+    e1 = driver_firecracker.up(nm, bundle, 1, "128M")
+    if e1 != "" {
+        println("FAIL up: ${e1}")
+        return
+    }
+    println("PASS up")
+
+    al = driver_firecracker.probe(nm, "", "")
+    if al != 1 {
+        println("FAIL probe-alive: alive=${al}")
+        driver_firecracker.down(nm)
+        return
+    }
+    println("PASS probe-alive")
+
+    e2 = driver_firecracker.down(nm)
+    if e2 != "" {
+        println("FAIL down: ${e2}")
+        return
+    }
+    println("PASS down")
+
+    ag = driver_firecracker.probe(nm, "", "")
+    if ag != 0 {
+        println("FAIL probe-gone: expected 0, got alive=${ag}")
+        return
+    }
+    println("PASS probe-gone")
+
+    println("=== driver_firecracker: ALL PASS ===")
+}

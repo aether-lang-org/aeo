@@ -32,6 +32,7 @@ what changes is the substrate, never the app.
 | [`silly_addition_jails.ae`](silly_addition_jails.ae)        | FreeBSD | jail     | —               | host-native isolation (FreeBSD) |
 | [`silly_addition_bwrap.ae`](silly_addition_bwrap.ae)        | Linux   | —        | bwrap (sandbox) | unprivileged, zero host setup |
 | [`silly_addition_nspawn.ae`](silly_addition_nspawn.ae)       | Linux   | —        | nspawn (system) | systemd-native system container |
+| [`silly_addition_firecracker.ae`](silly_addition_firecracker.ae) | Linux   | microVM  | —               | minimal "smaller VM" (Firecracker) |
 
 `−VMM −podman` is **not** a cell — a compute node has to run *somewhere*, so "no
 VM, no container" is degenerate.
@@ -71,6 +72,11 @@ specs + ipam assert against that string.)
   peer: a full-OS rootfs booted under its own root, registered with machined, far
   less finicky than classic LXC (no idmap, no lxcbr0). Proves the substrate (boot
   + per-container hostname/pid namespace + ordering) rather than the cache service.
+- **firecracker** — two **Firecracker** microVMs — the minimal "smaller VM" tier
+  (AWS microVM, ~125ms boot, minimal device model vs full qemu). Boots a
+  kernel+rootfs bundle per node; proves the microVM substrate (boot + liveness +
+  ordering). No in-guest probe yet — a microVM has no host-side exec (ssh/vsock
+  into the guest is a follow-up).
 - **confined** — the `containers` cell with all three Linux confinement axes on:
   `limit{}` → cgroup caps, `constrain{}` → cap-drop/seccomp, `deny_egress` →
   `--network none`. The showcase for "contain malware" on Linux.
