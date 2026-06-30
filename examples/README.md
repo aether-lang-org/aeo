@@ -6,7 +6,9 @@ on a **different substrate** (the thing it runs on: a VM, a container, a jail, o
 some combination). The core six span the orchestration matrix —
 **with/without a VM (VMM)** × **with/without containers (podman)**, plus the
 host-native isolation tiers (Linux LXC, FreeBSD jails) — across both host OSes
-aeo targets. A seventh (`confined`) layers the confinement vocabulary on top.
+aeo targets. A seventh, `bwrap`, adds an unprivileged Linux sandbox (zero host
+setup). One more, `confined`, isn't a new substrate — it layers the confinement
+vocabulary on top of an existing one.
 
 They're deliberately the *same workload* so the only thing that varies is the
 substrate (or the confinement) — read any one, then diff it against another to
@@ -33,13 +35,13 @@ what changes is the substrate, never the app.
 `−VMM −podman` is **not** a cell — a compute node has to run *somewhere*, so "no
 VM, no container" is degenerate.
 
-A seventh demo, **`silly_addition_confined.ae`**, is *not* a new substrate cell —
+The **`silly_addition_confined.ae`** demo is *not* a new substrate cell —
 it's the `containers` cell with the **confinement** vocabulary turned on
 (`limit{}` caps + `constrain{}` + `deny_egress`), so it showcases the Linux
 containment axes rather than another backend (see [Confinement](#confinement-the-impregnable-axis-live) below).
 
-The naming is by SUBSTRATE (bhyve_podman / kvm / containers / jails), not the
-workload. (The original demo was `silly_addition_cache.ae`; renamed for
+The naming is by SUBSTRATE (bhyve_podman / kvm / containers / jails / lxc / bwrap),
+not the workload. (The original demo was `silly_addition_cache.ae`; renamed for
 consistency. Its internal `system("silly_addition_cache")` IDENTIFIER stays —
 specs + ipam assert against that string.)
 
@@ -60,6 +62,10 @@ specs + ipam assert against that string.)
   from the podman *app* containers.
 - **jails** — two FreeBSD jails with **rctl** resource caps (exhaustion-DoS
   guard) — the host-native isolation tier.
+- **bwrap** — two rootless **bubblewrap** sandboxes — the lightest "contain a
+  process" tier: a host process dropped into fresh namespaces, no daemon, no
+  image pull, no host setup. Proves the substrate (rootless boot, a private pid
+  namespace, net unshared) rather than the cache service.
 - **confined** — the `containers` cell with all three Linux confinement axes on:
   `limit{}` → cgroup caps, `constrain{}` → cap-drop/seccomp, `deny_egress` →
   `--network none`. The showcase for "contain malware" on Linux.
@@ -108,7 +114,7 @@ each standing alone. Two doors:
 
 ```sh
 # data-model check (anywhere, no backend needed):
-AETHER_INCLUDE_PATH=$HOME/scm/aeocha ae run examples/silly_addition_jails.ae
+ae run examples/silly_addition_jails.ae --lib lib --lib ../aeocha
 # a live deploy (on the right host):
 aeo up examples/silly_addition_containers.ae
 ```
@@ -132,6 +138,10 @@ the single-file property that is the whole point.
   `aeo down`, live on Bazzite.
 - **jails** — boot + jail-boundary containment + rctl caps, live on the GhostBSD
   box. The strongest FreeBSD live story.
+- **bwrap** — full `AEO_MODE=suite` round-trip live on Bazzite: `aeo up` →
+  two rootless sandboxes, the containment probe confirms each runs as PID 1 in
+  its own pid namespace (`/proc/1/comm` → `bwrap`), then `aeo down` reaps both
+  cleanly (no leaked processes). Rootless, zero host setup.
 - **bhyve_podman** — confinement data-model proven; live pf inter-VM *delivery* is
   the one BROKEN axis (TODO §1, the if_bridge bug — the Linux per-flow netpolicy
   sidesteps it).
@@ -141,7 +151,7 @@ the single-file property that is the whole point.
 Also live on Bazzite: **image attestation** (a mismatched digest refused at
 boot), the **tamper-evident audit trail** (an edited log caught by `aeo audit`),
 and the **lifecycle ops** (snapshot/rollback round-trip on a container, prune
-keep-N). All seven demos pass `check` standalone and build via both doors.
+keep-N). All eight demos pass `check` standalone and build via both doors.
 
 ## Other examples here
 
