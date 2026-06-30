@@ -169,7 +169,9 @@ is load-bearing: Aether's module `var` had a string of cross-import soundness bu
 ## Footguns (Aether constraints that will bite)
 
 - **Reserved words** trip the parser: `state`, `match`, `message`, `receive`,
-  `after`. Rename locals (`st`, `msg`).
+  `after`, **`spawn`** (the actor keyword — `spawn = "…"` parses as `spawn(` and
+  errors "Expected LEFT_PAREN, got ASSIGN"; this bit driver_bwrap, a *non-actor*
+  file, where a local was named `spawn`). Rename locals (`st`, `msg`, `spwn`).
 - **`list_get` returns a ptr; `"${a}"` on it yields the ADDRESS, not the string.**
   To shell argv, pass the list DIRECTLY to `run_capture(prog, list)` (like
   driver_vm/driver_lxc), or `list_get_raw` + `list_add_raw` to copy element ptrs.
@@ -178,7 +180,11 @@ is load-bearing: Aether's module `var` had a string of cross-import soundness bu
 - **Nested string literals inside `${}` don't parse** — `"${f("x")}"` is a syntax
   error. Assign to a var first: `r = f("x"); "${r}"`.
 - **Heredocs `<<TAG` are RAW** — no `${}` interpolation inside.
-- **`getenv` returns null, not ""** — guard with `string_length`, not `== ""`.
+- **`getenv` for an unset var returns an empty string that `== ""` reports as
+  FALSE** — `string_length(v) == 0` is true, yet `v == ""` is *false* (so a
+  `== ""` default-guard silently never fires). Always guard with
+  `string_length(v) == 0`, never `== ""`. (This bit `bin/aeo.ae`: the AEO_WORK
+  default never applied → `aeo up` died with `cp: cannot create directory ''`.)
 - **Multi-return is one-call destructure only** — `a, b = f()`. Don't chain.
 - **Duration literals** (`30s`, `500ms`) are i64 ns; `/ 1000000` → ms (`as int` is
   rejected, `/` works). Used by within/every/without.
