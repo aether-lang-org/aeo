@@ -80,14 +80,23 @@ paper claims for `→`.
 
 ### 4.1 Directionality: contained-reaches-OUT, not container-reaches-IN
 
-This is the big one. The paper's remote story (L42) is an `SSHConnection` that
-**reaches into** the contained — the orchestrator dials *through* the boundary to
-a store living inside the guest. For a *containment* orchestrator, that is the
-antipattern: a container reaching into its contained's innards is precisely the
+This is the big one — but state it carefully, because the paper is not a
+containment system and doesn't claim to be. What L42 *actually* does is **remote
+directory sync over SFTP**: an `SSHConnection{ host:, user: }` yields a store
+representing a *remote filesystem*, and the same `|=` sync runs against it. There
+is no "guest," no "contained," no isolation boundary in the paper at all. The
+mechanism is simply *the orchestrator reaches into a remote resource* — it holds
+the credentials (`user:`) and has network reach to `host:` (both literally in the
+listing).
+
+Now **transplant that mechanism into aeo's setting** and it becomes the
+antipattern: a remote resource is no longer just another machine's filesystem but
+a *contained's* interior, and orchestrator-reaches-in is then exactly the
 LiveConnect / DOM-monkey-patching disaster that
 [The Principles of Containment](https://paulhammant.com/2016/12/14/principles-of-containment/)
-forbids. It also forces the orchestrator to hold guest credentials and have
-network reach into the interior.
+forbids — plus it forces aeo to hold guest credentials and have network reach
+into the interior. The antipattern is aeo's *contrast when the shape is imported
+into containment*, not a sin the paper commits in its own (boundary-free) domain.
 
 `aeo-agent` **inverts the flow on containment grounds** (`docs/aeo-agent.md`
 §"Why an agent, not ssh"): the contained reaches OUT and the parent listens; the
@@ -182,11 +191,13 @@ five-verb protocol is the *only* connection abstraction aeo should have, and it
 lives one boundary down (in the node), not at the front door. Keep the front door
 imperative-runtime with health-gated handles.
 
-### 6.2 Do NOT build the L42 "SSHConnection reaches in" remote driver
+### 6.2 Do NOT build an SSH-reach-in remote driver (L42's mechanism, in containment)
 
 The obvious "remote substrate" move — an SSH driver that dials into a guest and
-runs `podman` there — is *exactly* the directionality `aeo-agent` was built to
-reject (§4.1). It violates Principles of Containment, forces aeo to hold guest
+runs `podman` there — is L42's reach-into-a-remote-resource mechanism applied to
+a *contained*, which is *exactly* the directionality `aeo-agent` was built to
+reject (§4.1). (In the paper L42 is harmless remote-filesystem sync; the problem
+is only what it becomes across a containment boundary.) It violates Principles of Containment, forces aeo to hold guest
 credentials, and gives it network reach into the interior. The agent **replaces**
 this idea; it is not a fallback to keep around. If "remote" is wanted, it is the
 agent reaching out, never the orchestrator reaching in.

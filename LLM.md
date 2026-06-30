@@ -214,11 +214,13 @@ is load-bearing: Aether's module `var` had a string of cross-import soundness bu
 > generated and accessed via the POSIX APIs … a form of packaging mismatch."
 > **Where aeo diverges — the part that's genuinely ours:** Objective-S gets this
 > via a polymorphic connection operator `→` backed by a metaobject protocol, and
-> its remote story (L42) is `SSHConnection`-**reaches-into** the contained — the
-> orchestrator dials *through* the boundary to a store inside. **aeo reverses the
-> directionality on containment grounds.** L42's reach-in is the LiveConnect /
-> DOM-monkey-patching antipattern Principles-of-Containment forbids (a container
-> reaching into its contained's innards). So `lib/protocol/` + `aeo-agent`
+> its remote story (L42) is `SSHConnection`-based remote *filesystem* sync over
+> SFTP — the orchestrator reaches into a remote resource, holding its credentials.
+> (The paper has no containment boundary; it's just remote directory sync.) **aeo
+> reverses the directionality on containment grounds.** Import L42's reach-in
+> *into a containment setting* and it becomes the LiveConnect / DOM-monkey-patching
+> antipattern Principles-of-Containment forbids (reaching into a *contained's*
+> innards). So `lib/protocol/` + `aeo-agent`
 > (`bin/aeo-agent.ae`) keep the paper's best idea — *a stable verb set with a
 > replaceable transport beneath it* (`boot/halt/probe/announce/report` over
 > `transport_file` now, `transport_http` later): a metaobject protocol in
