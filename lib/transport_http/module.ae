@@ -26,6 +26,7 @@ import std.http.client (request, set_header, set_body, set_timeout, send_request
 import std.config
 import std.string (string_length, string_char_at, string_substring)
 import protocol
+import agent_auth
 
 exports (
     // server (agent) side
@@ -104,16 +105,14 @@ _authed(req: ptr) -> int {
     return token_ok(request_body(req))
 }
 
+// Authenticate a request body's protocol token against the couriered secret —
+// CONSTANT-TIME via agent_auth (the bank-courier auth core). Fail-closed: an
+// empty configured secret denies everything (agent_auth.verify enforces that).
+// Same contract as before (1 = allow, 0 = deny), now timing-safe.
 token_ok(body: string) -> int {
     want = _serve_token()
-    if string_length(want) == 0 {
-        return 0                      // fail-closed: no token configured -> deny
-    }
     got = protocol.token_of(body)
-    if got == want {
-        return 1
-    }
-    return 0
+    return agent_auth.verify(want, got)
 }
 
 // The agent stamps its token here at boot (before starting the server) so the

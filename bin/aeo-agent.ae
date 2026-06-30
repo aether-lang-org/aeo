@@ -31,8 +31,71 @@ import protocol
 import agent_auth
 import transport_file (ensure_dirs, inbox_dir, outbox_dir, put, recv_one)
 import driver_linux
+import std.http (server_create, server_set_host, server_get, server_post,
+                 response_set_status, response_set_header, response_set_body,
+                 request_body)
 
 extern exit(code: int)
+extern http_server_start_raw(server: ptr) -> int
+
+// Run the blocking HTTP server off an actor (mirrors aeb-agent + the stdlib
+// integration-test idiom): a plain http_server_start_raw in main ties up the
+// scheduler before the bind is observable. Actor + message + spawn/! must live
+// in the same compilation unit as main (Aether constraint) — so http mode lives
+// HERE, not in a lib. The handlers (below) do boot/probe/halt INLINE and reply
+// synchronously, so no drain loop / no outbox is needed in http mode.
+message StartSrv { raw: ptr }
+actor SrvActor {
+    state s = 0
+    receive { StartSrv(raw) -> { s = raw; http_server_start_raw(raw) } }
+}
+
+// ---- HTTP-mode handlers (same compilation unit as main + the actor) -------
+// Aether handlers are C-extern fn-pointers — they can't close over main's
+// locals, so they read who-am-i + the secret from std.config (stamped at boot
+// by _run_http). Each does the work INLINE via _dispatch_verb and replies
+// synchronously with the report line, so http mode needs no drain loop.
+
+_h_health(req: ptr, res: ptr, ud: ptr) -> int {
+    response_set_status(res, 200)
+    response_set_body(res, "ok")           // open liveness — the residence probe
+    return 0
+}
+
+_h_dispatch(req: ptr, res: ptr, ud: ptr) -> int {
+    me = config.get("aeo.agent.me")
+    token = config.get("aeo.agent.token")
+    line = request_body(req)
+    // Auth gate FIRST (fail-closed) — a bad token never reaches the verb.
+    if _auth_ok(token, protocol.token_of(line)) == 0 {
+        response_set_status(res, 401)
+        response_set_body(res, "unauthorized")
+        return 0
+    }
+    rep = _dispatch_verb(me, token, line)
+    response_set_status(res, 200)
+    response_set_header(res, "Content-Type", "text/plain")
+    response_set_body(res, rep)            // the report line, synchronously
+    return 0
+}
+
+// Run the agent in HTTP mode: stamp identity into config (for the handlers),
+// stand up the listener, spawn the blocking server actor. Does not return.
+_run_http(me: string, token: string, port: int) {
+    config.put("aeo.agent.me", me)
+    config.put("aeo.agent.token", token)
+    raw = server_create(port)
+    if raw == 0 {
+        println("aeo-agent[${me}]: FAIL server_create on port ${port}")
+        exit(1)
+    }
+    server_set_host(raw, "127.0.0.1")
+    server_get(raw, "/health", _h_health, 0)
+    server_post(raw, "/dispatch", _h_dispatch, 0)
+    println("aeo-agent[${me}]: http listening on 127.0.0.1:${port} (token=${_mask(token)})")
+    srv = spawn(SrvActor())
+    srv ! StartSrv { raw: raw }
+}
 
 main() {
     me = _env_or("AEO_NODE", "")
@@ -42,6 +105,17 @@ main() {
         exit(2)
     }
     println("aeo-agent[${me}]: starting (token=${_mask(token)})")
+
+    // Transport select. http = a real socket (the conduit); file (default) = the
+    // shared-dir rendezvous. The VERB logic (_dispatch_verb) is identical; only
+    // "where work comes from / where the report goes" differs.
+    transport = _env_or("AEO_TRANSPORT", "file")
+    if transport == "http" {
+        prt = _atoi(_env_or("AEO_PORT", "9450"))
+        _run_http(me, token, prt)
+        return
+    }
+
     ensure_dirs(me)
 
     // Reach OUT: tell the parent I'm alive and ready for work.
@@ -70,26 +144,30 @@ main() {
     }
 }
 
-// Handle one command. Returns 1 to keep looping, 0 to stop (on halt).
-_handle(me: string, token: string, outbox: string, line: string) -> int {
+// Authenticate a presented token against the couriered secret (bank-courier,
+// constant-time). Returns 1 = ok, 0 = refuse. FAIL-CLOSED on a wrong token when
+// a secret IS configured; OPEN when no secret is set on this agent (dev /
+// file-transport convenience — both sides "" and we proceed). Shared by both
+// transports so the policy lives in ONE place.
+_auth_ok(token: string, presented: string) -> int {
+    if string_length(token) == 0 {
+        return 1                       // no courier key -> open mode
+    }
+    return agent_auth.verify(token, presented)
+}
+
+// Dispatch one verb and RETURN its report line (the wire artifact), or "" for a
+// refused/unknown command. Pure w.r.t. transport: file mode `put`s the result
+// to the outbox; http mode returns it as the response body. boot/probe/delegate/
+// halt all funnel through here so the two transports can't diverge.
+_dispatch_verb(me: string, token: string, line: string) -> string {
     v = protocol.verb_of(line)
     tok = protocol.token_of(line)
     node = protocol.arg1_of(line)
 
-    // Single-parent check (bank-courier auth): constant-time verify the
-    // presented token against the secret ssh couriered in (AEO_TOKEN). FAIL
-    // CLOSED — a wrong/absent token is refused, not warned. An empty configured
-    // secret denies everything (an agent with no couriered key trusts no one),
-    // EXCEPT the bootstrap convenience where no token is set on either side
-    // (file-transport dev/test): then both are "" and we proceed openly.
-    if string_length(token) == 0 {
-        // no courier key on this agent — open mode (dev/file-transport). Proceed.
-        _ = 0
-    } else {
-        if agent_auth.verify(token, tok) == 0 {
-            println("aeo-agent[${me}]: REFUSED ${v} — token mismatch (fail-closed)")
-            return 1                   // drop the command, keep serving
-        }
+    if _auth_ok(token, tok) == 0 {
+        println("aeo-agent[${me}]: REFUSED ${v} — token mismatch (fail-closed)")
+        return ""
     }
 
     if v == "boot" {
@@ -100,17 +178,15 @@ _handle(me: string, token: string, outbox: string, line: string) -> int {
             println("aeo-agent[${me}]: boot ${node} failed: ${err}")
             st = "failed"
         }
-        _ = put(outbox, _next(), protocol.encode_report(token, node, st))
-        return 1
+        return protocol.encode_report(token, node, st)
     }
     if v == "delegate" {
         // RECURSION: I am now <node>'s parent. Hand a boot DOWN to <node>'s
-        // agent (its inbox), wait for its report (its outbox), relay it UP. The
-        // child agent does the identical thing for ITS children — depth-agnostic.
+        // agent, wait for its report, relay it UP. The child agent does the
+        // identical thing for ITS children — depth-agnostic.
         println("aeo-agent[${me}]: delegate ${node} (handing down)")
         st = _delegate_child(token, node)
-        _ = put(outbox, _next(), protocol.encode_report(token, node, st))
-        return 1
+        return protocol.encode_report(token, node, st)
     }
     if v == "probe" {
         alive = driver_linux.probe(node, "", "")
@@ -118,20 +194,30 @@ _handle(me: string, token: string, outbox: string, line: string) -> int {
         if alive == 1 {
             st = "up"
         }
-        _ = put(outbox, _next(), protocol.encode_report(token, node, st))
-        return 1
+        return protocol.encode_report(token, node, st)
     }
     if v == "halt" {
         println("aeo-agent[${me}]: halt ${node}")
         _de = driver_linux.down(node, "")
-        _ = put(outbox, _next(), protocol.encode_report(token, node, "down"))
-        // A halt of the agent's OWN node ends the agent.
-        if node == me {
-            return 0
-        }
-        return 1
+        return protocol.encode_report(token, node, "down")
     }
     println("aeo-agent[${me}]: unknown verb '${v}'")
+    return ""
+}
+
+// Handle one command in FILE mode. Returns 1 to keep looping, 0 to stop (on a
+// halt of the agent's OWN node). Wraps the shared dispatch + the outbox write.
+_handle(me: string, token: string, outbox: string, line: string) -> int {
+    rep = _dispatch_verb(me, token, line)
+    if string_length(rep) > 0 {
+        _ = put(outbox, _next(), rep)
+    }
+    // A halt of the agent's OWN node ends the agent (the report still went out).
+    if protocol.verb_of(line) == "halt" {
+        if protocol.arg1_of(line) == me {
+            return 0
+        }
+    }
     return 1
 }
 
