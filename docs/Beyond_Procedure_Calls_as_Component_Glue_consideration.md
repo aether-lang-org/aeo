@@ -62,8 +62,9 @@ actual contribution.
 
 aeo independently reinvented the paper's best structural idea. `lib/protocol/`
 is a small, stable verb set (`boot`/`halt`/`probe`/`announce`/`report`) with a
-**replaceable transport beneath it** (`lib/transport_file/` now, a planned
-`transport_http` later). The module header says it in nearly the paper's words:
+**replaceable transport beneath it** (`lib/transport_file/` in use; a drafted
+`lib/transport_http/` on `std.http.server`). The module header says it in nearly
+the paper's words:
 "the verbs + fields are the stable contract; the transport under them is
 replaceable." That is a metaobject protocol in miniature — the connector
 factored cleanly from its variant, exactly as Table 1 prescribes.
@@ -155,19 +156,19 @@ isn't read as "all green" — and as a reminder NOT to let the paper's guest-sid
 stores tempt a guest-side-enforcement side-step (that inverts the containment
 trust boundary; see §6.5).
 
-### 5.3 Flip the token from warn-only to fail-closed via `transport_http`
+### 5.3 Move `transport_http` auth from bearer-token to one-time-key mutual auth
 
-The protocol carries a per-agent `token` from day one, but v0 only *warns* on
-mismatch (`bin/aeo-agent.ae` `_handle`; `lib/protocol` header). The design
-explicitly says the HTTP transport makes "single-parent, securely" *enforcement,
-not a redesign* — the field is already in the wire format, so the pivot is
-non-breaking. Building `transport_http` with fail-closed auth turns a documented
-promise into a live security axis — and the right shape is **one-time per-agent
-keys, no CA / no trust root** (§4.1): the token becomes a freshly-minted keypair
-the parent pins at bootstrap, mutual-auth on it, dead when the agent dies.
-Single-parent enforcement falls out of "one key pair, no authority above it," and
-the no-workload-surface property becomes enforceable (the workload lacks the key).
-Self-contained and already scoped.
+Most of this is already drafted. `lib/transport_http/` (on `std.http.server`,
+**not** ssh — ssh is bootstrap-only) is **fail-closed** today: `/dispatch` and
+`/ping` return 401 on a bad/absent token, `/health` stays open as the residence
+probe. The remaining work is the *auth shape*: today it's a **bearer token in the
+request body** (a shared secret); the §4.1 target is **one-time per-agent keys,
+no CA / no trust root** — a freshly-minted keypair the parent pins at bootstrap,
+mutual-auth on it, dead when the agent dies. Single-parent enforcement falls out
+of "one key pair, no authority above it," and the no-workload-surface property
+becomes cryptographically enforceable (the workload lacks the key). So this item
+is not "build transport_http" — it's **move transport_http's auth from
+bearer-token to one-time-key mutual auth.** Self-contained and scoped.
 
 ### 5.4 Agent-side self-attestation (the paper's "standing connection," used)
 
@@ -215,8 +216,12 @@ resident deputy, so no *no-workload-surface* and no one-time-key guarantee. The
 credentials** (one-time keys, minted per agent, dead when the agent dies) and
 **zero surface to the workload**. So: same authority over the contained, none of
 the credential/interior-reach liabilities. Prefer the deputy; don't keep an
-ssh-in driver as a fallback. (In the paper L42 is harmless remote-filesystem
-sync; this concern only arises across a containment boundary.)
+ssh-in driver as a fallback. (Distinct from ssh's legitimate one-shot use:
+*bootstrapping* the agent in — push + launch, session closes — after which the
+standing channel is the agent's HTTP socket, no held credentials. A standing
+ssh *orchestration* driver is the should-not; ssh-as-installer is fine.) In the
+paper L42 is harmless remote-filesystem sync; this concern only arises across a
+containment boundary.
 
 ### 6.3 Do NOT add a config-file parser to "match" the paper's stores
 

@@ -95,25 +95,44 @@ one boundary down**:
   parent advertises. The parent already knows the child's identity (it
   declared it), so it can stamp it at boot time.
 
-## Transport options (rendezvous)
-
-The agent dials out; the parent listens. Candidates, cheapest first:
-
-- a **port** the parent opens and the agent connects to (works across the VM
-  NIC; the same `ip()`/network the data plane uses);
-- **std.ipc** / a forwarded fd for the container-in-host case (no network);
-- a **shared file / dir** the parent polls and the agent writes (crude but
-  zero-dependency; fine for v0 liveness reporting).
+## Transport — file (v0) and HTTP (drafted)
 
 The message types are aeo's existing ones (`Boot`/`Probe`/`Halt` + a report
-back), so the transport is just a pipe for already-defined messages.
+back), so the transport is just a pipe for already-defined `lib/protocol` lines.
+Two transports exist behind the same tiny surface (`put`/`recv_one`/dirs), so
+`bin/aeo-agent.ae` swaps the module and nothing else changes:
+
+- **`lib/transport_file`** (v0, in use) — a shared rendezvous dir, one command
+  per file, maildir-style. Crude, zero-dependency, works container↔host over a
+  bind mount. Isolates the protocol + recursion from any network plumbing.
+- **`lib/transport_http`** (drafted) — a private HTTP channel on a socket, built
+  on **`std.http.server`** (NOT ssh). The agent inside the node is the *server*;
+  the parent on the host is the *client*. Modeled on aeb's `aeb-agent` (port
+  9440; aeo's is 9450). Endpoints: `/health` (open liveness, no auth — the
+  "is the agent resident?" probe), `/ping` (authed identity), `/dispatch`
+  (authed; POST one protocol command line, drained by the agent core via the
+  same `recv_one()` name).
+
+**ssh is bootstrap-only.** ssh's single job is getting the agent *in* and
+*launched* (push the binary, start it, session closes). The standing channel is
+then the HTTP socket — parent-as-client → agent-as-server — so aeo holds **no
+standing ssh credentials** and there is **no interior ssh path** the workload
+shares. `probe_health` after the launching ssh closes is exactly the residence
+(TSR) check.
 
 ## Channel security — one-time keys, no CA (design-intent, NOT built)
 
-> Status: **requirement, not yet implemented.** v0 (`bin/aeo-agent.ae`) uses the
-> file transport with a *warn-level* shared token. The properties below are the
-> design target the `transport_http` pivot must meet; today's code does not yet
-> enforce them. Keep the proven-vs-modeled line honest.
+> Status (proven-vs-modeled, honest):
+> - `bin/aeo-agent.ae` v0 over **`transport_file`** uses a *warn-level* shared
+>   token (mismatch logs, still proceeds).
+> - **`transport_http`** is drafted and is already **fail-closed** on auth (401
+>   when the token is absent/wrong; an unconfigured token denies). But its auth is
+>   a **bearer token carried in the request body** — a shared secret, *not* the
+>   one-time-key mutual auth below.
+> - The two properties below are the design TARGET. Property 1 (no surface) is
+>   partly met by the endpoint split (`/health` open, `/dispatch`+`/ping` authed).
+>   Property 2 (one-time keys, no CA) is **the remaining work**: move the HTTP
+>   transport from bearer-token to mutual one-time-key auth.
 
 Two properties make "the agent serves the container, never the workload" real
 rather than aspirational:

@@ -222,8 +222,9 @@ is load-bearing: Aether's module `var` had a string of cross-import soundness bu
 > aeo's contribution is the **resident-deputy** shape: `lib/protocol/` +
 > `aeo-agent` (`bin/aeo-agent.ae`) keep the paper's best idea — *a stable verb set
 > with a replaceable transport beneath it* (`boot/halt/probe/announce/report` over
-> `transport_file` now, `transport_http` later): a metaobject protocol in
-> miniature — and put it inside the node as the **container's deputy**. The agent
+> `transport_file` in use, a drafted `transport_http` on `std.http.server` — NOT
+> ssh; ssh is bootstrap-only): a metaobject protocol in miniature — and put it
+> inside the node as the **container's deputy**. The agent
 > enacts the container's will + reports health, but exposes **zero ABI surface to
 > the node's other processes** (the workload gets no upward channel through it) and
 > the parent channel is mutually authenticated with **one-time per-agent keys — no
