@@ -202,6 +202,35 @@ is load-bearing: Aether's module `var` had a string of cross-import soundness bu
 - **Drivers self-sudo where they need privilege**: `sudo -n <prog> …` so the aeo
   binary needn't be root (the operator pre-grants specific binaries NOPASSWD).
 
+> **Academic precedent (cite, don't depend on):** Weiher/Taeumel/Hirschfeld,
+> *Beyond Procedure Calls as Component Glue* (Onward! '24,
+> doi:10.1145/3689492.3690052) is the canonical academic backing for
+> config-IS-code-for-infra. Listings 41/42 are directory-sync-as-program where the
+> *only* difference between the local and remote case is an `SSHConnection` store
+> handle — aeo's substrate-portability pitch (one composition, local/remote differ
+> by a handle), two years early. §8.7 (Plan 9 / "packaging mismatch") is the sharp
+> argument for routing through a `.ae` rather than YAML-over-a-CLI: an OS-mediated
+> abstraction "requires serialized representations, which have to be parsed,
+> generated and accessed via the POSIX APIs … a form of packaging mismatch."
+> **Where aeo diverges — the part that's genuinely ours:** Objective-S gets this
+> via a polymorphic connection operator `→` backed by a metaobject protocol, and
+> its remote story (L42) is `SSHConnection`-**reaches-into** the contained — the
+> orchestrator dials *through* the boundary to a store inside. **aeo reverses the
+> directionality on containment grounds.** L42's reach-in is the LiveConnect /
+> DOM-monkey-patching antipattern Principles-of-Containment forbids (a container
+> reaching into its contained's innards). So `lib/protocol/` + `aeo-agent`
+> (`bin/aeo-agent.ae`) keep the paper's best idea — *a stable verb set with a
+> replaceable transport beneath it* (`boot/halt/probe/announce/report` over
+> `transport_file` now, `transport_http` later): a metaobject protocol in
+> miniature — but invert the flow: **the contained reaches OUT and the parent
+> listens; the parent messages a resident agent, never through the boundary.** The
+> agent IS the standing live connection the paper describes via `→`, made concrete
+> *and* containment-safe: the runner is just the depth-0 agent, the same actor
+> protocol one boundary down. The front door still has **no `→` operator** and
+> shells to aeb for static structure. So: same protocol-with-pluggable-transport
+> factoring, opposite directionality — and the reversal is the novelty over the
+> paper, not a retreat from it. (See `docs/aeo-agent.md`.)
+
 > Historical note: early design docs (and old versions of this file) describe a
 > `cap` threaded through every handle — `jail(cap, "db")`, `aeo(cap)` DI. That
 > was the intended capability-injection shape; it is **not built** — today's
