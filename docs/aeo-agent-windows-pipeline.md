@@ -27,28 +27,44 @@ mingw — see the correction in windows-guest.md); this is about *producing* and
   for TSR (Windows scheduled task / service — the Windows arm of the init-aware
   push, cf. memory `aeo-agent-tsr-init-systems`).
 
-## BLOCKERS — must be done before the pipeline can produce a working .exe
+## BLOCKERS — status (2026-07-01: #2 CLEARED, #3 substantially de-risked)
 
-These are why we can't just cross-build today:
+1. **Agent body is Linux-bound, not the language.** `bin/aeo-agent.ae` shells to
+   podman (`driver_linux` + `_ensure_child_container`'s `podman run`). mingw can't
+   compile podman calls into a Windows .exe. Needs a `driver_windows` (or
+   `select(linux:…, windows:…)`) arm that runs the workload natively (winget/wslc
+   — see the `driver_wslc` TODO — launch the child, probe via tasklist/HTTP).
+   → STILL OPEN. The one real remaining blocker for a *functional* Windows agent.
+   (The agent's CORE — protocol, transport_http, agent_auth, self-attest — is
+   substrate-agnostic and already cross-compiles; only the child-bring-up body is
+   Linux-bound.)
 
-1. **Agent body is Linux-bound, not the language.** `bin/aeo-agent.ae`
-   `import driver_linux` and calls podman (`driver_linux.up/down/probe`). mingw
-   cannot compile podman calls into a Windows .exe. Needs a `driver_windows` (or
-   `select(linux:…, windows:…)`) arm that runs the workload natively on Windows
-   (winget-install Python, launch `python app.py`, probe via tasklist/HTTP).
-   → This is agent **slice 3**-ish work; a hard prerequisite to the cross-build.
+2. ~~**Agent isn't on the conduit yet.**~~ **CLEARED.** The agent is fully on
+   `lib/transport_http` now (HTTP conduit live-proven: recursion, async delegate,
+   `status`/`attest`, bank-courier auth — the whole real-KVM nested `aeo up`). A
+   Windows .exe of the agent can speak the conduit as-is.
 
-2. **Agent isn't on the conduit yet (slice 2).** Still on the old shared-dir
-   `transport_file`; must be rewritten onto `lib/transport_http` (built, tested)
-   so a Windows agent can actually be driven. A .exe that can't speak the conduit
-   is useless.
-
-3. **mingw cross-build pipeline UNPROVEN.** Aether *targets* Windows (docs prove
-   it), but "aetherc → C → mingw-w64-gcc → .exe that runs + opens a socket" is
-   reasoned, not run. Likely needs Windows wiring: `-lws2_32` for sockets, the
-   std.http server on Winsock, path/`select()` handling. A cheap spike (cross-
-   build a minimal socket program, run it on the Win guest) would de-risk this
-   BEFORE investing in the real agent.
+3. **mingw cross-build pipeline — SUBSTANTIALLY DE-RISKED (spike run 2026-07-01).**
+   Was "reasoned, not run." Now run, on Bazzite (mingw in a debian container — the
+   immutable-host path):
+   - `gcc-mingw-w64-x86-64` cross-compiles a trivial C program to a valid Windows
+     `.exe` (PE32+, `MZ` magic). ✅
+   - Aether's runtime is genuinely Windows-portable: three IO pollers
+     (`aether_io_poller_epoll`/`kqueue`/**`poll`**), `_WIN32` guards throughout.
+     `std/net/aether_net.c` — the **Winsock socket layer the agent depends on** —
+     cross-compiles clean (EXIT=0). ✅
+   - Full sweep of runtime + std/net/crypto/os/string: **53 ok, 9 failed** — and
+     every failure is either not-runtime (`*_example.c`/`*_bench.c`), a Linux-only
+     file Windows wouldn't build (`libaether_sandbox_preload.c` = an LD_PRELOAD
+     shim), or a wrong-`-I`-path artifact of the naive sweep on the *other* poller
+     family (the Makefile selects the right poller per platform via `IO_POLLER_SRC`;
+     the portable `poll` one already built). So no portability WALL — the
+     Windows-relevant runtime cross-compiles.
+   REMAINING for #3: build the actual `libaether.a` for mingw *via the Makefile*
+   (a `CC=x86_64-w64-mingw32-gcc` + `-lws2_32` build-system exercise, not a
+   portability question), then `aetherc <prog> → C → mingw → .exe`. And the final
+   proof — RUN a cross-built socket .exe on the real Win11 guest — needs guest
+   creds (the guest is up at 192.168.122.179 with OpenSSH on :22; awaiting login).
 
 ## Suggested order when resumed
 
