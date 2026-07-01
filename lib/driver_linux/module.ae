@@ -27,7 +27,7 @@ import std.fs (write_atomic)
 exports (
     name, engine_resolve,
     up, up_net, up_confined, network_ensure, network_ensure_internal, down, probe, exec_capture, build, build_entrypoint, built_tag,
-    ps_running_argv, run_argv, run_argv_net, run_argv_confined, stop_argv, rm_argv, exec_health_argv,
+    ps_running_argv, ps_all_running_argv, running_names, run_argv, run_argv_net, run_argv_confined, stop_argv, rm_argv, exec_health_argv,
     build_argv
 )
 
@@ -63,6 +63,40 @@ ps_running_argv(res_name: string) -> ptr {
     list_add(av, "--format")
     list_add(av, "{{.Names}}")
     return av
+}
+
+// `<engine> ps --filter status=running --format {{.Names}}` — the batch form of
+// ps_running_argv with NO name filter: every running container's name,
+// newline-separated. Lets the engine's per-level poller check all health-less
+// container/docker nodes with ONE `ps` instead of one per node.
+ps_all_running_argv() -> ptr {
+    av = list_new()
+    list_add(av, "ps")
+    list_add(av, "--filter")
+    list_add(av, "status=running")
+    list_add(av, "--format")
+    list_add(av, "{{.Names}}")
+    return av
+}
+
+// running_names — the newline-separated names of every running container ("" if
+// no engine). The batch liveness query the engine intersects against a level's
+// health-less container/docker nodes.
+running_names(engine_pref: string) -> string {
+    eng = engine_resolve(engine_pref)
+    if eng == "" {
+        return ""
+    }
+    av = ps_all_running_argv()
+    out, status, err = run_capture(eng, av, null)
+    list_free(av)
+    if err != "" {
+        return ""
+    }
+    if status != 0 {
+        return ""
+    }
+    return out
 }
 
 // `<engine> run -d --name NAME --replace [-p PORT:PORT] IMAGE [/bin/sh -c CMD]`

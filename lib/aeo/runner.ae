@@ -18,7 +18,7 @@
 // AEO_CMD env (the front-door sets it): up (default) / down / status.
 
 import std.config
-import std.string (string_length, string_substring, string_index_of, string_char_at)
+import std.string (string_length, string_substring, string_index_of, string_char_at, string_from_char)
 import std.list
 import driver_linux
 import driver_lxc
@@ -116,12 +116,14 @@ _await_level(booted: ptr, min_secs: int) -> int {
     budget = _level_budget_ms(booted, min_secs)
     waited = 0
     while waited < budget {
-        // BATCHED liveness: for pidfile-kind nodes whose readiness IS liveness (no
-        // health()), one shell sweep checks every pidfile at once — O(1) shell-outs
-        // per tick instead of O(N) cat+kill. A health-padded " a b c " membership
-        // string; nodes not covered fall to the per-node probe below (identical
-        // answer, just not batched). See _batch_pidfile_alive.
-        alive = "${_batch_pidfile_alive(booted)} "
+        // BATCHED liveness: for nodes whose readiness IS liveness (no health()) and
+        // whose liveness source is RELIABLE — pidfile kinds (a local `kill -0`) and
+        // container/docker (a rootless `podman/docker ps`) — check the whole level
+        // in O(1) queries per tick instead of O(N). A space-padded " a b c "
+        // membership string; every other node (health-checked, or a sudo-gated
+        // nspawn/lxc/jail where a false "down" could hang) falls to the per-node
+        // probe below. See _alive_set.
+        alive = _alive_set(booted)
         allup = 1
         i = 0
         while i < m {
@@ -166,18 +168,79 @@ _await_level(booted: ptr, min_secs: int) -> int {
     return 0
 }
 
-// 1 if `nm`'s readiness can be batch-checked from its pidfile alone — a
-// pidfile-tracked kind (bwrap/firecracker/kvm) with NO health() command, so
-// "process alive" == "ready". Health-checked or non-pidfile nodes are not
-// batchable (they need a per-node probe/exec) and take the fallback path.
+// 1 if `nm`'s readiness can be batch-checked from a RELIABLE liveness source with
+// NO health() command (so "process alive" == "ready"): a pidfile-tracked kind
+// (bwrap/firecracker/kvm — local `kill -0`) or container/docker (rootless
+// `podman/docker ps`). Health-checked nodes, and sudo-gated kinds (nspawn/lxc)
+// where a false "down" from a denied sudo could HANG bring-up, are NOT batchable
+// and take the per-node probe path.
 _batchable(nm: string) -> int {
     if string_length(compose.get_health(nm)) > 0 {
         return 0
     }
-    if _pidfile_of(nm, compose.get_kind(nm)) == "" {
-        return 0
+    k = compose.get_kind(nm)
+    if _pidfile_of(nm, k) != "" {
+        return 1
     }
-    return 1
+    if k == "container" {
+        return 1
+    }
+    if k == "docker" {
+        return 1
+    }
+    return 0
+}
+
+// _alive_set — the space-padded " name ... " membership string of every batchable
+// BOOTING node currently alive, gathered in O(1) queries per tick: one local
+// pidfile sweep, plus one `ps` per container/docker engine present in the level.
+// The engine's readiness fast-path (see _await_level).
+_alive_set(booted: ptr) -> string {
+    s = " ${_batch_pidfile_alive(booted)} "
+    if _level_has_batch_kind(booted, "container") == 1 {
+        s = "${s}${_nl2sp(driver_linux.running_names(""))} "
+    }
+    if _level_has_batch_kind(booted, "docker") == 1 {
+        s = "${s}${_nl2sp(driver_linux.running_names("docker"))} "
+    }
+    return s
+}
+
+// 1 if the level has a BOOTING, health-less node of `kind` (so its batch query is
+// worth running this tick).
+_level_has_batch_kind(booted: ptr, kind: string) -> int {
+    m = list_size(booted)
+    i = 0
+    while i < m {
+        bn = list_get_raw(booted, i)
+        if get_state(bn) == STATE_BOOTING() {
+            if compose.get_kind(bn) == kind {
+                if string_length(compose.get_health(bn)) == 0 {
+                    return 1
+                }
+            }
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+// Replace every newline in `s` with a space (so a multi-line `ps` name list joins
+// into the single space-delimited membership string).
+_nl2sp(s: string) -> string {
+    out = ""
+    n = string_length(s)
+    i = 0
+    while i < n {
+        c = string_char_at(s, i)
+        if c == 10 {
+            out = "${out} "
+        } else {
+            out = "${out}${string_from_char(c)}"
+        }
+        i = i + 1
+    }
+    return out
 }
 
 // The pidfile path for a pidfile-tracked kind, else "" (via each driver's own

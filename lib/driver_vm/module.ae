@@ -390,9 +390,16 @@ bhyve_up(res_name: string, guest_image: string, realize_target: string, guest_ip
             return "aeo: 'vm start ${res_name}' failed: ${out}"
         }
     }
-    // Only report success once the guest is actually reachable (ssh on its
-    // resolved IP) — so the runner doesn't bring up nested containers before
-    // the VM is up. Guests boot ~130s; wait generously.
+    // DETACHED bring-up under the agent path: the engine's readiness poller gates
+    // on the guest agent's /health (see probe — IP-independent), so we RETURN NOW
+    // and let sibling VMs in the same level boot CONCURRENTLY instead of blocking
+    // each guest's ~130s boot serially. On the legacy (no-agent) path, probe can't
+    // confirm ssh-reachability without the guest IP, so we still block here until
+    // the guest answers on ssh (so a nested child isn't delegated before the guest
+    // is reachable).
+    if _agent_path_on_drv() == 1 {
+        return ""
+    }
     if _wait_guest_ready(guest_ip) == 0 {
         return "aeo: vm '${res_name}' started but never became ssh-reachable at ${guest_ip} (boot/network?)"
     }

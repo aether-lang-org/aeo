@@ -443,11 +443,22 @@ wired yet; mapped here as candidate kinds. Ordered by how cleanly they'd land:
             directly. Health-checked / non-pidfile nodes keep the identical
             per-node probe (zero behaviour change). In _await_level /
             _batch_pidfile_alive.
-      - [ ] Detach the BLOCKING-up drivers (bhyve_up / _up_kvm wait for ssh/agent),
-            so VM levels parallelize too — start the VM, let the poller detect
-            ssh/agent-ready. Entangled with the recent agent-path health changes
-            and NOT testable off a KVM host, so deferred to a Bazzite-validated
-            pass rather than blind-changed here.
+      - [x] VM levels parallelize (2026-07-01): `_up_kvm` already returns fast
+            (qemu launches detached) and probe() gates kvm readiness on the guest
+            agent's /health — so KVM VMs ALREADY boot concurrently under the new
+            engine (no change needed). `bhyve_up` used to block on _wait_guest_ready;
+            it now RETURNS after `vm start` when the agent path is on (readiness
+            gated by the poller's agent /health probe, which is IP-independent),
+            so sibling bhyve VMs boot concurrently. Legacy (no-agent) bhyve still
+            blocks — probe can't confirm ssh-reachability without the guest IP.
+      - [x] container/docker liveness batched too (2026-07-01): health-less
+            container/docker nodes are checked with one rootless `podman/docker ps`
+            per tick (driver_linux.running_names), same reliable-source rule as the
+            pidfile sweep. nspawn/lxc are DELIBERATELY left per-node: their liveness
+            is sudo-gated (machinectl/lxc-ls), and a false "down" from a denied sudo
+            in a batch would HANG bring-up — the per-node probe is the safe path.
+            All batching is a fast-path gated by _batchable(); health-checked and
+            non-batchable nodes are byte-for-byte unchanged.
 
 - [x] **Aether DURATION LITERALS woven into the aeo DSL** (Paul 2026-06-27) —
       DONE. The FluentSelenium within()/secs() idiom: `within(30s) every(500ms)`
