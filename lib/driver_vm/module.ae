@@ -156,15 +156,104 @@ qemu_argv(res_name: string, image: string, cpus: int, mem: string, tap: string, 
 // Agent-courier reads (boot side of the agent path). Per-VM override then the
 // shared var; empty/0 = pre-agent bare boot. (getenv-null footgun: guard on
 // length, never == "".)
+//
+// Per-VM env keys embed the node name — but shell env var names can't contain
+// hyphens (AEO_AGENT_PORT_vm-auto2 is not a valid var, the shell rejects it). So
+// sanitize the name to [A-Za-z0-9_] (hyphen -> underscore) before building the
+// key. (This bit the first _up_kvm auto-boot test: a hyphenated VM name silently
+// dropped its per-VM env.)
+_envkey(prefix: string, name: string) -> string {
+    safe = ""
+    n = string_length(name)
+    i = 0
+    while i < n {
+        c = string_char_at(name, i)
+        ok = 0
+        if c >= 48 { if c <= 57 { ok = 1 } }        // 0-9
+        if c >= 65 { if c <= 90 { ok = 1 } }        // A-Z
+        if c >= 97 { if c <= 122 { ok = 1 } }       // a-z
+        if c == 95 { ok = 1 }                        // _
+        if ok == 1 {
+            safe = "${safe}${string_from_char(c)}"
+        } else {
+            safe = "${safe}_"
+        }
+        i = i + 1
+    }
+    return "${prefix}${safe}"
+}
 _agent_seed(res_name: string) -> string {
-    v = getenv("AEO_SEED_${res_name}")
+    v = getenv(_envkey("AEO_SEED_", res_name))
     if string_length(v) > 0 {
         return v
     }
-    return getenv("AEO_SEED")
+    v = getenv("AEO_SEED")
+    if string_length(v) > 0 {
+        return v
+    }
+    // Deterministic path build_agent_seed writes to; present iff _up_kvm built it
+    // for the agent path. Return it only if the file actually exists.
+    p = "/tmp/aeo-seed-${res_name}.iso"
+    if _file_exists(p) == 1 {
+        return p
+    }
+    return ""
+}
+_file_exists(p: string) -> int {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "test -f ${p} && echo yes")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    if string_contains(out, "yes") == 1 {
+        return 1
+    }
+    return 0
+}
+// Driver-side courier reads (mirror the runner's, so the driver is standalone).
+_agent_path_on_drv() -> int {
+    v = getenv("AEO_AGENT_PATH")
+    if string_length(v) == 0 {
+        return 0
+    }
+    return 1
+}
+_agent_token_drv(res_name: string) -> string {
+    v = getenv(_envkey("AEO_TOKEN_", res_name))
+    if string_length(v) > 0 {
+        return v
+    }
+    return getenv("AEO_TOKEN")
+}
+// The aeo-agent binary to plant. AEO_AGENT_BIN, else a couple of well-known
+// build outputs relative to the aeo home.
+_agent_binary() -> string {
+    v = getenv("AEO_AGENT_BIN")
+    if string_length(v) > 0 {
+        return v
+    }
+    c1 = "${_aeo_home()}/out/aeo-agent"
+    if _file_exists(c1) == 1 {
+        return c1
+    }
+    c2 = "${_aeo_home()}/aeo-agent"
+    if _file_exists(c2) == 1 {
+        return c2
+    }
+    return ""
+}
+// An ssh pubkey to bake into the guest for debug access (optional).
+_guest_pubkey() -> string {
+    p = "${_home()}/.ssh/id_rsa.pub"
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "cat ${p} 2>/dev/null | tr -d '\\n'")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    return out
 }
 _agent_hostport(res_name: string) -> int {
-    v = getenv("AEO_AGENT_PORT_${res_name}")
+    v = getenv(_envkey("AEO_AGENT_PORT_", res_name))
     if string_length(v) == 0 {
         v = getenv("AEO_AGENT_PORT")
     }
@@ -887,6 +976,20 @@ _up_kvm(res_name: string, image: string, cpus: int, mem: string, tap: string) ->
     bin = os_which("qemu-system-x86_64")
     if bin == "" {
         return "aeo: kvm needs qemu-system-x86_64 on PATH (not found)"
+    }
+    // AGENT PATH: before boot, courier the agent into the guest via a NoCloud
+    // seed (build_agent_seed writes /tmp/aeo-seed-<res_name>.iso, which qemu_argv
+    // then attaches by that deterministic path). Only when AEO_AGENT_PATH=1 and no
+    // seed was pre-supplied — so a plain `aeo up` auto-bootstraps the agent.
+    if _agent_path_on_drv() == 1 {
+        if string_length(_agent_seed(res_name)) == 0 {
+            abin = _agent_binary()
+            if string_length(abin) == 0 {
+                return "aeo: agent path on but no aeo-agent binary found (set AEO_AGENT_BIN)"
+            }
+            _iso = build_agent_seed(res_name, _agent_token_drv(res_name), abin, _guest_pubkey())
+            // build_agent_seed writes the deterministic path _agent_seed() finds.
+        }
     }
     // qemu's own -daemonize + -pidfile handle backgrounding and the pid
     // record, so no shell wrapper is needed.

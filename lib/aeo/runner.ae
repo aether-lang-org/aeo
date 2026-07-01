@@ -1152,7 +1152,7 @@ _agent_path_on() -> int {
 }
 // Per-guest couriered secret: AEO_TOKEN_<host>, else the shared AEO_TOKEN.
 _agent_token(host: string) -> string {
-    v = _envc("AEO_TOKEN_${host}")
+    v = _envc(_envkey("AEO_TOKEN_", host))
     if string_length(v) > 0 {
         return v
     }
@@ -1161,7 +1161,7 @@ _agent_token(host: string) -> string {
 // Host-side forwarded port to the guest's agent (:9450 in-guest). Per-guest
 // AEO_AGENT_PORT_<host>, else AEO_AGENT_PORT, else the convention default 9450.
 _agent_port(host: string) -> int {
-    v = _envc("AEO_AGENT_PORT_${host}")
+    v = _envc(_envkey("AEO_AGENT_PORT_", host))
     if string_length(v) == 0 {
         v = _envc("AEO_AGENT_PORT")
     }
@@ -1169,6 +1169,28 @@ _agent_port(host: string) -> int {
         return 9450
     }
     return _atoi_env(v)
+}
+// Sanitize a node name into a valid shell env-var suffix (hyphens etc. -> _).
+// Env var names can't contain hyphens, so AEO_TOKEN_<host> must sanitize <host>.
+_envkey(prefix: string, name: string) -> string {
+    safe = ""
+    n = string_length(name)
+    i = 0
+    while i < n {
+        c = string_char_at(name, i)
+        ok = 0
+        if c >= 48 { if c <= 57 { ok = 1 } }
+        if c >= 65 { if c <= 90 { ok = 1 } }
+        if c >= 97 { if c <= 122 { ok = 1 } }
+        if c == 95 { ok = 1 }
+        if ok == 1 {
+            safe = "${safe}${string_from_char(c)}"
+        } else {
+            safe = "${safe}_"
+        }
+        i = i + 1
+    }
+    return "${prefix}${safe}"
 }
 _atoi_env(s: string) -> int {
     n = string_length(s)
