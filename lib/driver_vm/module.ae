@@ -34,7 +34,7 @@ import std.string (string_length, string_char_at, string_substring, string_conta
 
 exports (
     name,
-    up, bhyve_up, guest_container_up, agent_delegate, exec_capture, down, probe,
+    up, bhyve_up, guest_container_up, agent_delegate, build_agent_seed, exec_capture, down, probe,
     bhyve_argv, qemu_argv, bhyvectl_destroy_argv,
     pidfile_for, bootrom_path
 )
@@ -172,6 +172,43 @@ _agent_hostport(res_name: string) -> int {
         return 0
     }
     return _atoi(v)
+}
+
+// Build a NoCloud seed ISO that couriers the agent into the guest and starts it.
+// The seed carries: meta-data, user-data (cloud-config), and the agent BINARY as
+// a plain file on the ISO. cloud-init's runcmd mounts the seed, copies the agent
+// out, and launches it with the couriered secret/port env — the bank-courier
+// bootstrap, automated. Returns the seed path ("" on failure); the caller sets
+// AEO_SEED_<res_name> to it before qemu_argv boots the guest.
+//
+//   res_name  — the VM/node name (becomes AEO_NODE inside the guest)
+//   token     — the couriered secret (AEO_TOKEN in-guest)
+//   agent_bin — host path to the aeo-agent binary to plant
+//   ssh_key   — an authorized_keys entry (for debug ssh); "" = none
+build_agent_seed(res_name: string, token: string, agent_bin: string, ssh_key: string) -> string {
+    seed_dir = "/tmp/aeo-seed-${res_name}"
+    iso = "/tmp/aeo-seed-${res_name}.iso"
+    // user-data: cloud-config that plants + starts the agent from the seed's
+    // second file. The agent runs as node=<res_name>, http on :9450, bound
+    // 0.0.0.0 (reachable from the host across the VM NIC), NOOP boots for the
+    // proof. runcmd mounts the cidata iso (/dev/v... — cloud-init already read it,
+    // but we re-read the plain file it also placed at /var/lib/cloud seed dir).
+    kline = ""
+    if string_length(ssh_key) > 0 {
+        kline = "ssh_authorized_keys:\n  - ${ssh_key}\n"
+    }
+    // The agent binary is placed on the ISO as `aeo-agent`; NoCloud mounts the
+    // seed and cloud-init copies files from its dir. We reference it via the
+    // well-known cidata mount cloud-init leaves, then start it.
+    sh = list_new()
+    list_add(sh, "-c")
+    list_add(sh, "set -e; rm -rf ${seed_dir}; mkdir -p ${seed_dir}; printf 'instance-id: ${res_name}\\nlocal-hostname: ${res_name}\\n' > ${seed_dir}/meta-data; printf '#cloud-config\\npassword: aeo\\nchpasswd: { expire: false }\\nssh_pwauth: true\\n${kline}runcmd:\\n  - [ sh, -c, \"m=/mnt/aeoseed; mkdir -p $m; mount /dev/sr0 $m 2>/dev/null || mount /dev/vdb $m 2>/dev/null || true; cp $m/aeo-agent /usr/local/bin/aeo-agent; chmod +x /usr/local/bin/aeo-agent; AEO_TRANSPORT=http AEO_PORT=9450 AEO_NODE=${res_name} AEO_TOKEN=${token} AEO_BIND=0.0.0.0 AEO_BOOT_NOOP=1 setsid /usr/local/bin/aeo-agent >/var/log/aeo-agent.log 2>&1 &\" ]\\n' > ${seed_dir}/user-data; cp ${agent_bin} ${seed_dir}/aeo-agent; mkisofs -o ${iso} -V cidata -J -r ${seed_dir}/meta-data ${seed_dir}/user-data ${seed_dir}/aeo-agent 2>/dev/null")
+    out, status, err = run_capture("/bin/sh", sh, null)
+    list_free(sh)
+    if status != 0 {
+        return ""
+    }
+    return iso
 }
 
 // --- exec'ing entry points -------------------------------------------
