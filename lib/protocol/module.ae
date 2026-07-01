@@ -30,7 +30,7 @@
 import std.string (string_length, string_index_of, string_substring)
 
 exports (
-    encode_boot, encode_delegate, encode_halt, encode_probe,
+    encode_boot, encode_delegate, encode_halt, encode_probe, encode_attest,
     encode_announce, encode_report,
     verb_of, token_of, arg1_of, arg2_of
 )
@@ -54,6 +54,12 @@ encode_halt(token: string, node: string) -> string {
 }
 encode_probe(token: string, node: string) -> string {
     return "probe ${token} ${node}"
+}
+// attest — ask the resident agent to re-verify its node's confinement FROM INSIDE
+// and report "ok" / "drift:<axis>" (self-attestation, §5.4). The report body
+// carries the verdict; drift detail rides in the state field.
+encode_attest(token: string, node: string) -> string {
+    return "attest ${token} ${node}"
 }
 encode_announce(token: string, agent: string) -> string {
     return "announce ${token} ${agent} up"

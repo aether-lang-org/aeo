@@ -38,6 +38,7 @@ import std.http (server_create, server_set_host, server_get, server_post,
                  server_start_background,
                  response_set_status, response_set_header, response_set_body,
                  request_body)
+import std.net (tcp_connect_raw, tcp_close)
 
 extern exit(code: int)
 
@@ -221,6 +222,16 @@ _dispatch_verb(me: string, token: string, line: string) -> string {
         }
         return protocol.encode_report(token, node, st)
     }
+    if v == "attest" {
+        // SELF-ATTESTATION (§5.4 of the paper consideration): re-verify, FROM
+        // INSIDE the boundary, that this node's confinement still holds — the
+        // orchestrator can't see in, the resident agent can. Reports "ok" or
+        // "drift:<what>". Currently checks deny_egress (a node that must have no
+        // egress must genuinely fail to reach out); more axes (image digest,
+        // cgroup caps) slot in the same way. Best-effort, non-destructive.
+        st = _self_attest()
+        return protocol.encode_report(token, node, st)
+    }
     if v == "probe" {
         alive = driver_linux.probe(node, "", "")
         st = "down"
@@ -370,6 +381,45 @@ _delegate_child_http(token: string, child: string) -> string {
 // mount my own agent binary (/usr/local/bin/aeo-agent) into the container so no
 // image bake is needed. Idempotent: if the child already answers /health, skip.
 // Then wait (bounded) for it to listen. Returns "" on success, else an error.
+// Self-attest this node's confinement FROM INSIDE. Returns "ok" if every checked
+// axis still holds, else "drift:<axis>". Only the resident agent can do this —
+// the orchestrator is outside the boundary. Non-destructive, best-effort.
+//
+// Axis 1 — deny_egress: when AEO_DENY_EGRESS=1 the node is supposed to have NO
+// outbound network. So egress MUST fail; if we CAN reach the outside, confinement
+// has drifted (the deny rule was removed/bypassed) — the exact thing an attacker
+// who escaped netpolicy would enable. (When the var is unset, egress is allowed
+// and this axis is trivially ok.) More axes (image digest via podman inspect,
+// cgroup pids-limit via /sys/fs/cgroup) slot in the same shape.
+_self_attest() -> string {
+    deny = _env_or("AEO_DENY_EGRESS", "")
+    if string_length(deny) > 0 {
+        if _can_reach_out() == 1 {
+            return "drift:deny_egress"       // could phone home but shouldn't
+        }
+    }
+    return "ok"
+}
+// 1 iff this node can reach the outside network (a quick, bounded probe to a
+// well-known host). Used ONLY to detect deny_egress drift (reachable == bad there).
+// Portable probe: prefer `nc -z` (present on most guests); fall back to bash's
+// /dev/tcp (dash lacks it — DON'T use plain sh for that). Non-destructive: a bare
+// TCP connect to :53, no payload.
+_can_reach_out() -> int {
+    // IN-PROCESS TCP-connect probe via std.net — no shell-out, no `nc` dependency,
+    // no seed provisioning gap (the resident deputy shouldn't rely on the guest's
+    // toolage). tcp_connect_raw returns a socket ptr on connect, null (0) on any
+    // failure. For a real deny_egress node the connect FAILS FAST (no route /
+    // network-unreachable → immediate error), which is the whole point. Port 53
+    // (DNS) is a benign well-known port; no payload is sent.
+    tgt = _env_or("AEO_EGRESS_PROBE", "1.1.1.1")
+    sock = tcp_connect_raw(tgt, 53)
+    if sock == 0 {
+        return 0                             // could not connect -> confined (ok)
+    }
+    tcp_close(sock)
+    return 1                                 // connected -> egress reachable
+}
 // Fire the child bring-up in the BACKGROUND (detached), returning immediately so
 // the http handler doesn't block. The detached shell: waits for podman, then
 // `podman run`s the child (retrying through the transient post-install 125), then
