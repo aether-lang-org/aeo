@@ -25,8 +25,10 @@
 // the agent hands THEM to their agents — same code it received work through.
 
 import std.os
+import std.os (run_capture)
+import std.list
 import std.config
-import std.string (string_length, string_char_at)
+import std.string (string_length, string_char_at, string_contains)
 import protocol
 import agent_auth
 import transport_file (ensure_dirs, inbox_dir, outbox_dir, put, recv_one)
@@ -194,11 +196,29 @@ _dispatch_verb(me: string, token: string, line: string) -> string {
         return protocol.encode_report(token, node, st)
     }
     if v == "delegate" {
-        // RECURSION: I am now <node>'s parent. Hand a boot DOWN to <node>'s
-        // agent, wait for its report, relay it UP. The child agent does the
-        // identical thing for ITS children — depth-agnostic.
-        println("aeo-agent[${me}]: delegate ${node} (handing down)")
-        st = _delegate_child(token, node)
+        // RECURSION, ASYNC: bringing a child up can take MINUTES on a cold guest
+        // (podman install + image pull), which would starve this single-threaded
+        // http handler and drop the parent's connection ("empty reply"). So FIRE
+        // the child bring-up in the BACKGROUND and return `pending` immediately;
+        // the parent polls `status <child>` until up/failed. (aeb-agent's
+        // fire-async model.) File transport keeps the old synchronous path.
+        println("aeo-agent[${me}]: delegate ${node} (async, backgrounded)")
+        transport = config.get("aeo.agent.transport")
+        if transport == "http" {
+            _fire_child_async(token, node)
+            return protocol.encode_report(token, node, "pending")
+        }
+        st = _delegate_child(token, node)      // file mode: synchronous (fast)
+        return protocol.encode_report(token, node, st)
+    }
+    if v == "status" {
+        // Report a child's current state WITHOUT blocking: just check its health.
+        // The child's own /health IS the source of truth (up / not-yet).
+        port = _env_or("AEO_PORT_${node}", "9451")
+        st = "pending"
+        if _child_health(port) == 1 {
+            st = "up"
+        }
         return protocol.encode_report(token, node, st)
     }
     if v == "probe" {
@@ -320,9 +340,16 @@ _delegate_child_file(token: string, child: string) -> string {
 // aether:http-response-body-uaf-priority-ask.md). Older toolchains need the
 // status-only path (send_command_status); v0.341.0+ carries full report detail.
 _delegate_child_http(token: string, child: string) -> string {
-    port = _env_or("AEO_PORT_${child}", "")
-    if string_length(port) == 0 {
-        println("aeo-agent: no assigned port for child ${child} (AEO_PORT_${child} unset)")
+    // The child's port: assigned by me (the parent), per the addressing
+    // convention. Couriered as AEO_PORT_<child> if the orchestrator stamped one,
+    // else I assign the convention default (9451). The contained never chooses.
+    port = _env_or("AEO_PORT_${child}", "9451")
+    // RECURSION / bring-up: I START the child's container-agent inside me, THEN
+    // dial it. "delegate" = bring up my child's subtree, not merely reach an
+    // already-running one. Idempotent (skips if already listening).
+    serr = _ensure_child_container(token, child, port)
+    if string_length(serr) > 0 {
+        println("aeo-agent: could not start child container ${child}: ${serr}")
         return "unreachable"
     }
     base = "http://127.0.0.1:${port}"
@@ -336,6 +363,151 @@ _delegate_child_http(token: string, child: string) -> string {
         }
     }
     return "unreachable"                     // unexpected reply shape
+}
+
+// Start the child's container-agent inside this guest (podman): the SAME agent
+// binary, in a glibc container, as node=<child> on <port>, with my token. I
+// mount my own agent binary (/usr/local/bin/aeo-agent) into the container so no
+// image bake is needed. Idempotent: if the child already answers /health, skip.
+// Then wait (bounded) for it to listen. Returns "" on success, else an error.
+// Fire the child bring-up in the BACKGROUND (detached), returning immediately so
+// the http handler doesn't block. The detached shell: waits for podman, then
+// `podman run`s the child (retrying through the transient post-install 125), then
+// exits. The child's own /health becomes the readiness signal the parent polls
+// via `status`. All the timing lives out here, off the request thread.
+_fire_child_async(token: string, child: string) {
+    port = _env_or("AEO_PORT_${child}", "9451")
+    img = _env_or("AEO_CHILD_IMAGE", "docker.io/library/debian:stable-slim")
+    abin = _env_or("AEO_AGENT_SELF", "/usr/local/bin/aeo-agent")
+    log = "/tmp/aeo-child-${child}.log"
+    // one self-contained bring-up script, backgrounded via setsid so it outlives
+    // this handler. `until podman` covers the background install; the run retries
+    // ride the just-installed 125 race.
+    script = "echo start >> ${log}; i=0; until command -v podman >/dev/null 2>&1; do i=$((i+1)); [ $i -gt 600 ] && { echo no-podman >> ${log}; exit 1; }; sleep 1; done; echo podman-ready >> ${log}; t=0; while [ $t -lt 20 ]; do podman rm -f aeo-${child} >/dev/null 2>&1; if podman run -d --name aeo-${child} -p ${port}:${port} -v ${abin}:/aeo-agent:ro -e AEO_TRANSPORT=http -e AEO_PORT=${port} -e AEO_NODE=${child} -e AEO_TOKEN=${token} -e AEO_BIND=0.0.0.0 -e AEO_BOOT_NOOP=1 ${img} /aeo-agent >>${log} 2>&1; then echo run-ok >> ${log}; break; fi; t=$((t+1)); echo run-retry-$t >> ${log}; sleep 3; done"
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "setsid sh -c '${script}' </dev/null >>${log} 2>&1 &")
+    o, s, e = run_capture("/bin/sh", av, null)
+    list_free(av)
+    _crumb(child, "fired async bring-up")
+}
+_ensure_child_container(token: string, child: string, port: string) -> string {
+    _crumb(child, "enter port=${port}")
+    // already up?
+    if _child_health(port) == 1 {
+        _crumb(child, "already up")
+        return ""
+    }
+    // podman may still be installing (the seed installs it in the background so
+    // it doesn't delay agent start) — wait for it before running the child.
+    _crumb(child, "waiting for podman")
+    if _wait_podman() == 0 {
+        _crumb(child, "podman wait FAILED")
+        return "podman not available in guest (install still running / failed)"
+    }
+    _crumb(child, "podman ready; running container")
+    img = _env_or("AEO_CHILD_IMAGE", "docker.io/library/debian:stable-slim")
+    abin = _env_or("AEO_AGENT_SELF", "/usr/local/bin/aeo-agent")
+    run = "podman rm -f aeo-${child} >/dev/null 2>&1; podman run -d --name aeo-${child} -p ${port}:${port} -v ${abin}:/aeo-agent:ro -e AEO_TRANSPORT=http -e AEO_PORT=${port} -e AEO_NODE=${child} -e AEO_TOKEN=${token} -e AEO_BIND=0.0.0.0 -e AEO_BOOT_NOOP=1 ${img} /aeo-agent 2>&1"
+    // Retry the run: a `podman run` fired the instant podman finished installing
+    // hits a TRANSIENT init/lock error (exit 125 — storage db not ready / a
+    // concurrent podman from the background install still holding a lock). A few
+    // seconds later it succeeds. So retry a bounded number of times on failure.
+    tries = 0
+    s = 1
+    o = ""
+    while tries < 20 {
+        av = list_new()
+        list_add(av, "-c")
+        list_add(av, run)
+        o, s, e = run_capture("/bin/sh", av, null)
+        list_free(av)
+        if s == 0 {
+            tries = 20
+        } else {
+            _crumb(child, "podman run try ${_itoa_a(tries)} status=${_itoa_a(s)} out=${o}")
+            sleep(3000)
+            tries = tries + 1
+        }
+    }
+    _crumb(child, "podman run final status=${_itoa_a(s)} out=${o}")
+    if s != 0 {
+        return "podman run failed after retries: ${o}"
+    }
+    // Wait for it to listen. `podman run -d` returns before the image is pulled,
+    // so on a COLD guest (no cached image) the first run pulls debian:stable-slim
+    // over the guest's NAT (~30-60s) BEFORE the container's agent starts. 30s was
+    // too short and the child came up "unreachable"; give the cold pull + start
+    // real headroom (~3min).
+    waits = 0
+    while waits < 360 {
+        if _child_health(port) == 1 {
+            return ""
+        }
+        sleep(500)
+        waits = waits + 1
+    }
+    return "child never listened on ${port}"
+}
+// Wait (bounded, ~5min) for podman to appear on PATH — the seed installs it in
+// the BACKGROUND (so it doesn't delay agent start), and a cold apt-get install on
+// a fresh guest genuinely takes ~2min. 90s was too short and lost the race, so
+// the child came up "unreachable"; give apt real headroom. 1 if available.
+_wait_podman() -> int {
+    waits = 0
+    while waits < 600 {
+        av = list_new()
+        list_add(av, "-c")
+        list_add(av, "command -v podman >/dev/null 2>&1 && echo ok")
+        o, s, e = run_capture("/bin/sh", av, null)
+        list_free(av)
+        if string_contains(o, "ok") == 1 {
+            return 1
+        }
+        sleep(500)
+        waits = waits + 1
+    }
+    return 0
+}
+// File breadcrumb (stdout capture from a worker-thread handler is unreliable, so
+// log to a file directly for post-mortem). Best-effort.
+_crumb(child: string, msg: string) {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "echo \"[$(date +%H:%M:%S)] ${msg}\" >> /tmp/aeo-child-${child}.log")
+    o, s, e = run_capture("/bin/sh", av, null)
+    list_free(av)
+}
+_itoa_a(n: int) -> string {
+    if n == 0 { return "0" }
+    v = n
+    neg = 0
+    if v < 0 { neg = 1 v = 0 - v }
+    s = ""
+    while v > 0 {
+        d = v - (v / 10) * 10
+        s = "${_da(d)}${s}"
+        v = v / 10
+    }
+    if neg == 1 { return "-${s}" }
+    return s
+}
+_da(x: int) -> string {
+    if x == 0 { return "0" } if x == 1 { return "1" } if x == 2 { return "2" }
+    if x == 3 { return "3" } if x == 4 { return "4" } if x == 5 { return "5" }
+    if x == 6 { return "6" } if x == 7 { return "7" } if x == 8 { return "8" }
+    return "9"
+}
+_child_health(port: string) -> int {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "curl -fsS --max-time 2 http://127.0.0.1:${port}/health >/dev/null 2>&1 && echo ok")
+    o, s, e = run_capture("/bin/sh", av, null)
+    list_free(av)
+    if string_contains(o, "ok") == 1 {
+        return 1
+    }
+    return 0
 }
 
 // os.getenv returns NULL (not "") when unset, and null != "" — so guard on

@@ -1,0 +1,38 @@
+// agent_nested_min.ae — the MINIMAL agent-path nested composition: one KVM VM
+// with one nested container, driven end to end by `aeo up` over the AGENT PATH
+// (no ssh-into-guest). Proves the join: aeo boots an agent-ready guest, gates on
+// its resident agent, then DELEGATES the nested child to that agent.
+//
+//   grandparent = aeo (host) — runs this composition
+//     └─ vm     = a KVM guest with the resident aeo-agent (parent)
+//          └─ ctr = a nested container the guest's agent runs (child)
+//
+// Run (the operator couriers the secret + the guest's forwarded agent port):
+//   AEO_AGENT_PATH=1 AEO_TOKEN=<secret> AEO_AGENT_PORT_vm=<hostport> \
+//   AEO_HOME=<aeo checkout> aeo up examples/agent_nested_min.ae
+//
+// No nic() → the driver uses rootless -nic user + the agent-port hostfwd. The
+// child boots NOOP for now (tree convergence, not a real workload).
+
+import compose (system, kvm_vm, container)
+import compose (cpus, memory, image)
+exports ( aeo_orchestration )
+
+aeo_orchestration() {
+    system("agent_nested_min") {
+        vm = kvm_vm("vm") {
+            cpus(2)
+            memory("2G")
+            image(_disk())
+            ctr = container("ctr") {
+                image("docker.io/library/debian:stable-slim")
+            }
+        }
+    }
+}
+
+// The guest disk (a growable copy of the Debian cloud image). Operator override
+// via AEO_VM_DISK; default matches the box's proven layout.
+_disk() -> string {
+    return "/home/bazzite/aeo-images/vm-nested.qcow2"
+}

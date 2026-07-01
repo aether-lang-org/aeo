@@ -564,6 +564,18 @@ driver_down(nm: string, k: string) -> string {
 }
 
 driver_probe(nm: string, k: string, health: string) -> int {
+    // AGENT PATH: a nested container (get_host != "") runs INSIDE its guest, so a
+    // HOST podman probe can't see it — health must be asked of the guest's agent
+    // (a `status` check via agent_delegate's polling already confirmed up at
+    // bring-up; re-probe through the agent, not host podman).
+    if k == "container" {
+        if _agent_path_on() == 1 {
+            host = compose.get_host(nm)
+            if string_length(host) > 0 {
+                return driver_vm.agent_status(host, nm, _agent_token(host), _agent_port(host))
+            }
+        }
+    }
     if k == "jail" {
         return driver_bsd.probe(nm, health, "")
     }
@@ -1594,6 +1606,12 @@ main() {
     println(profile())
     ok = run_up()
     if ok == 0 {
+        // AEO_KEEP_ON_FAIL=1 leaves the partial tree standing for post-mortem
+        // (inspect a half-converged guest/agent) instead of tearing it down.
+        if string_length(_envc("AEO_KEEP_ON_FAIL")) > 0 {
+            println("aeo: bring-up failed — KEEPING partial tree (AEO_KEEP_ON_FAIL)")
+            exit(1)
+        }
         println("aeo: bring-up failed — tearing down partial tree")
         run_down()
         exit(1)

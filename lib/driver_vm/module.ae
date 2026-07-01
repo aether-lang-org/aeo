@@ -34,7 +34,7 @@ import std.string (string_length, string_char_at, string_substring, string_conta
 
 exports (
     name,
-    up, bhyve_up, guest_container_up, agent_delegate, build_agent_seed, exec_capture, down, probe,
+    up, bhyve_up, guest_container_up, agent_delegate, agent_status, build_agent_seed, exec_capture, down, probe,
     bhyve_argv, qemu_argv, bhyvectl_destroy_argv,
     pidfile_for, bootrom_path
 )
@@ -141,8 +141,11 @@ qemu_argv(res_name: string, image: string, cpus: int, mem: string, tap: string, 
         // plain user NIC (no agent forward, the pre-agent behaviour).
         hp = _agent_hostport(res_name)
         if hp > 0 {
+            // also forward ssh (agent-port + 1000) for operator debugging of the
+            // guest — the seed bakes the operator's pubkey.
+            sp = hp + 1000
             list_add(av, "-netdev")
-            list_add(av, "user,id=n0,hostfwd=tcp::${_itoa(hp)}-:9450")
+            list_add(av, "user,id=n0,hostfwd=tcp::${_itoa(hp)}-:9450,hostfwd=tcp::${_itoa(sp)}-:22")
             list_add(av, "-device")
             list_add(av, "virtio-net-pci,netdev=n0")
         } else {
@@ -304,7 +307,13 @@ build_agent_seed(res_name: string, token: string, agent_bin: string, ssh_key: st
     // well-known cidata mount cloud-init leaves, then start it.
     sh = list_new()
     list_add(sh, "-c")
-    list_add(sh, "set -e; rm -rf ${seed_dir}; mkdir -p ${seed_dir}; printf 'instance-id: ${res_name}\\nlocal-hostname: ${res_name}\\n' > ${seed_dir}/meta-data; printf '#cloud-config\\npassword: aeo\\nchpasswd: { expire: false }\\nssh_pwauth: true\\n${kline}runcmd:\\n  - [ sh, -c, \"m=/mnt/aeoseed; mkdir -p $m; mount /dev/sr0 $m 2>/dev/null || mount /dev/vdb $m 2>/dev/null || true; cp $m/aeo-agent /usr/local/bin/aeo-agent; chmod +x /usr/local/bin/aeo-agent; AEO_TRANSPORT=http AEO_PORT=9450 AEO_NODE=${res_name} AEO_TOKEN=${token} AEO_BIND=0.0.0.0 AEO_BOOT_NOOP=1 setsid /usr/local/bin/aeo-agent >/var/log/aeo-agent.log 2>&1 &\" ]\\n' > ${seed_dir}/user-data; cp ${agent_bin} ${seed_dir}/aeo-agent; mkisofs -o ${iso} -V cidata -J -r ${seed_dir}/meta-data ${seed_dir}/user-data ${seed_dir}/aeo-agent 2>/dev/null")
+    // The runcmd STARTS THE AGENT FIRST (so the runner's health-gate sees it
+    // quickly), then installs podman IN THE BACKGROUND. podman is only needed at
+    // delegate time (the agent's _ensure_child_container waits/retries for it), so
+    // it must NOT block agent start — installing it via cloud-init `packages:`
+    // (which runs before runcmd) delayed the agent past the health budget and the
+    // VM was declared failed. Background apt keeps the agent's start immediate.
+    list_add(sh, "set -e; rm -rf ${seed_dir}; mkdir -p ${seed_dir}; printf 'instance-id: ${res_name}\\nlocal-hostname: ${res_name}\\n' > ${seed_dir}/meta-data; printf '#cloud-config\\npassword: aeo\\nchpasswd: { expire: false }\\nssh_pwauth: true\\n${kline}runcmd:\\n  - [ sh, -c, \"m=/mnt/aeoseed; mkdir -p $m; mount /dev/sr0 $m 2>/dev/null || mount /dev/vdb $m 2>/dev/null || true; cp $m/aeo-agent /usr/local/bin/aeo-agent; chmod +x /usr/local/bin/aeo-agent; AEO_TRANSPORT=http AEO_PORT=9450 AEO_NODE=${res_name} AEO_TOKEN=${token} AEO_BIND=0.0.0.0 AEO_BOOT_NOOP=1 setsid /usr/local/bin/aeo-agent >/var/log/aeo-agent.log 2>&1 & ( DEBIAN_FRONTEND=noninteractive apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq podman ) >/var/log/aeo-podman-install.log 2>&1 &\" ]\\n' > ${seed_dir}/user-data; cp ${agent_bin} ${seed_dir}/aeo-agent; mkisofs -o ${iso} -V cidata -J -r ${seed_dir}/meta-data ${seed_dir}/user-data ${seed_dir}/aeo-agent 2>/dev/null")
     out, status, err = run_capture("/bin/sh", sh, null)
     list_free(sh)
     if status != 0 {
@@ -463,25 +472,60 @@ _aeo_home() -> string {
 // transport_http client.
 agent_delegate(host_vm: string, child: string, token: string, port: int) -> string {
     base = "http://127.0.0.1:${_itoa(port)}"
-    body = "delegate ${token} ${child}"
+    // ASYNC: `delegate` returns fast (the agent fires the child bring-up in the
+    // background and replies `pending`), so we DON'T block on it. Then we POLL
+    // `status <child>` until the child reports up — a cold bring-up (podman
+    // install + image pull) can take minutes, which is why it can't be one
+    // synchronous request. Bounded overall budget.
+    del = _agent_post(base, "delegate ${token} ${child}")
+    if string_contains(del, "report") == 0 {
+        return "aeo: guest '${host_vm}' agent refused/failed delegate '${child}': '${del}'"
+    }
+    // poll status (~10min budget: cold apt podman ~2min + image pull + retries)
+    tries = 0
+    while tries < 300 {
+        st = _agent_post(base, "status ${token} ${child}")
+        if string_contains(st, " up") == 1 {
+            return ""                        // child is up
+        }
+        if string_contains(st, " failed") == 1 {
+            return "aeo: nested node '${child}' failed in guest '${host_vm}'"
+        }
+        _sleep_s(2)
+        tries = tries + 1
+    }
+    return "aeo: nested node '${child}' did not come up in guest '${host_vm}' (timeout)"
+}
+// One-shot health probe of a nested node via the guest's agent `status` verb.
+// Returns 1 if the child reports up, else 0. Used by the runner's driver_probe
+// for agent-path nested containers (a host podman probe can't see them).
+agent_status(host_vm: string, child: string, token: string, port: int) -> int {
+    base = "http://127.0.0.1:${_itoa(port)}"
+    st = _agent_post(base, "status ${token} ${child}")
+    if string_contains(st, " up") == 1 {
+        return 1
+    }
+    return 0
+}
+// POST a protocol line to the agent's /dispatch, return the reply body ("" on
+// error). Shared by delegate + status polling.
+_agent_post(base: string, body: string) -> string {
     av = list_new()
     list_add(av, "-c")
-    // -sS: quiet but show errors; the agent replies with the report line.
-    list_add(av, "curl -sS -X POST --data ${_shquote(body)} ${base}/dispatch")
+    list_add(av, "curl -sS --max-time 10 -X POST --data ${_shquote(body)} ${base}/dispatch")
     out, status, err = run_capture("/bin/sh", av, null)
     list_free(av)
     if status != 0 {
-        return "aeo: agent_delegate '${child}' via guest '${host_vm}' agent (${base}) failed: ${out}"
+        return ""
     }
-    // Expect "report <token> <child> up". Anything else = the child didn't come
-    // up (failed / unreachable / auth-refused → empty/401 body).
-    if string_contains(out, "report") == 0 {
-        return "aeo: guest '${host_vm}' agent refused/failed delegate '${child}': '${out}'"
-    }
-    if string_contains(out, " up") == 0 {
-        return "aeo: nested node '${child}' did not come up in guest '${host_vm}': '${out}'"
-    }
-    return ""
+    return out
+}
+_sleep_s(n: int) {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "sleep ${_itoa(n)}")
+    o, s, e = run_capture("/bin/sh", av, null)
+    list_free(av)
 }
 
 // Bring a container UP INSIDE a guest VM (the nested-execution wire). The
