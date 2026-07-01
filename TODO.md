@@ -316,11 +316,21 @@ wired yet; mapped here as candidate kinds. Ordered by how cleanly they'd land:
       fastest node interval). Removed the per-actor _poll_to_up / _await.
       VALIDATION: compiles; principle proven by the benchmark. The change is to
       the CORE bring-up path — LIVE-PROVE on Bazzite (a multi-node `aeo up`, e.g.
-      silly_addition_containers) before trusting it. Follow-up: blocking-up drivers
-      (bhyve_up waits for ssh) still serialize at driver_up within a level —
-      detaching their boot (start VM, let the poller detect ssh-ready) would let
-      VM levels parallelize too. Batched probing (one `podman ps`/`machinectl
-      list` per tick instead of per-node) would push detached closer to ideal.
+      silly_addition_containers) before trusting it.
+      - [x] BATCHED liveness (2026-07-01): the per-level poller now checks all
+            pidfile-kind, health-less nodes (bwrap/firecracker/kvm — readiness ==
+            "process alive") in ONE shell sweep per tick instead of N×(cat+kill).
+            Uses `read`/`kill -0` builtins → zero child spawns; collapses 2N Aether
+            run_captures into 1. Measured 14.6× cheaper per tick at width 32
+            (macOS); the sweep's correctness (live/dead/missing pids) validated
+            directly. Health-checked / non-pidfile nodes keep the identical
+            per-node probe (zero behaviour change). In _await_level /
+            _batch_pidfile_alive.
+      - [ ] Detach the BLOCKING-up drivers (bhyve_up / _up_kvm wait for ssh/agent),
+            so VM levels parallelize too — start the VM, let the poller detect
+            ssh/agent-ready. Entangled with the recent agent-path health changes
+            and NOT testable off a KVM host, so deferred to a Bazzite-validated
+            pass rather than blind-changed here.
 
 - [x] **Aether DURATION LITERALS woven into the aeo DSL** (Paul 2026-06-27) —
       DONE. The FluentSelenium within()/secs() idiom: `within(30s) every(500ms)`

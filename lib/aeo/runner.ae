@@ -116,6 +116,12 @@ _await_level(booted: ptr, min_secs: int) -> int {
     budget = _level_budget_ms(booted, min_secs)
     waited = 0
     while waited < budget {
+        // BATCHED liveness: for pidfile-kind nodes whose readiness IS liveness (no
+        // health()), one shell sweep checks every pidfile at once — O(1) shell-outs
+        // per tick instead of O(N) cat+kill. A health-padded " a b c " membership
+        // string; nodes not covered fall to the per-node probe below (identical
+        // answer, just not batched). See _batch_pidfile_alive.
+        alive = "${_batch_pidfile_alive(booted)} "
         allup = 1
         i = 0
         while i < m {
@@ -127,7 +133,17 @@ _await_level(booted: ptr, min_secs: int) -> int {
             if st != STATE_UP() {
                 promoted = 0
                 if st == STATE_BOOTING() {
-                    if driver_probe(bn, compose.get_kind(bn), compose.get_health(bn)) == 1 {
+                    ready = 0
+                    if _batchable(bn) == 1 {
+                        if string_index_of(alive, " ${bn} ") >= 0 {
+                            ready = 1
+                        }
+                    } else {
+                        if driver_probe(bn, compose.get_kind(bn), compose.get_health(bn)) == 1 {
+                            ready = 1
+                        }
+                    }
+                    if ready == 1 {
                         set_state(bn, STATE_UP())
                         println("aeo: [${bn}] up")
                         _enforce_netpolicy(bn)
@@ -148,6 +164,68 @@ _await_level(booted: ptr, min_secs: int) -> int {
         waited = waited + tick
     }
     return 0
+}
+
+// 1 if `nm`'s readiness can be batch-checked from its pidfile alone — a
+// pidfile-tracked kind (bwrap/firecracker/kvm) with NO health() command, so
+// "process alive" == "ready". Health-checked or non-pidfile nodes are not
+// batchable (they need a per-node probe/exec) and take the fallback path.
+_batchable(nm: string) -> int {
+    if string_length(compose.get_health(nm)) > 0 {
+        return 0
+    }
+    if _pidfile_of(nm, compose.get_kind(nm)) == "" {
+        return 0
+    }
+    return 1
+}
+
+// The pidfile path for a pidfile-tracked kind, else "" (via each driver's own
+// exported pidfile_for — no scheme is duplicated here).
+_pidfile_of(nm: string, kind: string) -> string {
+    if kind == "bwrap" {
+        return driver_bwrap.pidfile_for(nm)
+    }
+    if kind == "firecracker" {
+        return driver_firecracker.pidfile_for(nm)
+    }
+    if kind == "kvm" {
+        return driver_vm.pidfile_for(nm)
+    }
+    return ""
+}
+
+// One shell sweep over every batchable BOOTING node: for each `name|pidfile`
+// pair, print the name iff the pidfile holds a live pid (`kill -0`). Returns the
+// space-prefixed list of alive names (e.g. " db app"), or "" if none batchable.
+// Replaces N×(cat+kill) per tick with a single run_capture.
+_batch_pidfile_alive(booted: ptr) -> string {
+    pairs = ""
+    m = list_size(booted)
+    i = 0
+    while i < m {
+        bn = list_get_raw(booted, i)
+        if get_state(bn) == STATE_BOOTING() {
+            if _batchable(bn) == 1 {
+                pf = _pidfile_of(bn, compose.get_kind(bn))
+                pairs = "${pairs} \"${bn}|${pf}\""
+            }
+        }
+        i = i + 1
+    }
+    if string_length(pairs) == 0 {
+        return ""
+    }
+    // `read`/`kill -0`/`[` are all shell BUILTINS — the whole sweep runs in the
+    // one sh with ZERO child processes (vs 2N cat+kill spawns the per-node path
+    // would make), on top of collapsing 2N Aether run_captures into 1.
+    cmd = "for pair in${pairs}; do n=\"\${pair%%|*}\"; pf=\"\${pair#*|}\"; if [ -f \"\$pf\" ]; then read pid < \"\$pf\" 2>/dev/null; kill -0 \"\$pid\" 2>/dev/null && printf ' %s' \"\$n\"; fi; done"
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, cmd)
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    return out
 }
 
 // The level's total wait budget (ms): the longest per-node health window
