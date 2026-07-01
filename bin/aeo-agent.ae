@@ -86,7 +86,14 @@ _run_http(me: string, token: string, port: int) {
         println("aeo-agent[${me}]: FAIL server_create on port ${port}")
         exit(1)
     }
-    server_set_host(raw, "127.0.0.1")
+    // Bind address. A RESIDENT agent inside a guest must be reachable by its
+    // parent from OUTSIDE the guest (across the VM NIC), so it binds 0.0.0.0 by
+    // default — 127.0.0.1 only answers loopback and is invisible to the parent's
+    // dial (this bit the first real VM proof: the agent bound 127.0.0.1 and the
+    // host's hostfwd couldn't reach it). AEO_BIND overrides (e.g. 127.0.0.1 for a
+    // same-host localhost test where loopback is the whole point).
+    bind = _env_or("AEO_BIND", "0.0.0.0")
+    server_set_host(raw, bind)
     server_get(raw, "/health", _h_health, 0)
     server_post(raw, "/dispatch", _h_dispatch, 0)
     // Non-blocking start (detached thread) so this process can ALSO act as an
