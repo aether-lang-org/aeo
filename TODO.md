@@ -291,10 +291,127 @@ wired yet; mapped here as candidate kinds. Ordered by how cleanly they'd land:
       driver_vm ssh shape). (2) No networking yet (bare boot; a tap/CNI for guest
       egress is next). (3) Artifact provisioning — image() must point at a
       prebuilt vmlinux+rootfs bundle today.
+- [ ] **microsandbox (`msb`) — fast local microVMs for UNTRUSTED workloads**
+      (github.com/superradcompany/microsandbox, Apache-2.0, libkrun+smoltcp).
+      An almost-tailor-made fit for aeo's *purpose* ("orchestrated trees that
+      contain malware and are impregnable"): microVM hardware isolation, but with
+      **OCI images** (Docker Hub/GHCR) and Docker-like workflows, ~**<100ms boot**,
+      **cross-platform** (Linux KVM / macOS Apple-Silicon / Windows WHP), and
+      **embeddable** (no daemon, no server — `Sandbox::builder(...).create()`
+      spawns a microVM as a child process).
+        - **New driver tier `driver_microsandbox` (kind `microsandbox`)**: the CLI
+          maps cleanly onto aeo's driver shape — `msb create --name N <image>` /
+          `msb start|stop|rm N` (lifecycle), `msb exec N -- <cmd>` (exec_capture),
+          `msb ps N` / `msb inspect N` (probe), `msb pull` (image). cpus()/memory()
+          → the builder's `.cpus()/.memory()`. It's the microVM tier that ISN'T
+          artifact-bound like firecracker (which needs a prebuilt vmlinux+rootfs) —
+          microsandbox takes a stock OCI image, so no bundle provisioning. Likely
+          the LEAST-friction strong-isolation tier after bwrap.
+        - **Where it beats the existing tiers**: firecracker gives microVM
+          isolation but needs hand-built artifacts + has no networking/exec yet;
+          microsandbox gives the same isolation class WITH OCI images, built-in
+          networking (smoltcp), exec, and detached long-running mode — i.e. it's
+          firecracker's isolation with podman's ergonomics. And it's the one tier
+          that spans all three OSes uniformly (relevant to the Windows arm + wslc
+          items above).
+        - **Cross-cutting wins to fold in**: "secrets that can't leak" (keys never
+          enter the VM) is an attestation/forensics property worth a self-attest
+          axis (§5.4); detached long-running sandboxes suit the aeo-agent resident
+          model; and its MCP server / Agent-Skills are orthogonal but note-worthy
+          (an agent could drive aeo which drives microsandbox).
+        - Requirements to gate on: Linux KVM / macOS Apple-Silicon / Windows WHP;
+          BETA (expect breaking changes — pin a version). Spike: does the SDK/CLI
+          expose per-sandbox resource caps + network-deny that render the
+          `limit{}`/`constrain{}` grammar (substrate-portable confinement)?
 - [ ] **Raw primitives** — unshare (namespaces), chroot (the oldest container).
       Too low-level to be node kinds on their own; bwrap is the usable wrapper.
 
 ## Cross-cutting / smaller
+
+- [ ] **A secrets engine — encrypted-throughout, never plaintext in state/logs**
+      (transfer from Pulumi's model; the one idea from their talk that's a real
+      aeo gap). Today aeo has attestation + a tamper-evident audit trail but NO
+      secrets story — and the bank-courier agent token is currently plaintext in
+      env + baked into the cloud-init seed (readable on the seed ISO). The Pulumi
+      shape is right for aeo:
+        - A secret is a TYPED value that stays CIPHERTEXT in aeo's own state
+          (std.config / the audit inputs) and is decrypted ONLY at the boundary
+          where it's used (the agent dial, the driver spawn) — never logged, never
+          in a snapshot/backup artifact in the clear.
+        - PLUGGABLE key backend (Pulumi does its own KMS by default, swap in
+          AWS/GCP KMS or Vault). aeo's peer: a default local key + an operator hook
+          to a real KMS/age/gpg — mirroring how drivers self-sudo to operator-
+          granted binaries rather than owning the trust root.
+        - Concrete first cut: courier the agent token as a secret — mint it,
+          encrypt it into the seed (agent decrypts at boot with a key delivered by
+          the ssh courier, not the seed), so a captured seed ISO doesn't leak the
+          token. Ties into the bank-courier auth (lib/agent_auth) + audit.
+        - Guard: this is aeo's OWN secret handling, NOT a general secrets manager —
+          scope it to what the orchestrator itself must hold (tokens, image-pull
+          creds), not user-workload secrets (those are the workload's problem).
+- [ ] **Component compositions as versioned, testable API objects** (lighter
+      Pulumi transfer). aeo's compose DSL is already closure-with-setters, but the
+      pattern worth borrowing is *operator packages a component (e.g. a confined
+      db-tier or a whole subtree), devs consume it by name/version, refactor +
+      test it like real code* — an ops/dev separation where the confinement +
+      attestation live IN the packaged component so a consumer can't accidentally
+      deploy it unconfined. aeo's `.ae`-you-run already allows this (import a
+      module that returns a configured subtree); make it a blessed pattern +
+      example, not a new mechanism. NOT Pulumi's SaaS-state/component-registry —
+      just the "confinement travels with the component" ergonomic.
+      (Explicitly NOT doing from the Pulumi talk: cloud-provider CRUD, SaaS state
+      backend, terraform import, IAM-JSON helpers, general IaC language — that's
+      Pulumi's grain, not aeo's. aeo is config-IS-code for a CONTAINMENT tree, not
+      a cloud-resource graph. Keep the seam sharp, same as aeo-is-NOT-aeb.)
+
+- [ ] **pasta port-forwarder for rootless containers — preserve true source IP**
+      (podman 6, `rootless_port_forwarder = "pasta"`). Directly serves aeo's
+      rootless-containment thesis: without it, a rootless container behind a
+      reverse-proxy node sees the PROXY's internal IP, not the real client — which
+      breaks any IP-based defense (brute-force lockout, IP banning) and pollutes
+      the audit trail with useless source addresses. With pasta, the true source IP
+      survives into the container.
+        - **Config, not code**: a drop-in `/etc/containers/containers.conf.d/*.conf`
+          with `[network]\nrootless_port_forwarder = "pasta"`. driver_linux could
+          write/verify this drop-in as part of an "ingress" or `expose()` posture,
+          OR aeo just documents it as a host prereq (like the sudoers grants).
+        - **Confinement/forensics angle**: source-IP fidelity is an AUDIT property —
+          a `constrain{}`/ingress node whose logs show the real client is
+          meaningfully more defensible. Worth a self-attest axis later (§5.4): "is
+          the true source IP reaching this node, or a proxy's?".
+        - **KNOWN BUG to guard**: forward rules aren't torn down cleanly on
+          container shutdown → conflicts on restart (podman-container-tools/podman
+          #29032). aeo's teardown VERIFIES disappearance — so aeo's reverse-order
+          teardown should explicitly clear stale pasta forward rules before a
+          restart, or the node fails to come back up. Test this in the
+          container-restart path (lib/snapshot_linux / lifecycle ops).
+        - Note: needs podman ≥ 6 (still marked experimental); the box is on 4.3.1
+          (in-guest) — check host podman version before relying on it.
+      Sequencing: small + high-value for any real ingress/reverse-proxy topology
+      (which the blue-green cutover below will also want).
+
+- [ ] **Blue-green upgrades (zero-downtime node/tree cutover)** — orchestration,
+      not just lifecycle ops. Upgrade a node (or subtree) by standing the NEW
+      version up ALONGSIDE the old (green beside blue), health-gating it to
+      readiness, cutting traffic/dependents over, verifying, THEN tearing down the
+      old — with rollback to blue if green fails its health window. Where it lands:
+        - Leans on machinery aeo already has: health-gated bring-up (the
+          within/every window), the reverse-order verified teardown, and
+          snapshot/rollback (lib/snapshot*) for the fallback.
+        - The agent path makes the nested case honest: to blue-green a container
+          nested in a VM, the resident agent stands up green inside the guest and
+          swaps — the orchestrator never reaches through the boundary. `delegate`
+          + `status` + a new `retire`/`cutover` verb is the natural protocol shape.
+        - Confinement invariant: green must come up ATTESTED + CONFINED before any
+          cutover (self-attest, §5.4) — a blue-green swap must not be a hole where
+          an unconfined node briefly serves.
+        - Open design: cutover mechanism per substrate (DNS/port-forward re-point,
+          dependents' env re-resolve, or an in-guest reverse-proxy the agent owns);
+          and whether "green beside blue" needs distinct IPAM/ports (it does — the
+          addressing convention already assigns per-node ports).
+      Sequencing: after the agent path is the blessed default and a real workload
+      runs in the child (both currently opt-in / NOOP). This is the marquee
+      operational feature the agent architecture unlocks.
 
 - [x] **PARALLEL bring-up — the detached single-poller engine** (2026-07-01) —
       run_up() used to boot serially: spawn a node, block until it is up, THEN
@@ -364,6 +481,33 @@ wired yet; mapped here as candidate kinds. Ordered by how cleanly they'd land:
       pipeline — `docs/aeo-agent-windows-pipeline.md`. Blockers: agent body is
       Linux-bound (needs driver_windows/select arm), not on the conduit yet, and
       the mingw cross-build is unproven (spike it first). Agent stays Aether.
+- [ ] **`driver_wslc` — a Windows Linux-container tier via WSL Containers**
+      (Build 2026, `wslc.exe`; public-preview mid-2026). Native OCI Linux
+      containers on Win11 with NO Docker Desktop, via a dedicated optimized Hyper-V
+      VM. Directly relevant because:
+        - **New driver tier**: `wslc` syntax mirrors Docker (`wslc run -p 8080:80
+          nginx`, `wslc build -t app .`, `wslc container ps`), so a `driver_wslc`
+          is close to `driver_linux` with the engine swapped — the run/build/probe/
+          down argv shape carries over. It's the WINDOWS analog of the podman
+          container tier (a real Linux-container backend that isn't Linux-hosted).
+        - **Developer API for headless launch** — native Windows apps can start +
+          manage containers with no terminal (MS demoed a .exe silently running a
+          Linux container). That's the seam a Windows-resident aeo-agent would use
+          to run nested children WITHOUT bundling podman — the aeo-agent-on-Windows
+          blocker above (agent Linux-bound) is partly answered: the *agent* still
+          needs a Windows arm, but the *child-run* mechanism exists natively.
+        - **Enterprise governance maps onto aeo's grammar** — registry allow/block
+          lists, resource audit, host file/net/clipboard governance are exactly
+          aeo's `attest()` (registry pin) + `limit{}`/`constrain{}` (resource/net)
+          + audit-trail axes. A `driver_wslc` should render the SAME limit/constrain
+          vocabulary onto wslc's governance knobs (substrate-portable, like the
+          FreeBSD↔Linux confinement peers).
+      Blockers/unknowns: it's PREVIEW (single-container only, no Compose — fine,
+      aeo owns orchestration; sparse docs; rough edges). Spike: does `wslc` expose
+      per-container resource caps + network-deny that map to constrain{}? Confirm
+      the headless API is scriptable from an Aether-built binary. Sequencing: after
+      the Windows agent arm exists (the two are complementary — agent = control
+      plane, wslc = the container runtime it drives).
 - [ ] aether#870/#878 are CLOSED (fixed in ae 0.326). BUT investigated
       2026-06-27: they do NOT let the aeocha specs drop their bare `import
       std.string`. #878 fixes the QUALIFIED surface (`string.copy()` with the dot)
