@@ -117,6 +117,15 @@ qemu_argv(res_name: string, image: string, cpus: int, mem: string, tap: string, 
     list_add(av, "-daemonize")
     list_add(av, "-pidfile")
     list_add(av, pidfile)
+    // Cloud-init SEED drive (agent path): when the guest is provisioned with a
+    // NoCloud seed ISO (which couriers the agent's secret/port + starts it),
+    // attach it as a cdrom. AEO_SEED_<res_name> | AEO_SEED gives the path; empty
+    // = no seed (bare-disk boot, the pre-agent behaviour).
+    seed = _agent_seed(res_name)
+    if string_length(seed) > 0 {
+        list_add(av, "-drive")
+        list_add(av, "file=${seed},if=virtio,media=cdrom")
+    }
     // Networking: a tap (nic("tapN")) needs root/CAP_NET_ADMIN to create the
     // device — for ROOTLESS qemu (e.g. an unprivileged Bazzite user) that fails
     // with "could not configure /dev/net/tun: Operation not permitted". When no
@@ -126,10 +135,43 @@ qemu_argv(res_name: string, image: string, cpus: int, mem: string, tap: string, 
         list_add(av, "-nic")
         list_add(av, "tap,ifname=${tap},script=no")
     } else {
-        list_add(av, "-nic")
-        list_add(av, "user")
+        // Agent path: forward a host port to the guest's in-agent :9450 so the
+        // host can dial the resident agent (host:<hostport> -> guest:9450). The
+        // host port is AEO_AGENT_PORT_<res_name> | AEO_AGENT_PORT; 0/unset = a
+        // plain user NIC (no agent forward, the pre-agent behaviour).
+        hp = _agent_hostport(res_name)
+        if hp > 0 {
+            list_add(av, "-netdev")
+            list_add(av, "user,id=n0,hostfwd=tcp::${_itoa(hp)}-:9450")
+            list_add(av, "-device")
+            list_add(av, "virtio-net-pci,netdev=n0")
+        } else {
+            list_add(av, "-nic")
+            list_add(av, "user")
+        }
     }
     return av
+}
+
+// Agent-courier reads (boot side of the agent path). Per-VM override then the
+// shared var; empty/0 = pre-agent bare boot. (getenv-null footgun: guard on
+// length, never == "".)
+_agent_seed(res_name: string) -> string {
+    v = getenv("AEO_SEED_${res_name}")
+    if string_length(v) > 0 {
+        return v
+    }
+    return getenv("AEO_SEED")
+}
+_agent_hostport(res_name: string) -> int {
+    v = getenv("AEO_AGENT_PORT_${res_name}")
+    if string_length(v) == 0 {
+        v = getenv("AEO_AGENT_PORT")
+    }
+    if string_length(v) == 0 {
+        return 0
+    }
+    return _atoi(v)
 }
 
 // --- exec'ing entry points -------------------------------------------
