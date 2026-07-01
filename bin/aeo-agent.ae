@@ -30,6 +30,7 @@ import std.string (string_length, string_char_at)
 import protocol
 import agent_auth
 import transport_file (ensure_dirs, inbox_dir, outbox_dir, put, recv_one)
+import transport_http (send_command)
 import driver_linux
 import std.http (server_create, server_set_host, server_get, server_post,
                  response_set_status, response_set_header, response_set_body,
@@ -84,6 +85,7 @@ _h_dispatch(req: ptr, res: ptr, ud: ptr) -> int {
 _run_http(me: string, token: string, port: int) {
     config.put("aeo.agent.me", me)
     config.put("aeo.agent.token", token)
+    config.put("aeo.agent.transport", "http")   // so _delegate_child recurses via http
     raw = server_create(port)
     if raw == 0 {
         println("aeo-agent[${me}]: FAIL server_create on port ${port}")
@@ -241,15 +243,21 @@ _boot_node(node: string) -> string {
     return driver_linux.up(node, img, cmd, 0, "")
 }
 
-// Hand a boot DOWN to the child's agent and wait (bounded) for its report,
-// which I relay UP. The child's queues already exist (its own agent ran
-// ensure_dirs at its boot); if not, ensure them so the boot lands. Returns the
-// child's reported state, or "timeout" if no report arrives in the window.
-//
-// This is the whole of recursion: I message a RESIDENT child agent, I never
-// reach THROUGH the child — the child boots its own node (and its own children)
-// and reports back. Depth-agnostic, because the child runs this same code.
+// Hand a boot DOWN to the child's RESIDENT agent and relay its report UP. This
+// is the whole of recursion: I message the child agent, I never reach THROUGH
+// the child — the child boots its own node (and its own children) and reports
+// back. Depth-agnostic, because the child runs this same code. The two
+// transports differ only in HOW I reach the child; the protocol is identical.
 _delegate_child(token: string, child: string) -> string {
+    transport = config.get("aeo.agent.transport")
+    if transport == "http" {
+        return _delegate_child_http(token, child)
+    }
+    return _delegate_child_file(token, child)
+}
+
+// FILE: write a boot into the child's inbox, poll its outbox for the report.
+_delegate_child_file(token: string, child: string) -> string {
     ensure_dirs(child)
     cin = inbox_dir(child)
     cout = outbox_dir(child)
@@ -275,6 +283,32 @@ _delegate_child(token: string, child: string) -> string {
         }
     }
     return "timeout"
+}
+
+// HTTP: I am the child's parent, so I act as the http CLIENT to the child's own
+// listener. Per the addressing convention (docs/aeo-agent.md), the child's
+// address is (its ipam IP) : (the port I stamped at bootstrap) — the contained
+// never told me where it lives; I assigned it. For the localhost proof the IP is
+// 127.0.0.1 and the port arrives as AEO_PORT_<child>. send_command POSTs the
+// boot to /dispatch and returns the child's report line synchronously; I parse
+// its state and relay it up. (A missing/unreachable child -> "unreachable".)
+_delegate_child_http(token: string, child: string) -> string {
+    port = _env_or("AEO_PORT_${child}", "")
+    if string_length(port) == 0 {
+        println("aeo-agent: no assigned port for child ${child} (AEO_PORT_${child} unset)")
+        return "unreachable"
+    }
+    base = "http://127.0.0.1:${port}"
+    rep = send_command(base, token, protocol.encode_boot(token, child))
+    if string_length(rep) == 0 {
+        return "unreachable"                 // transport error / non-200
+    }
+    if protocol.verb_of(rep) == "report" {
+        if protocol.arg1_of(rep) == child {
+            return protocol.arg2_of(rep)     // "up" / "failed" / "down"
+        }
+    }
+    return "unreachable"
 }
 
 // os.getenv returns NULL (not "") when unset, and null != "" — so guard on

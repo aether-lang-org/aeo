@@ -184,9 +184,8 @@ _qtail() -> int {
 // reply body ("" on transport error). base is "http://<ip>:<port>".
 send_command(base: string, token: string, line: string) -> string {
     req = request("POST", "${base}/dispatch")
-    set_header(req, "Content-Type", "text/plain")
-    set_body(req, line, string_length(line))
-    set_timeout(req, 10)
+    set_body(req, line, string_length(line), "text/plain")
+    set_timeout(req, 10s)
     resp, err = send_request(req)
     request_free(req)
     if err != "" {
@@ -205,7 +204,7 @@ send_command(base: string, token: string, line: string) -> string {
 // driver after an ssh push to confirm the agent is up + survived the session.
 probe_health(base: string) -> int {
     req = request("GET", "${base}/health")
-    set_timeout(req, 5)
+    set_timeout(req, 5s)
     resp, err = send_request(req)
     request_free(req)
     if err != "" {
