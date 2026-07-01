@@ -34,7 +34,7 @@ import std.string (string_length, string_char_at, string_substring, string_conta
 
 exports (
     name,
-    up, bhyve_up, guest_container_up, exec_capture, down, probe,
+    up, bhyve_up, guest_container_up, agent_delegate, exec_capture, down, probe,
     bhyve_argv, qemu_argv, bhyvectl_destroy_argv,
     pidfile_for, bootrom_path
 )
@@ -265,6 +265,44 @@ _aeo_home() -> string {
     return "${_home()}/aeo"
 }
 
+// Bring a nested container up via the guest's RESIDENT aeo-agent — the
+// containment-correct path that REPLACES guest_container_up's ssh-into-the-guest.
+// The host does NOT reach into the guest; it sends a `delegate` to the agent
+// already living inside the VM (over the guest's forwarded agent port), and the
+// agent runs the child locally and reports back. Proven end-to-end on real KVM:
+// test/real-nested-vm-container.sh (host -> VM-agent -> container-agent).
+//
+//   host_vm — the VM name (get_host of the nested node); used to resolve the
+//             guest's forwarded agent endpoint (127.0.0.1:<agent-port>).
+//   child   — the nested node's name (what the agent delegates + reports on).
+//   token   — the couriered secret (bank-courier auth); "" = open (dev).
+//   port    — the host-side forwarded port to the guest agent's :9450.
+// Returns "" on success (agent reported the child up), else an error string.
+// Drivers shell out (LLM.md), so this dials via curl rather than the in-process
+// transport_http client.
+agent_delegate(host_vm: string, child: string, token: string, port: int) -> string {
+    base = "http://127.0.0.1:${_itoa(port)}"
+    body = "delegate ${token} ${child}"
+    av = list_new()
+    list_add(av, "-c")
+    // -sS: quiet but show errors; the agent replies with the report line.
+    list_add(av, "curl -sS -X POST --data ${_shquote(body)} ${base}/dispatch")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    if status != 0 {
+        return "aeo: agent_delegate '${child}' via guest '${host_vm}' agent (${base}) failed: ${out}"
+    }
+    // Expect "report <token> <child> up". Anything else = the child didn't come
+    // up (failed / unreachable / auth-refused → empty/401 body).
+    if string_contains(out, "report") == 0 {
+        return "aeo: guest '${host_vm}' agent refused/failed delegate '${child}': '${out}'"
+    }
+    if string_contains(out, " up") == 0 {
+        return "aeo: nested node '${child}' did not come up in guest '${host_vm}': '${out}'"
+    }
+    return ""
+}
+
 // Bring a container UP INSIDE a guest VM (the nested-execution wire). The
 // runner calls this for a `container` whose get_host() is a bhyve VM: aeo
 // reaches into the running guest over ssh, writes the inline Dockerfile,
@@ -272,6 +310,8 @@ _aeo_home() -> string {
 // service runs in the guest and is reachable from the host at <guest-ip>:<port>.
 // This is what makes `aeo up <dsl>` do the real convergence (vs a shell
 // script): the DSL's nested container actually executes in the VM.
+// SUPERSEDED for the agent path by agent_delegate (above) — kept for the bhyve
+// ssh path until that's migrated too.
 //
 //   host_vm    — the VM name (get_host of the container); used to find its IP
 //   name       — the container/app name

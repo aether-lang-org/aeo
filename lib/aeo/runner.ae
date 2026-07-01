@@ -18,7 +18,7 @@
 // AEO_CMD env (the front-door sets it): up (default) / down / status.
 
 import std.config
-import std.string (string_length, string_substring, string_index_of)
+import std.string (string_length, string_substring, string_index_of, string_char_at)
 import driver_linux
 import driver_lxc
 import driver_bsd
@@ -239,6 +239,17 @@ driver_up(nm: string, k: string) -> string {
         // host-reachable service in the guest (not a host-local podman run).
         host = compose.get_host(nm)
         if host != "" {
+            // AGENT PATH (containment-correct): when enabled, aeo does NOT reach
+            // into the guest over ssh — it sends a `delegate` to the guest's
+            // RESIDENT aeo-agent, which runs the child locally and reports back.
+            // Opt-in via AEO_AGENT_PATH=1 while the boot-side bake/courier is
+            // productized; the ssh path below stays the default until then.
+            // Proven on real KVM: test/real-nested-vm-container.sh.
+            if _agent_path_on() == 1 {
+                tok = _agent_token(host)
+                prt = _agent_port(host)
+                return driver_vm.agent_delegate(host, nm, tok, prt)
+            }
             // the host VM's ipam-resolved IP (same binding bhyve_up used) — so
             // the container path ssh's to the right guest, not a hardcoded .50.
             hip = ipam.resolve_ip(compose.get_system(host), host)
@@ -1127,6 +1138,52 @@ _envc(key: string) -> string {
         return ""
     }
     return v
+}
+
+// --- agent-path courier reads (the vertical slice; boot-side bake productizes
+// these later). Opt-in + the per-guest secret/port the host uses to reach a
+// guest's resident agent. AEO_AGENT_PATH=1 turns the whole path on. ---
+_agent_path_on() -> int {
+    v = _envc("AEO_AGENT_PATH")
+    if string_length(v) == 0 {
+        return 0
+    }
+    return 1
+}
+// Per-guest couriered secret: AEO_TOKEN_<host>, else the shared AEO_TOKEN.
+_agent_token(host: string) -> string {
+    v = _envc("AEO_TOKEN_${host}")
+    if string_length(v) > 0 {
+        return v
+    }
+    return _envc("AEO_TOKEN")
+}
+// Host-side forwarded port to the guest's agent (:9450 in-guest). Per-guest
+// AEO_AGENT_PORT_<host>, else AEO_AGENT_PORT, else the convention default 9450.
+_agent_port(host: string) -> int {
+    v = _envc("AEO_AGENT_PORT_${host}")
+    if string_length(v) == 0 {
+        v = _envc("AEO_AGENT_PORT")
+    }
+    if string_length(v) == 0 {
+        return 9450
+    }
+    return _atoi_env(v)
+}
+_atoi_env(s: string) -> int {
+    n = string_length(s)
+    acc = 0
+    i = 0
+    while i < n {
+        c = string_char_at(s, i)
+        if c >= 48 {
+            if c <= 57 {
+                acc = acc * 10 + (c - 48)
+            }
+        }
+        i = i + 1
+    }
+    return acc
 }
 
 // Host-gating preflight (design § Host adaptation rule 2): every declared
