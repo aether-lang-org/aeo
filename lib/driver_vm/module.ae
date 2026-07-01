@@ -991,19 +991,80 @@ _up_kvm(res_name: string, image: string, cpus: int, mem: string, tap: string) ->
             // build_agent_seed writes the deterministic path _agent_seed() finds.
         }
     }
-    // qemu's own -daemonize + -pidfile handle backgrounding and the pid
-    // record, so no shell wrapper is needed.
     pf = pidfile_for(res_name)
     av = qemu_argv(res_name, image, cpus, mem, tap, pf)
-    out, status, err = run_capture(bin, av, null)
+    // Launch so the VM SURVIVES the aeo process exiting. A plain -daemonize'd
+    // qemu spawned as a child of the (short-lived) aeo front-door gets SIGHUP'd
+    // when its launching session scope is reaped on a systemd box (this bit the
+    // first driver-driven boot — the manual systemd-run boot survived, the direct
+    // one didn't). Prefer `systemd-run --user` (its own lingering scope); fall
+    // back to setsid+nohup. NB: NOT -daemonize under systemd-run — let the unit
+    // hold the foreground qemu so the scope stays alive.
+    lerr = _launch_persistent(bin, av, res_name)
     list_free(av)
-    if err != "" {
-        return "aeo: qemu spawn failed for '${res_name}': ${err}"
-    }
-    if status != 0 {
-        return "aeo: qemu launch failed for '${res_name}' (exit ${status}): ${out}"
+    if string_length(lerr) > 0 {
+        return "aeo: qemu launch failed for '${res_name}': ${lerr}"
     }
     return ""
+}
+
+// Launch qemu so it outlives the aeo process. Builds one shell command that
+// tries systemd-run --user (persistent scope) then falls back to setsid+nohup.
+// Returns (out, status, err) like run_capture. The argv (from qemu_argv) is
+// space-joined — VM argv is controlled (paths/sizes/ports), not arbitrary user
+// text, so this is safe. Strips -daemonize when using systemd-run (the unit is
+// the daemon); keeps the pidfile either way.
+_launch_persistent(bin: string, av: ptr, res_name: string) -> string {
+    // Reconstruct the qemu command line by interpolating each argv element
+    // (list_get returns a ptr — interpolation converts it; DON'T compare it, per
+    // the list_get footgun). qemu keeps its own -daemonize (it forks + writes the
+    // pidfile); setsid detaches from the launching session so the SIGHUP that
+    // reaps the aeo session scope doesn't kill the VM. This is the fix for the
+    // driver-driven boot dying where the manual systemd-run boot survived.
+    // systemd-run --user owns a LINGERING scope, so the VM survives the
+    // short-lived aeo process — plain setsid+-daemonize does NOT survive on a
+    // systemd box (the reaped user session scope kills the orphaned qemu; seen
+    // live). Type=forking + PIDFile lets systemd track qemu's own -daemonize fork.
+    //
+    // Build the argv as a LIST passed straight to run_capture — do NOT interpolate
+    // list_get elements into a string: list_get returns a ptr and "${a}" yields
+    // the ADDRESS, not the arg (the LLM.md footgun — this bit here: qemu was
+    // invoked with pointer addresses and failed "Could not open '4248494'"). Use
+    // list_get_raw + list_add_raw to copy element ptrs verbatim.
+    unit = "aeo-${res_name}"
+    pf = pidfile_for(res_name)
+    sr = os_which("systemd-run")
+    if string_length(sr) == 0 {
+        return "aeo: systemd-run not found — persistent VM launch needs it on this host"
+    }
+    // best-effort clear any prior unit of this name
+    _systemctl_user_stop(unit)
+    cmd = list_new()
+    list_add(cmd, "--user")
+    list_add(cmd, "--unit=${unit}")
+    list_add(cmd, "--property=Type=forking")
+    list_add(cmd, "--property=PIDFile=${pf}")
+    list_add(cmd, bin)
+    n = list_size(av)
+    i = 0
+    while i < n {
+        list_add_raw(cmd, list_get_raw(av, i))   // copy the element PTR, verbatim
+        i = i + 1
+    }
+    o, s, e = run_capture(sr, cmd, null)
+    list_free(cmd)
+    if s != 0 {
+        return o                       // non-zero launch -> the error text
+    }
+    return ""                          // launched under a persistent systemd scope
+}
+_systemctl_user_stop(unit: string) {
+    av = list_new()
+    list_add(av, "--user")
+    list_add(av, "stop")
+    list_add(av, unit)
+    o, s, e = run_capture("/usr/bin/systemctl", av, null)
+    list_free(av)
 }
 
 // Tear the VM down. bhyve → `vm stop` (vm-bhyve). kvm → kill the recorded
