@@ -38,6 +38,7 @@ exports (
     cpus, memory, nic, expose,
     guest_image, network, ssh_key,
     health_interval, health_budget, within, every, without, get_within_ms, get_without_ms,
+    health_retry, up_within, down_within,
     count, name_at, get_system, get_host,
     syscount, sysname_at,
     entrypoint, base,
@@ -522,6 +523,35 @@ every(_ctx: ptr, d: Duration) {
 // exactly like within() (a system-scope without() applies to every node below; a
 // node's own wins; frozen at declaration; reset per-system). Stored as ms.
 without(_ctx: ptr, d: Duration) {
+    ms = string_from_int(_dur_ms(d))
+    config.put("aeo.cmp.without.${_ctx}", ms)
+    config.put("aeo.cmp.curwithout", ms)
+}
+// health_retry(){} — the BLOCK form of the health-timing knobs, grouping the
+// three loose setters under one named intent (the readable surface):
+//
+//   health_retry() {
+//       every(500ms)        // interval between probes
+//       up_within(30s)      // bring-up: retry health for up to this window
+//       down_within(10s)    // teardown: wait up to this for the node to be GONE
+//   }
+//
+// The opener passes the ENCLOSING context through as the block ctx (like limit()/
+// constrain() return their name) so the inner setters key onto the same node/
+// system the block is written in. up_within/down_within are exact aliases of
+// within/without (same config cells + float), just clearer names inside the
+// block; every is the same every(). The loose form (within(30s) every(500ms)
+// without(10s)) still works unchanged — this is an additional surface, not a
+// replacement.
+health_retry(_ctx: ptr) -> ptr {
+    return _ctx
+}
+up_within(_ctx: ptr, d: Duration) {
+    ms = string_from_int(_dur_ms(d))
+    config.put("aeo.cmp.within.${_ctx}", ms)
+    config.put("aeo.cmp.curwithin", ms)
+}
+down_within(_ctx: ptr, d: Duration) {
     ms = string_from_int(_dur_ms(d))
     config.put("aeo.cmp.without.${_ctx}", ms)
     config.put("aeo.cmp.curwithout", ms)

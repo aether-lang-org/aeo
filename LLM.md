@@ -86,13 +86,16 @@ args — the front-door calls it). The kind is the verb; the block configures it
 
 ```aether
 import compose (system, container)
-import compose (image, health, depends, within, every, limit, limit_maxproc, constrain, deny_egress, attest)
+import compose (image, health, depends, health_retry, every, up_within, down_within, limit, limit_maxproc, constrain, deny_egress, attest)
 exports ( aeo_orchestration )
 
 aeo_orchestration() {
     system("web") {
-        within(30s) every(500ms)          // health-retry window for the tree
-        without(10s)                       // teardown: wait this long for "gone"
+        health_retry() {                       // health-timing knobs, one block
+            every(500ms)                       // interval between probes
+            up_within(30s)                     // bring-up: retry health this long
+            down_within(10s)                   // teardown: wait this long for "gone"
+        }
 
         db = container("db") {
             image("docker.io/library/redis:alpine")
