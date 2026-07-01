@@ -19,6 +19,7 @@
 
 import std.config
 import std.string (string_length, string_substring, string_index_of, string_char_at)
+import std.list
 import driver_linux
 import driver_lxc
 import driver_bsd
@@ -79,9 +80,12 @@ actor Resource {
             if err != "" {
                 println("aeo: [${nm}] up failed: ${err}")
                 set_state(nm, STATE_FAILED())
-            } else {
-                _poll_to_up(nm, kind, compose.get_interval(nm), compose.get_budget(nm))
             }
+            // Readiness is polled by the ENGINE (run_up's single per-level poller),
+            // NOT blocked-on here: a per-actor health poll would serialize a whole
+            // level (the runtime serializes blocking ops inside actors), defeating
+            // the point of dispatching detached boots concurrently. On up() success
+            // the node stays BOOTING; the engine promotes it to UP once health passes.
         }
         Halt -> {
             err = driver_down(nm, kind)
@@ -93,31 +97,113 @@ actor Resource {
     }
 }
 
-// Bounded health-poll loop (called from the Boot handler; blocks only
-// this actor). interval_ms/budget are passed in rather than read as actor
-// state fields — those are only in scope inside the actor's receive body,
-// not in a free function.
-_poll_to_up(nm: string, k: string, interval_ms: int, budget: int) {
-    health = compose.get_health(nm)
-    remaining = budget
-    done = 0
-    while done == 0 {
-        alive = driver_probe(nm, k, health)
-        if alive == 1 {
-            set_state(nm, STATE_UP())
-            done = 1
-            println("aeo: [${nm}] up")
+// _await_level — the ENGINE-side, SINGLE-THREADED readiness poller for one
+// topological level. Every node in `booted` has already had its (detached) boot
+// dispatched by its actor; this loop probes them ALL each tick and promotes each
+// to UP as its health passes — so their readiness overlaps at the OS level
+// instead of one blocking poll per actor (which the runtime would serialize).
+// Returns 1 once every node is UP, 0 if any FAILED or the level times out.
+//
+// The level's time budget is the MAX of its nodes' own health windows
+// (get_budget×get_interval — the within()/every() config), never shorter than
+// `min_secs`, so a slow VM configured for a long boot still gets its full window
+// under the level poller. The tick is the fastest node's interval (floored), so
+// no node is probed slower than it asked. A node whose driver_up() errored is
+// already FAILED (set by the actor) and aborts the level.
+_await_level(booted: ptr, min_secs: int) -> int {
+    m = list_size(booted)
+    tick = _level_tick(booted)
+    budget = _level_budget_ms(booted, min_secs)
+    waited = 0
+    while waited < budget {
+        allup = 1
+        i = 0
+        while i < m {
+            bn = list_get_raw(booted, i)
+            st = get_state(bn)
+            if st == STATE_FAILED() {
+                return 0
+            }
+            if st != STATE_UP() {
+                promoted = 0
+                if st == STATE_BOOTING() {
+                    if driver_probe(bn, compose.get_kind(bn), compose.get_health(bn)) == 1 {
+                        set_state(bn, STATE_UP())
+                        println("aeo: [${bn}] up")
+                        _enforce_netpolicy(bn)
+                        _enforce_limits(bn)
+                        promoted = 1
+                    }
+                }
+                if promoted == 0 {
+                    allup = 0
+                }
+            }
+            i = i + 1
+        }
+        if allup == 1 {
+            return 1
+        }
+        sleep(tick)
+        waited = waited + tick
+    }
+    return 0
+}
+
+// The level's total wait budget (ms): the longest per-node health window
+// (get_budget attempts × get_interval ms — the within()/every() config), but
+// never shorter than `min_secs`. So the slowest node's configured window wins.
+_level_budget_ms(booted: ptr, min_secs: int) -> int {
+    best = min_secs * 1000
+    m = list_size(booted)
+    i = 0
+    while i < m {
+        bn = list_get_raw(booted, i)
+        w = _node_window_ms(bn)
+        if w > best {
+            best = w
+        }
+        i = i + 1
+    }
+    return best
+}
+_node_window_ms(nm: string) -> int {
+    iv = compose.get_interval(nm)
+    if iv <= 0 {
+        iv = 500
+    }
+    bg = compose.get_budget(nm)
+    if bg <= 0 {
+        bg = 240
+    }
+    return iv * bg
+}
+
+// The poll tick (ms): the FASTEST node's interval (so no node is probed slower
+// than it asked), floored at 250ms to bound probe overhead.
+_level_tick(booted: ptr) -> int {
+    best = 0
+    m = list_size(booted)
+    i = 0
+    while i < m {
+        bn = list_get_raw(booted, i)
+        iv = compose.get_interval(bn)
+        if iv <= 0 {
+            iv = 500
+        }
+        if best == 0 {
+            best = iv
         } else {
-            remaining = remaining - 1
-            if remaining <= 0 {
-                println("aeo: [${nm}] health budget exhausted — giving up")
-                set_state(nm, STATE_FAILED())
-                done = 1
-            } else {
-                sleep(interval_ms)
+            if iv < best {
+                best = iv
             }
         }
+        i = i + 1
     }
+    if best < 250 {
+        best = 250
+    }
+    return best
 }
 
 // Resolve the image a container resource runs: if it has an inline
@@ -491,44 +577,54 @@ _strip_err(s: string) -> string {
 // should tear down).
 run_up() -> int {
     n = compose.count()
+    // LEVEL-PARALLEL bring-up. Each pass boots a whole TOPOLOGICAL LEVEL — every
+    // node whose depends() target is already up — CONCURRENTLY, then a single
+    // barrier awaits the level before the next. Independent nodes no longer
+    // serialize: wall-clock is the critical PATH of boots, not their SUM. (The
+    // earlier engine awaited each node before dispatching the next — O(N) boots
+    // even for N independent nodes; this is O(depth).) Ordering is unchanged: a
+    // node is dispatched only once its dep is observably UP (BOOTING != UP), so a
+    // dependent still waits for its dependency's level to complete.
     pass = 0
     while pass < n {
+        // (1) FAN OUT — spawn + Boot every ready node in this level. `!` is an
+        // async send and each actor's Boot handler runs on its own thread, so the
+        // boots overlap; main does not await between dispatches.
+        booted = list_new()
         i = 0
         while i < n {
             nm = compose.name_at(i)
             if get_state(nm) == STATE_DOWN() {
-                dep = compose.get_depends(nm)
-                ready = 0
-                if dep == "" {
-                    ready = 1
-                } else {
-                    if get_state(dep) == STATE_UP() {
-                        ready = 1
-                    }
-                }
-                if ready == 1 {
+                if _deps_ready(nm) == 1 {
                     a = spawn(Resource())
                     a ! Configure { in_name: nm, in_kind: compose.get_kind(nm) }
                     a ! Boot {}
-                    st = _await(nm, 120)
-                    if st != STATE_UP() {
-                        return 0
-                    }
-                    // ENFORCEMENT SEAM: the VM is up + has its ipam IP, so its
-                    // peers (declared by name in the netpolicy) are resolvable.
-                    // Now LOAD the deny-default pf policy compose generated +
-                    // verified — turning the model live. No-op for resources
-                    // without a netpolicy. Non-fatal: a pf failure is logged,
-                    // not a teardown (the node is up; the operator sees the gap).
-                    _enforce_netpolicy(nm)
-                    // Apply rctl resource caps (exhaustion-DoS defense), same
-                    // post-up, non-fatal, FreeBSD-only contract.
-                    _enforce_limits(nm)
+                    _ = list_add(booted, nm)
                 }
             }
             i = i + 1
         }
-        pass = pass + 1
+        m = list_size(booted)
+        if m == 0 {
+            // Nothing dispatched: either every node is up (done) or a remaining
+            // node has an unsatisfiable dep (cycle / missing). Stop; the final
+            // verify decides success. (Break by exhausting the pass budget.)
+            list_free(booted)
+            pass = n
+        } else {
+            // (2) BARRIER — a SINGLE poller promotes the whole level. Each node's
+            // driver already BACKGROUNDED its boot (detached), so their readiness
+            // progresses concurrently; one thread probing all of them yields a
+            // wall-clock of ~slowest-boot, not the sum. (A per-actor blocking poll
+            // does NOT parallelize — the Aether runtime serializes blocking ops
+            // inside actors; measured in test/bench_bringup.ae, ~5× at width 32.)
+            up_ok = _await_level(booted, 120)
+            list_free(booted)
+            if up_ok == 0 {
+                return 0
+            }
+            pass = pass + 1
+        }
     }
     j = 0
     while j < n {
@@ -538,6 +634,20 @@ run_up() -> int {
         j = j + 1
     }
     return 1
+}
+
+// 1 if `nm`'s declared dependency is satisfied (no dep, or the dep is UP).
+// BOOTING != UP, so a node whose dep is booting in the SAME level is correctly
+// deferred to the next pass — preserving depends() ordering under fan-out.
+_deps_ready(nm: string) -> int {
+    dep = compose.get_depends(nm)
+    if dep == "" {
+        return 1
+    }
+    if get_state(dep) == STATE_UP() {
+        return 1
+    }
+    return 0
 }
 
 // Load a resource's deny-default pf policy into its own anchor, now that it's up
@@ -658,24 +768,6 @@ _await_gone(nm: string, k: string, window_ms: int) {
     println("aeo: [${nm}] WARNING still present after without window (${string_from_int(window_ms)}ms) — lingering")
 }
 
-// Block until `nm` is up or failed (or `secs` elapse). Returns the state.
-_await(nm: string, secs: int) -> string {
-    waited = 0
-    step = 250
-    budget = secs * 1000
-    while waited < budget {
-        st = get_state(nm)
-        if st == STATE_UP() {
-            return st
-        }
-        if st == STATE_FAILED() {
-            return st
-        }
-        sleep(step)
-        waited = waited + step
-    }
-    return get_state(nm)
-}
 
 // Block until `nm` reports down (best-effort; bounded).
 _await_down(nm: string, secs: int) {

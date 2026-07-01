@@ -296,6 +296,32 @@ wired yet; mapped here as candidate kinds. Ordered by how cleanly they'd land:
 
 ## Cross-cutting / smaller
 
+- [x] **PARALLEL bring-up — the detached single-poller engine** (2026-07-01) —
+      run_up() used to boot serially: spawn a node, block until it is up, THEN
+      start the next — O(N) even for N INDEPENDENT nodes. Rewritten to boot a
+      whole topological LEVEL at once. Two-step finding (test/bench_bringup.ae,
+      real /bin/sleep boots, N independent nodes):
+        - Naive fix (fan out Boot to an actor per node, then await) is NO better
+          than serial — the Aether actor runtime SERIALIZES blocking ops inside
+          actors, so a per-actor health poll can't overlap. Structural
+          parallelism alone is useless here. (Worth reporting upstream.)
+        - Real fix: the DETACHED single-poller. Every driver already backgrounds
+          its boot (bwrap/podman/firecracker/systemd-run); the actor's Boot now
+          does ONLY driver_up (no blocking poll), and a SINGLE engine poller
+          (_await_level) probes the whole level, promoting each node to UP as its
+          health passes. Boots overlap at the OS level → wall-clock ~= slowest
+          boot. Measured ~4.6× at width 32 (macOS, 8 cores), scaling with width.
+      depends() ordering preserved (a node dispatches only once its dep is UP);
+      per-node health windows honoured (level budget = max node window; tick =
+      fastest node interval). Removed the per-actor _poll_to_up / _await.
+      VALIDATION: compiles; principle proven by the benchmark. The change is to
+      the CORE bring-up path — LIVE-PROVE on Bazzite (a multi-node `aeo up`, e.g.
+      silly_addition_containers) before trusting it. Follow-up: blocking-up drivers
+      (bhyve_up waits for ssh) still serialize at driver_up within a level —
+      detaching their boot (start VM, let the poller detect ssh-ready) would let
+      VM levels parallelize too. Batched probing (one `podman ps`/`machinectl
+      list` per tick instead of per-node) would push detached closer to ideal.
+
 - [x] **Aether DURATION LITERALS woven into the aeo DSL** (Paul 2026-06-27) —
       DONE. The FluentSelenium within()/secs() idiom: `within(30s) every(500ms)`
       expresses a health retry as WALL-CLOCK time, not a hand-computed attempt

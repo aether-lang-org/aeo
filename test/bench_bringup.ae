@@ -1,0 +1,258 @@
+// test/bench_bringup.ae — measures aeo's bring-up SCHEDULER in isolation, over N
+// INDEPENDENT nodes (one topological level of width N), comparing three designs:
+//
+//   serial          — the OLD engine: await each node before dispatching the next.
+//                     O(N) boots even for independent nodes.
+//   actor-parallel  — a NAIVE fix: spawn an actor per node, fan out Boot, then
+//                     await. Each actor's boot BLOCKS its handler → this ~= serial,
+//                     because the Aether runtime serializes blocking ops INSIDE
+//                     actors. Structural parallelism alone does NOT help.
+//   detached        — what the NEW run_up does: every driver BACKGROUNDS its boot
+//                     (bwrap/podman/firecracker/systemd-run already do), then a
+//                     SINGLE engine poller observes them all. The boots overlap at
+//                     the OS level → wall-clock ~= slowest boot. ~5× at width 32
+//                     here, and it scales with the level width.
+//
+// A "boot" is a real subprocess (`/bin/sleep`) so the cost model is faithful; the
+// nodes are independent, isolating the ORCHESTRATION cost aeo owns (real
+// per-substrate boot latency is measured by the on-box smoke tests). This is the
+// artifact behind the run_up detached-single-poller redesign.
+//
+//   ae build test/bench_bringup.ae -o /tmp/bench --lib lib && /tmp/bench
+//   AEO_BENCH_MS=100 AEO_BENCH_WIDTHS="1 2 4 8 16 32" /tmp/bench
+
+import std.config
+import std.os (now_monotonic_ms, getenv, run_capture)
+import std.list
+import std.string (string_from_int, string_from_long, string_length, string_index_of, string_substring, string_char_at)
+
+// A mock resource whose "boot" SHELLS OUT via run_capture — exactly what a real
+// driver does (bwrap/podman/systemd-run/firecracker all fork+wait a subprocess).
+// It runs `/bin/sleep <boot_ms as seconds>`, then flags itself up through the
+// same std.config state bridge the real runner uses. Faithful to the real cost
+// model: the question is whether N concurrent run_capture waits OVERLAP.
+message Boot { id: int, boot_ms: int }
+
+actor Node {
+    receive {
+        Boot(id, boot_ms) -> {
+            av = list_new()
+            list_add(av, _secs(boot_ms))
+            _o, _s, _e = run_capture("/bin/sleep", av, null)
+            list_free(av)
+            config.put("bench.up.${id}", "1")
+        }
+    }
+}
+
+// boot_ms -> a decimal seconds string for /bin/sleep (e.g. 100 -> "0.100").
+_secs(ms: int) -> string {
+    whole = ms / 1000
+    frac = ms - whole * 1000
+    return "${string_from_int(whole)}.${_pad3(frac)}"
+}
+_pad3(x: int) -> string {
+    s = string_from_int(x)
+    while string_length(s) < 3 {
+        s = "0${s}"
+    }
+    return s
+}
+
+_reset(n: int) {
+    i = 0
+    while i < n {
+        config.put("bench.up.${i}", "")
+        i = i + 1
+    }
+}
+
+_is_up(id: int) -> int {
+    if config.get("bench.up.${id}") == "1" {
+        return 1
+    }
+    return 0
+}
+
+// poll until node `id` is up (or the budget elapses).
+_await_one(id: int, budget_ms: int) {
+    waited = 0
+    while waited < budget_ms {
+        if _is_up(id) == 1 {
+            return
+        }
+        sleep(5)
+        waited = waited + 5
+    }
+}
+
+// SERIAL — mirrors the OLD run_up: spawn + boot + await EACH node before the next.
+_serial(n: int, boot_ms: int) {
+    id = 0
+    while id < n {
+        a = spawn(Node())
+        a ! Boot { id: id, boot_ms: boot_ms }
+        _await_one(id, boot_ms * 4 + 2000)
+        id = id + 1
+    }
+}
+
+// PARALLEL — mirrors the NEW run_up: dispatch the whole level, THEN one barrier.
+// (Both spawn actors whose handlers BLOCK — which is why this ~= serial on a
+// runtime that serializes blocking actor ops.)
+_parallel(n: int, boot_ms: int) {
+    id = 0
+    while id < n {
+        a = spawn(Node())
+        a ! Boot { id: id, boot_ms: boot_ms }
+        id = id + 1
+    }
+    j = 0
+    while j < n {
+        _await_one(j, boot_ms * 4 + 2000)
+        j = j + 1
+    }
+}
+
+// DETACHED — the pidfile-driver pattern (bwrap/podman/firecracker/systemd-run all
+// BACKGROUND the boot and return immediately). One thread fires every boot as a
+// detached OS subprocess, then a SINGLE poller observes them all. No per-actor
+// blocking, so the boots overlap at the OS level even on a runtime that serializes
+// actors — total wait ~= the slowest single boot. This is the design bring-up
+// should converge to.
+_detached(n: int, boot_ms: int) {
+    id = 0
+    while id < n {
+        f = "/tmp/aeo-bench-up-${id}"
+        av = list_new()
+        list_add(av, "-c")
+        // redirect the backgrounded subshell OFF run_capture's stdout pipe — else
+        // the inherited pipe keeps run_capture blocked until the child exits (the
+        // same reason driver _bg_command writes `</dev/null >log 2>&1 &`).
+        list_add(av, "( /bin/sleep ${_secs(boot_ms)}; : > ${f} ) </dev/null >/dev/null 2>&1 &")
+        _o, _s, _e = run_capture("/bin/sh", av, null)   // returns at once (& detaches)
+        list_free(av)
+        id = id + 1
+    }
+    j = 0
+    while j < n {
+        _await_file(j, boot_ms * 4 + 2000)
+        j = j + 1
+    }
+}
+
+_await_file(id: int, budget_ms: int) {
+    f = "/tmp/aeo-bench-up-${id}"
+    waited = 0
+    while waited < budget_ms {
+        av = list_new()
+        list_add(av, "-c")
+        list_add(av, "test -e ${f}")
+        _o, status, _e = run_capture("/bin/sh", av, null)
+        list_free(av)
+        if status == 0 {
+            return
+        }
+        sleep(5)
+        waited = waited + 5
+    }
+}
+
+_reset_files(n: int) {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "rm -f /tmp/aeo-bench-up-*")
+    _o, _s, _e = run_capture("/bin/sh", av, null)
+    list_free(av)
+}
+
+_run(n: int, boot_ms: int) {
+    _reset(n)
+    s0 = now_monotonic_ms()
+    _serial(n, boot_ms)
+    s1 = now_monotonic_ms()
+    serial_ms = s1 - s0
+
+    _reset(n)
+    p0 = now_monotonic_ms()
+    _parallel(n, boot_ms)
+    p1 = now_monotonic_ms()
+    par_ms = p1 - p0
+
+    _reset_files(n)
+    d0 = now_monotonic_ms()
+    _detached(n, boot_ms)
+    d1 = now_monotonic_ms()
+    det_ms = d1 - d0
+
+    println("  N=${_pad(string_from_int(n), 4)} serial=${_pad(string_from_long(serial_ms), 7)}ms  actor-parallel=${_pad(string_from_long(par_ms), 7)}ms  detached=${_pad(string_from_long(det_ms), 7)}ms  (detached speedup=${_deci(_spx10(serial_ms, det_ms))}x)")
+}
+
+_spx10(a: long, b: long) -> long {
+    long r = 0
+    if b > 0 {
+        r = (a * 10) / b
+    }
+    return r
+}
+
+main() {
+    boot_ms = 100
+    bm = getenv("AEO_BENCH_MS")
+    if string_length(bm) > 0 {
+        boot_ms = _atoi(bm)
+    }
+    widths = getenv("AEO_BENCH_WIDTHS")
+    if string_length(widths) == 0 {
+        widths = "1 2 4 8 16 32"
+    }
+    println("aeo bring-up scheduler benchmark — boot = ${string_from_int(boot_ms)}ms/node (real /bin/sleep), N independent nodes (1 level)")
+    println("serial=old engine | actor-parallel=naive fan-out (runtime serializes blocking actors) | detached=new run_up (single poller over backgrounded boots)")
+    // walk the space-separated widths
+    rest = widths
+    more = 1
+    while more == 1 {
+        sp = string_index_of(rest, " ")
+        tok = rest
+        if sp < 0 {
+            more = 0
+        } else {
+            tok = string_substring(rest, 0, sp)
+            rest = string_substring(rest, sp + 1, string_length(rest))
+        }
+        if string_length(tok) > 0 {
+            _run(_atoi(tok), boot_ms)
+        }
+    }
+}
+
+// --- tiny helpers ---
+_deci(x10: long) -> string {
+    whole = x10 / 10
+    frac = x10 - whole * 10
+    return "${string_from_long(whole)}.${string_from_long(frac)}"
+}
+_pad(s: string, w: int) -> string {
+    out = s
+    while string_length(out) < w {
+        out = " ${out}"
+    }
+    return out
+}
+_atoi(s: string) -> int {
+    n = string_length(s)
+    v = 0
+    i = 0
+    while i < n {
+        c = string_char_at(s, i)
+        if c < 48 {
+            return v
+        }
+        if c > 57 {
+            return v
+        }
+        v = v * 10 + (c - 48)
+        i = i + 1
+    }
+    return v
+}
