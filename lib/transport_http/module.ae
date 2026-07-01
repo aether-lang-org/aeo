@@ -32,7 +32,7 @@ exports (
     // server (agent) side
     serve_create, set_serve_token, token_ok, queue_push, recv_one, queue_pending,
     // client (parent) side
-    send_command, probe_health,
+    send_command, send_command_status, probe_health,
     // shared
     default_port
 )
@@ -182,6 +182,12 @@ _qtail() -> int {
 
 // POST one protocol command line to the agent's /dispatch. Returns the agent's
 // reply body ("" on transport error). base is "http://<ip>:<port>".
+//
+// ⚠️ Reads response_body — SAFE only when NOT called from inside an http server
+// handler. A worker-thread (in-handler) dial has a response-body use-after-free
+// in the runtime (aether: http-serve-and-dial-reentrancy-ask.md, UAF fix
+// pending). For the serve-and-dial case (a middle agent dialing its child from
+// its OWN /dispatch handler) use send_command_status, which never reads the body.
 send_command(base: string, token: string, line: string) -> string {
     req = request("POST", "${base}/dispatch")
     set_body(req, line, string_length(line), "text/plain")
@@ -198,6 +204,26 @@ send_command(base: string, token: string, line: string) -> string {
         return ""
     }
     return bd
+}
+
+// POST a command and return ONLY the http status (int), never touching the body.
+// This is the serve-and-dial-safe client call: a middle agent dialing its child
+// from inside its own request handler runs on a server WORKER thread, where the
+// runtime's response-body is use-after-free (status, an int copied by value,
+// survives). Returns the status code, or 0 on transport error. 200 => the child
+// accepted+handled the command (for `boot`, => the child's node is up).
+send_command_status(base: string, token: string, line: string) -> int {
+    req = request("POST", "${base}/dispatch")
+    set_body(req, line, string_length(line), "text/plain")
+    set_timeout(req, 10s)
+    resp, err = send_request(req)
+    request_free(req)
+    if err != "" {
+        return 0
+    }
+    st = response_status(resp)
+    response_free(resp)                  // free WITHOUT reading ->body (UAF-safe)
+    return st
 }
 
 // Residence (TSR) probe: GET /health, return 1 if it answers 200. Used by the

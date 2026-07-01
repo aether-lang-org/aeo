@@ -30,26 +30,21 @@ import std.string (string_length, string_char_at)
 import protocol
 import agent_auth
 import transport_file (ensure_dirs, inbox_dir, outbox_dir, put, recv_one)
-import transport_http (send_command)
+import transport_http (send_command_status)
 import driver_linux
 import std.http (server_create, server_set_host, server_get, server_post,
+                 server_start_background,
                  response_set_status, response_set_header, response_set_body,
                  request_body)
 
 extern exit(code: int)
-extern http_server_start_raw(server: ptr) -> int
 
-// Run the blocking HTTP server off an actor (mirrors aeb-agent + the stdlib
-// integration-test idiom): a plain http_server_start_raw in main ties up the
-// scheduler before the bind is observable. Actor + message + spawn/! must live
-// in the same compilation unit as main (Aether constraint) — so http mode lives
-// HERE, not in a lib. The handlers (below) do boot/probe/halt INLINE and reply
-// synchronously, so no drain loop / no outbox is needed in http mode.
-message StartSrv { raw: ptr }
-actor SrvActor {
-    state s = 0
-    receive { StartSrv(raw) -> { s = raw; http_server_start_raw(raw) } }
-}
+// A MIDDLE agent must serve its parent AND dial its child — "serve-and-dial". The
+// blocking `http_server_start_raw` prevents that (it never returns, so the second
+// server never binds / the dial never runs — see aether:
+// http-serve-and-dial-reentrancy-ask.md). `server_start_background` starts the
+// listener on a detached native thread and returns immediately, so one process
+// can host the server AND make outbound client calls. No actor needed.
 
 // ---- HTTP-mode handlers (same compilation unit as main + the actor) -------
 // Aether handlers are C-extern fn-pointers — they can't close over main's
@@ -94,9 +89,18 @@ _run_http(me: string, token: string, port: int) {
     server_set_host(raw, "127.0.0.1")
     server_get(raw, "/health", _h_health, 0)
     server_post(raw, "/dispatch", _h_dispatch, 0)
+    // Non-blocking start (detached thread) so this process can ALSO act as an
+    // http client — the serve-and-dial property a middle agent needs.
+    serr = server_start_background(raw)
+    if string_length(serr) > 0 {
+        println("aeo-agent[${me}]: FAIL server_start_background: ${serr}")
+        exit(1)
+    }
     println("aeo-agent[${me}]: http listening on 127.0.0.1:${port} (token=${_mask(token)})")
-    srv = spawn(SrvActor())
-    srv ! StartSrv { raw: raw }
+    // The server runs on its own thread; keep main alive to serve indefinitely.
+    while 1 == 1 {
+        sleep(1000)
+    }
 }
 
 main() {
@@ -289,9 +293,13 @@ _delegate_child_file(token: string, child: string) -> string {
 // listener. Per the addressing convention (docs/aeo-agent.md), the child's
 // address is (its ipam IP) : (the port I stamped at bootstrap) — the contained
 // never told me where it lives; I assigned it. For the localhost proof the IP is
-// 127.0.0.1 and the port arrives as AEO_PORT_<child>. send_command POSTs the
-// boot to /dispatch and returns the child's report line synchronously; I parse
-// its state and relay it up. (A missing/unreachable child -> "unreachable".)
+// 127.0.0.1 and the port arrives as AEO_PORT_<child>.
+//
+// SERVE-AND-DIAL: this runs inside MY /dispatch handler (a server worker thread),
+// so I use send_command_status — status only, NEVER the response body (which is
+// use-after-free on a worker-thread dial until the runtime UAF fix lands; see
+// aether:http-serve-and-dial-reentrancy-ask.md). A 200 from the child's /dispatch
+// means it accepted+ran the boot, i.e. its node is up; anything else = not up.
 _delegate_child_http(token: string, child: string) -> string {
     port = _env_or("AEO_PORT_${child}", "")
     if string_length(port) == 0 {
@@ -299,16 +307,14 @@ _delegate_child_http(token: string, child: string) -> string {
         return "unreachable"
     }
     base = "http://127.0.0.1:${port}"
-    rep = send_command(base, token, protocol.encode_boot(token, child))
-    if string_length(rep) == 0 {
-        return "unreachable"                 // transport error / non-200
+    st = send_command_status(base, token, protocol.encode_boot(token, child))
+    if st == 200 {
+        return "up"                          // child booted its node (status-only)
     }
-    if protocol.verb_of(rep) == "report" {
-        if protocol.arg1_of(rep) == child {
-            return protocol.arg2_of(rep)     // "up" / "failed" / "down"
-        }
+    if st == 0 {
+        return "unreachable"                 // transport error (couldn't reach child)
     }
-    return "unreachable"
+    return "failed"                          // child answered non-200
 }
 
 // os.getenv returns NULL (not "") when unset, and null != "" — so guard on
