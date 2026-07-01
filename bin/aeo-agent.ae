@@ -30,7 +30,7 @@ import std.string (string_length, string_char_at)
 import protocol
 import agent_auth
 import transport_file (ensure_dirs, inbox_dir, outbox_dir, put, recv_one)
-import transport_http (send_command_status)
+import transport_http (send_command)
 import driver_linux
 import std.http (server_create, server_set_host, server_get, server_post,
                  server_start_background,
@@ -237,6 +237,14 @@ _handle(me: string, token: string, outbox: string, line: string) -> int {
 // orchestration tree converges" from "a real container ran"; the substrate is
 // tested separately, on a box that has one.
 _boot_node(node: string) -> string {
+    fail = _env_or("AEO_BOOT_FAIL", "")
+    if string_length(fail) > 0 {
+        // Forced failure for tests: return a distinct error so the child reports
+        // "failed" and that detail propagates up through the tree. Proves the
+        // body path carries real report detail (not just a 200/non-200 bit).
+        println("aeo-agent: FORCED boot failure ${node} (AEO_BOOT_FAIL set)")
+        return "forced-fail"
+    }
     noop = _env_or("AEO_BOOT_NOOP", "")
     if string_length(noop) > 0 {
         println("aeo-agent: NOOP boot ${node} (AEO_BOOT_NOOP set)")
@@ -292,14 +300,18 @@ _delegate_child_file(token: string, child: string) -> string {
 // HTTP: I am the child's parent, so I act as the http CLIENT to the child's own
 // listener. Per the addressing convention (docs/aeo-agent.md), the child's
 // address is (its ipam IP) : (the port I stamped at bootstrap) — the contained
-// never told me where it lives; I assigned it. For the localhost proof the IP is
-// 127.0.0.1 and the port arrives as AEO_PORT_<child>.
+// never told me where it lives; I assigned it. In the real deployment the IP is
+// the child's ipam address; in the localhost proof it's 127.0.0.1 and the port
+// arrives as AEO_PORT_<child>. (Naming: grandparent=aeo host, parent=this agent,
+// child=the node one boundary down — see test/agent-http-recursion.sh.)
 //
-// SERVE-AND-DIAL: this runs inside MY /dispatch handler (a server worker thread),
-// so I use send_command_status — status only, NEVER the response body (which is
-// use-after-free on a worker-thread dial until the runtime UAF fix lands; see
-// aether:http-serve-and-dial-reentrancy-ask.md). A 200 from the child's /dispatch
-// means it accepted+ran the boot, i.e. its node is up; anything else = not up.
+// SERVE-AND-DIAL: this runs inside MY /dispatch handler (a server worker thread).
+// I dial the child and read its REPORT LINE from the response body, so I relay the
+// child's actual state up (up / failed / down), not just a boolean. Reading the
+// body from an in-handler dial is safe as of aether v0.341.0 (fee8118: response
+// body is an owned string; the earlier worker-thread UAF is fixed — see
+// aether:http-response-body-uaf-priority-ask.md). Older toolchains need the
+// status-only path (send_command_status); v0.341.0+ carries full report detail.
 _delegate_child_http(token: string, child: string) -> string {
     port = _env_or("AEO_PORT_${child}", "")
     if string_length(port) == 0 {
@@ -307,14 +319,16 @@ _delegate_child_http(token: string, child: string) -> string {
         return "unreachable"
     }
     base = "http://127.0.0.1:${port}"
-    st = send_command_status(base, token, protocol.encode_boot(token, child))
-    if st == 200 {
-        return "up"                          // child booted its node (status-only)
+    rep = send_command(base, token, protocol.encode_boot(token, child))
+    if string_length(rep) == 0 {
+        return "unreachable"                 // transport error / non-200
     }
-    if st == 0 {
-        return "unreachable"                 // transport error (couldn't reach child)
+    if protocol.verb_of(rep) == "report" {
+        if protocol.arg1_of(rep) == child {
+            return protocol.arg2_of(rep)     // the child's real state: up/failed/down
+        }
     }
-    return "failed"                          // child answered non-200
+    return "unreachable"                     // unexpected reply shape
 }
 
 // os.getenv returns NULL (not "") when unset, and null != "" — so guard on
