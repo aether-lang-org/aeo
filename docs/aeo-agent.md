@@ -95,6 +95,36 @@ one boundary down**:
   parent advertises. The parent already knows the child's identity (it
   declared it), so it can stamp it at boot time.
 
+## Addressing — the courier stamps the port; the contained NEVER self-addresses
+
+A containment rule, not a networking detail: **the container dictates where the
+contained listens; the contained never announces its own address.** A child
+telling its parent "I'm at host:port" is the same contained-chatting-back
+antipattern the whole design rejects (§"Why an agent, not ssh"). So the *same
+trusted bootstrap that couriers the one-time secret ALSO assigns the child's
+port* (`AEO_PORT`), delivered together on the same ride (§"Channel security").
+The parent remembers what it assigned.
+
+Concretely, a child's http conduit address is:
+
+- **IP** — `ipam.resolve_ip(system, child)`, the sticky per-node IP the VM driver
+  and pf rules already resolve. The node already has an address; recursion reuses
+  it, invents nothing.
+- **Port** — parent-assigned at bootstrap (not chosen by the child, not a global
+  constant every agent shares). One conduit port per agent, minted like the key.
+
+So a parent delegating to `child` dials `http://<resolve_ip(system,child)>:<port
+it stamped>/dispatch`. On a single host (the localhost proof) all agents share
+`127.0.0.1`, so the parent assigns **sequential ports** (`base + depth`: outer
+9451, inner 9452, …) and records each — mirroring exactly what the real courier
+does across machines, where the IP disambiguates and the port can be constant.
+
+Rejected alternative: computing `resolve_ip(child):9450` with a fixed shared
+port. Fine across machines (one agent per IP) but collides on one host, and —
+more importantly — a global well-known port is a standing surface; a
+parent-assigned port is one more thing minted-and-couriered, consistent with the
+key. The child is *told* where it lives.
+
 ## Transport — file (v0) and HTTP (drafted)
 
 The message types are aeo's existing ones (`Boot`/`Probe`/`Halt` + a report
