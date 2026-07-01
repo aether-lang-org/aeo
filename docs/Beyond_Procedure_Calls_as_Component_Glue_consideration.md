@@ -3,12 +3,28 @@
 A read of Weiher, Taeumel & Hirschfeld, **"Beyond Procedure Calls as Component
 Glue: Connectors Deserve Metaclass Status"** (Onward! '24,
 [doi:10.1145/3689492.3690052](https://doi.org/10.1145/3689492.3690052)),
-against where aeo actually is — and what it says we should and should not build
-next.
+against aeo — an infrastructure orchestrator whose thesis (*config IS code*, for
+a live containment tree) is the paper's, applied.
 
-Status: assessment doc, ae 0.328 (2026-06-30). Companion to the
-"Academic precedent" note in `LLM.md`. Read `docs/aeo-agent.md` and
-`docs/pf-enforcement-next-steps.md` alongside this.
+**In one paragraph:** the paper argues that architecture should be expressed
+*in* the implementation via a small set of polymorphic connectors, not encoded
+indirectly through procedure calls or maintained as a separate ADL. aeo is that
+argument applied to live infrastructure — one Aether composition you *run* stands
+up a confined tree of compute nodes, no YAML. From the paper's directions aeo
+built: a resident in-node agent that makes the containment tree *execute*
+recursively (host → VM-agent → container-agent, live on real KVM); a bank-courier
+authenticated channel (a hand-carried key, not PKI) as the standing connection;
+self-attestation, where the resident deputy re-checks its own confinement from
+inside the boundary; and eight substrate variants behind one shared connector.
+Where the paper's elegance is a trap for a *containment* system — a general
+polymorphic-connection operator, reaching *through* a boundary, guest-side
+enforcement — aeo declines, on stated grounds. §4 is the one genuine divergence
+worth Dave Thomas's eye: aeo reverses the paper's reach-into-the-contained on
+Principles-of-Containment grounds. The honest open edges: TLS on the agent wire,
+and one FreeBSD networking bug unrelated to the paper.
+
+Companion to the "Academic precedent" note in `LLM.md`; `docs/aeo-agent.md` is
+the agent design, live-proven.
 
 ---
 
@@ -130,76 +146,83 @@ transport seam), not Objective-S's general one. aeo gets the runtime layer the
 paper describes without taking on a general connection abstraction that would
 blur the aeb/aeo seam.
 
-## 5. Directions the paper *legitimizes* — SHOULD do
+## 5. What aeo built from the paper's directions
 
-Ranked by leverage. All respect the aeb/aeo factoring and the resident-deputy
-containment model (§4.1).
+The paper legitimized a set of directions; aeo built them. Each respects the
+aeb/aeo factoring and the resident-deputy containment model (§4.1), and each is
+live-proven on real hardware (a rootless Fedora-atomic "Bazzite" box with KVM).
+This is the paper's ideas *realized*, not planned.
 
-### 5.1 Land the recursion — the headline build
+### 5.1 Recursion — the containment tree executes
 
-Today's agent (`bin/aeo-agent.ae` v0) boots a *single* node and reports out. The
-entire thesis is **depth-agnostic recursion**: an agent whose booted node has
-`get_host` children hands *those* to *their* agents — same code it received its
-own work through. Proving **two levels** (a container inside a VM, the VM's agent
-booting the container's agent) proves N by construction. This flips the
-Principles-of-Containment "nesting" row from *declared + gated* to *executes*.
-Highest leverage available; it's the build the agent architecture exists for.
-(`docs/aeo-agent.md` build steps 2–4.)
+The agent is depth-agnostic: an agent whose booted node has `get_host` children
+brings *those* up through the same protocol it received its own work through, so
+a parent hands work *down* to a resident child agent that becomes the local
+orchestrator for its subtree. Two levels prove N by construction, and both run
+for real: a plain `aeo up examples/agent_nested_min.ae` stands up
+grandparent(aeo host) → parent(agent in a KVM VM) → child(agent in a container
+nested in that VM), zero manual steps (`aeo: [vm] up / [ctr] up / stack up`).
+This is the Principles-of-Containment "nesting" row moved from *declared + gated*
+to *executes* — the build the agent architecture exists for.
 
-### 5.2 (Not a paper item) — the FreeBSD `if_bridge` red axis
+### 5.2 The bank-courier channel — auth as a hand-carried key, not PKI
 
-For completeness: the one red containment axis (host-pf inter-VM confinement on
-FreeBSD) is a **pre-existing aeo networking bug** with no connection to this
-paper. It is the credibility gap and outranks the feature work below, but it is
-*not* something the paper speaks to, so it is planned separately in
-**`docs/if_bridge-pf-delivery-bug.md`** (with `docs/pf-enforcement-next-steps.md`
-and `docs/bhyve-networking-journey.md`). Mentioned here only so this assessment
-isn't read as "all green" — and as a reminder NOT to let the paper's guest-side
-stores tempt a guest-side-enforcement side-step (that inverts the containment
-trust boundary; see §6.5).
+The parent↔agent channel runs over `std.http.server` (not ssh — ssh is
+bootstrap-only, the "motorbike"), fail-closed: `/dispatch` and `/ping` return 401
+on a bad/absent token; `/health` stays open as the residence probe. Auth is the
+**1970s inter-bank key courier**, not PKI: the bootstrap session hand-delivers a
+**one-time symmetric secret** (minted per agent from `std.cryptography.drbg`,
+dead when the agent dies), and the standing HTTP channel authenticates against it
+with a constant-time `std.cryptography.hmac` compare. No CA, no keypair, nothing
+to pin — the `contrib/cryptography` asymmetric suite (ed25519/rsa/x25519, even
+ML-KEM) is deliberately unused; the symmetric pre-shared key *is* the design.
+This is the paper's "connector, not its variant" applied to authentication: a
+small stable protocol with a hand-carried key beneath it. (One thing is designed
+but not yet on the wire: TLS for channel confidentiality — `std.http.server`'s
+h2-TLS with an ephemeral self-signed cert; identity is already the couriered key.)
 
-### 5.3 Finish `transport_http` auth — the bank-courier model (wiring, not inventing)
+### 5.3 Self-attestation — the resident deputy re-verifies its own confinement
 
-Most of this is already drafted. `lib/transport_http/` (on `std.http.server`,
-**not** ssh — ssh is bootstrap-only) is **fail-closed** today: `/dispatch` and
-`/ping` return 401 on a bad/absent token, `/health` stays open as the residence
-probe. The auth model is the **1970s inter-bank key courier**, not PKI: ssh is the
-motorbike — the bootstrap session hand-delivers a **one-time symmetric secret**
-(minted on the host, installed in the agent, kept by the parent), and the standing
-HTTP channel is authed by it. No CA, no keypair, nothing to pin (§4.1).
+The resident agent is the only thing that can re-attest a node's confinement
+**from inside the boundary** — the orchestrator is outside and cannot see in. The
+`attest` verb does exactly this and reports `ok` / `drift:<axis>` outward: a node
+declared `deny_egress` must genuinely have no route out, so if the agent *can*
+reach the outside, confinement has drifted (`drift:deny_egress`) — the exact
+signature of an attacker who escaped the network policy. The egress probe is
+in-process (`std.net.tcp_connect_raw`), so the deputy doesn't depend on the
+guest's toolage to attest itself. This is the concrete, useful form of the
+paper's "standing live connection": a connection whose whole job is to keep
+checking that containment still holds. More axes (image digest, cgroup caps) slot
+in behind the same verb.
 
-Three concrete steps, **all stock Aether stdlib — wiring, not new crypto**:
-1. **Mint + courier:** ssh-launch stamps a fresh `std.cryptography.drbg` secret
-   per agent per boot (replacing the static token); dead when the agent dies.
-2. **Verify constant-time:** check it with `std.cryptography.hmac` (`hmac_sha256`)
-   instead of the bare string compare in `token_ok`.
-3. **TLS the socket (required):** run the channel over `std.http.server`'s h2-TLS
-   (example `http-server-h2-tls.ae` exists) so the bearer secret isn't observable
-   on the wire — TLS for channel confidentiality, a self-signed/ephemeral cert,
-   identity carried by the couriered key (still no CA).
+### 5.4 (Not a paper item) — the one honest gap: FreeBSD `if_bridge`
 
-The `contrib/cryptography` asymmetric suite (ed25519/p256/rsa/x25519, even ML-KEM)
-is deliberately **unused** — symmetric pre-shared key is the whole point. So this
-item is wiring existing stdlib, not inventing; self-contained and scoped.
+Stated plainly so this reads as an honest assessment, not "all green": the single
+red containment axis is host-pf inter-VM confinement on FreeBSD, blocked by a
+pre-existing `if_bridge` networking bug with no connection to this paper. It is
+tracked separately (`docs/if_bridge-pf-delivery-bug.md`). The Linux per-flow
+netpolicy is live-proven and sidesteps it; the paper does not speak to it. (Noted
+too as the reason NOT to let the paper's guest-side stores tempt guest-side
+*enforcement*, which would invert the containment trust boundary — §6.5.)
 
-### 5.4 Agent-side self-attestation (the paper's "standing connection," used)
+### 5.5 One connector, many substrate variants — Table 1's shape, realized
 
-`probe` already exists in the protocol. A *resident* agent is the only thing that
-can re-attest its own subtree **from the inside** — image digest still matches,
-`constrain{}` still in force, `deny_egress` still has no route — and `report` it
-outward. The orchestrator can't see inside the boundary; the agent can. This is
-containment drift-detection that only the agent architecture makes honest, and it
-is the concrete, useful form of the paper's "standing live connection."
-
-### 5.5 Treat the agent's protocol as the tier-unifier (housekeeping)
-
-With ~8 driver tiers (containers/lxc/kvm/jail/bhyve/bwrap/nspawn/firecracker),
-the agent's "same actor protocol, different transport" is the abstraction that
-lets tiers compose *behind* one selector rather than proliferate. §7.1's finding
-(few connector types, many variants) is the warrant: audit whether new tiers are
-genuinely distinct *confinement* types or variants that should collapse. Also
-sync `docs/aeo-agent.md` (it says "not yet built" while `bin/aeo-agent.ae` is a
-working v0 — a credibility footgun against the proven-vs-modeled discipline).
+aeo's eight driver tiers (containers/lxc/kvm/jail/bhyve/bwrap/nspawn/firecracker)
+are not eight *connectors* — they are variants of a handful of confinement
+*types* behind one shared connector, which is exactly §7.1's empirical finding
+(few connector types, many variants). By confinement boundary the tiers reduce to
+~five types: process-sandbox (`bwrap`), OCI container (`linux`), system container
+(`lxc` + `nspawn`, two variants of one type), full VM (`kvm` + `bhyve`, already
+one `driver_vm`), and microVM (`firecracker`), with `jail` a system-container-
+class type on a different kernel primitive. The *connector* over all of them is
+single and stable: every tier goes through the same `up/down/probe/exec` driver
+interface, the same `delegate`/`status`/`attest` agent protocol, and the same
+`limit{}` + `constrain{}` confinement grammar (which itself renders to FreeBSD
+rctl/Capsicum/pf **and** Linux cgroups/seccomp/network — one vocabulary, many
+substrates). This is Table 1 made concrete: hold the connectors few and shared,
+let the variants be many and honest. Collapsing the drivers themselves would
+trade real per-substrate code for a leaky mega-driver — so the paper's
+prescription is satisfied by keeping them separate behind the one connector.
 
 ## 6. Directions the paper makes seductive — should NOT do
 
@@ -263,17 +286,17 @@ bug at the host is the job, not pushing netpolicy into the guest. (Bug planned i
 ## 7. One-line takeaway
 
 aeo and the paper share a thesis (config IS code, connector ≠ variant, protocol
-over replaceable transport) and aeo's contribution is the **resident-deputy
+over replaceable transport). aeo's contribution on top is the **resident-deputy
 containment model** — the container's agent lives inside the node, enacts the
-container's will and reports health, but exposes zero surface to the workload and
-holds no standing credentials (an ssh-couriered one-time symmetric secret over
-TLS — the bank-courier model, no CA). The work the paper *legitimizes* is
-finishing the agent (recursion, the couriered-secret transport, self-attestation).
-The work it makes *seductive but wrong* is importing
-`→`/general-MOP to the front door, an ssh-into-the-guest driver (§6.2), or
-guest-side *enforcement* (§6.5). Build the agent out; keep the front door narrow;
-keep enforcement at the host.
-
-*(The FreeBSD `if_bridge` red axis is the higher-priority infra task overall, but
-it is a pre-existing aeo bug unrelated to this paper — planned in
-`docs/if_bridge-pf-delivery-bug.md`, not here.)*
+container's will and reports health, exposes zero surface to the workload, and
+holds no standing credentials (an ssh-couriered one-time symmetric secret — the
+bank-courier model, no CA). aeo built the directions the paper legitimizes:
+the containment tree *executes* recursively, the bank-courier channel authenticates
+the standing connection, the resident deputy self-attests its own confinement,
+and the eight substrate variants sit behind one shared connector. It declined the
+directions the paper makes seductive-but-wrong: no `→`/general-MOP at the front
+door, no ssh-into-the-guest driver (§6.2), no guest-side *enforcement* (§6.5) —
+the front door stays narrow, enforcement stays at the host. Two things remain
+honestly open: TLS on the agent wire (designed, not yet on the socket), and the
+FreeBSD `if_bridge` red axis (a pre-existing aeo networking bug unrelated to this
+paper — `docs/if_bridge-pf-delivery-bug.md`).

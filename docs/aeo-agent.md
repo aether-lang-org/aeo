@@ -1,9 +1,28 @@
 # aeo-agent — orchestration that recurses through the containment tree
 
-Status: **design note**, not yet built. Captures the model for the nested /
-substrate-crossing tier (a container inside a VM inside a host), which the
-flat driver model can't reach. This supersedes the earlier "step into the
-guest over ssh" framing — that was the wrong directionality.
+Status: **BUILT and live-proven on real KVM** (2026-07-01). The model below —
+nested / substrate-crossing orchestration (a container inside a VM inside a host)
+that the flat driver model can't reach — is implemented and converges end to end:
+a plain `aeo up examples/agent_nested_min.ae` (with `AEO_AGENT_PATH=1`) stands up
+grandparent(aeo host) → parent(agent in a KVM VM) → child(agent in a container
+nested in the VM), zero manual steps (`aeo: [vm] up / [ctr] up / stack up`). It
+supersedes the earlier "step into the guest over ssh" framing — that was the
+wrong directionality; the resident deputy replaces it.
+
+**Proven vs. modeled (honest):**
+- ✅ Recursion (`delegate`), the depth-agnostic protocol, both transports
+  (file + http), bank-courier auth (CSPRNG mint + constant-time HMAC verify,
+  fail-closed), async delegate (fire-in-background + `status` poll),
+  self-attestation (`attest` → deny_egress drift), and the full `aeo up` join —
+  all live on the Bazzite box.
+- ⬜ Modeled/opt-in still: the agent path is behind `AEO_AGENT_PATH=1` (ssh path
+  is the default until it's blessed); boots are `AEO_BOOT_NOOP` (the tree
+  converges — no real workload in the child yet); TLS on the socket is designed
+  (§"Channel security") but the wire is plaintext-under-a-couriered-token today;
+  depth is proven at two levels (N by construction).
+
+The rest of this doc is the design; where a section still says "next" / "when we
+get to it," read it as the original plan — most of it is now the shipped path.
 
 ## The one sentence
 
@@ -215,14 +234,22 @@ plus one gap to close:
   aeo-agent it *executes*, recursing to arbitrary depth without any node
   knowing how deep it is.
 
-## Build order, when we get to it
+## Build order — DONE (what shipped, in order)
 
-1. `aeo-agent` as a tiny binary speaking the runner's message types over the
-   simplest transport (shared file or a port).
-2. Runner dispatch: route `get_host(nm) != ""` nodes to the host's agent
-   instead of a local driver.
-3. Bake the agent into a guest via `dockerfile()` (container) and a jail
-   root, and prove a one-level nest end-to-end (container inside a VM,
-   brought up by the agent, reporting back).
-4. Recurse: an agent that itself hands instructions to a deeper child — prove
-   two levels, which by construction proves N.
+1. [x] `aeo-agent` as a tiny binary speaking the runner's message types over the
+   simplest transport (shared file), then a port (`transport_http`).
+2. [x] Runner dispatch: `get_host(nm) != ""` nodes route to the guest's agent
+   (`driver_vm.agent_delegate`) instead of the ssh-into-guest driver — opt-in
+   via `AEO_AGENT_PATH=1`.
+3. [x] Bake the agent into a guest via a cloud-init courier seed
+   (`build_agent_seed`) — `_up_kvm` builds it, launches the guest persistently
+   (systemd-run), the agent auto-starts; one-level nest converges end-to-end.
+4. [x] Recurse: the resident agent brings up its child (async `delegate` → fires
+   the child container-agent in the background → `status` poll), proving two
+   levels = N. Full chain live on real KVM (`aeo up examples/agent_nested_min.ae`).
+5. [x] Self-attestation (`attest` verb) — the resident agent re-verifies its
+   confinement from inside (deny_egress drift), the containment payoff of §5.4.
+
+Remaining (see the honest proven-vs-modeled note at the top): TLS on the wire;
+drop `AEO_BOOT_NOOP` for a real workload in the child; make the agent path the
+default; deeper substrate coverage (jail/bhyve arms of the agent path).
