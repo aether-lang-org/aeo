@@ -584,6 +584,19 @@ wired yet; mapped here as candidate kinds. Ordered by how cleanly they'd land:
       INSIDE this WSL2 Ubuntu (apt install podman → run OCI containers), which the
       driver_windows arm would drive via `wsl -d Ubuntu -- podman ...`. That's the
       concrete, now-testable path to a functional Windows aeo-agent.
+      **PODMAN-IN-WSL2 PROVEN (2026-07-02):** `apt install podman` in the WSL2
+      Ubuntu (podman 5.7.0), then `wsl -d Ubuntu -u root -- podman run --rm
+      debian:stable-slim echo ...` PULLED debian from Docker Hub and RAN the
+      container (no cgroup/systemd errors — podman 5.7 handles WSL2 cleanly).
+      WSL2 egress works (deep NAT: WSL2→Windows→virbr0→internet; apt Hits all
+      Ubuntu repos). So the FULL Windows child-run substrate is proven end-to-end:
+        Bazzite(KVM host) → win11 KVM guest → WSL2 Ubuntu → podman container.
+      Blocker #1's mechanism is SOLVED — a driver_windows arm runs children via
+      `wsl -d Ubuntu -- podman run ...`, mirroring the Linux agent's
+      _ensure_child_container. What's left for a functional Windows agent is the
+      AGENT-SIDE wiring: build the agent .exe for Windows (mingw, libaether.a-for-
+      mingw pending) + a driver_windows body that shells `wsl ... podman` instead
+      of native podman. The hard substrate gates are all cleared.
 - [ ] aether#870/#878 are CLOSED (fixed in ae 0.326). BUT investigated
       2026-06-27: they do NOT let the aeocha specs drop their bare `import
       std.string`. #878 fixes the QUALIFIED surface (`string.copy()` with the dot)
