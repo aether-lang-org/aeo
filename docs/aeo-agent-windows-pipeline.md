@@ -27,7 +27,7 @@ mingw — see the correction in windows-guest.md); this is about *producing* and
   for TSR (Windows scheduled task / service — the Windows arm of the init-aware
   push, cf. memory `aeo-agent-tsr-init-systems`).
 
-## BLOCKERS — status (2026-07-02: #1 body BUILT+live-proven, #2 CLEARED, #3 RESOLVED)
+## BLOCKERS — status (2026-07-02: #1 leaf body + agent .exe DONE, #2 CLEARED, #3 RESOLVED)
 
 1. **Windows workload body — BUILT (2026-07-02): `lib/driver_windows`.** The
    Linux-bound child-bring-up (`bin/aeo-agent.ae` shelling `driver_linux`/`podman
@@ -41,12 +41,24 @@ mingw — see the correction in windows-guest.md); this is about *producing* and
    → LIVE-PROVEN on the Win11 guest vs real WSL2 2.7.10 + podman: the driver's exact
    command lines ran the full round-trip — run → ps(running) → exec(hostname) →
    stop → rm → ps(gone). Commit `ba4141a`.
-   STILL TO WIRE for a *self-contained Windows agent .exe*: have `bin/aeo-agent.ae`'s
-   child-bring-up SELECT driver_windows when it runs on Windows (a `select(linux:…,
-   windows:…)` seam), then cross-build the agent itself with the native toolchain
-   (blocker #3). The DRIVER is done; the agent-side selection is the remaining glue.
-   (The agent's CORE — protocol, transport_http, agent_auth, self-attest — is
-   substrate-agnostic and already cross-compiles.)
+   AGENT SELECTION + .EXE — DONE (2026-07-02, commit `58c74b0`): `bin/aeo-agent.ae`'s
+   LEAF bring-up now selects the arm by compile-time `platform()` —
+   `_boot_node`/`_probe_node`/`_down_node` route to driver_windows on Windows,
+   driver_linux on Linux (AEO_WSL_DISTRO picks the distro). Cross-built to a native
+   `aeo-agent.exe` ON THE GUEST (aetherc.exe → C → gcc + libaether.a, STATIC-linked
+   incl. OpenSSL). The 7.8 MB PE32+ RUNS on the guest: GET /health → 200 ok; POST
+   /dispatch wrong-token → 401 (fail-closed HMAC); POST /dispatch `status …` → 200
+   `report … pending`. The full agent stack (std.http listener + OpenSSL HMAC auth +
+   protocol + verb dispatch) works natively on Windows.
+   TWO PORTABILITY TRAPS (recorded so they don't recur): (a) `_itoa` is a reserved
+   MSVCRT name and the ENTRY program emits its top-level fns UNPREFIXED at C scope
+   (lib modules ARE namespaced) → renamed `_itoa_seq`; (b) link `-static` or the exe
+   dies `0xC0000135` (DLL-not-found) for want of the MSYS2 runtime DLLs on the guest.
+   STILL TO WIRE: the HTTP-RECURSION child-bring-up (`_ensure_child_container` /
+   `_fire_child_async`) still shells an inline Linux `podman run` string — a Windows
+   agent recursing into a WSL-podman CHILD needs that ported too (mount the agent
+   .exe into WSL, port-map through WSL). The LEAF path is done; nested-agent-in-
+   container on Windows is the next piece.
 
 2. ~~**Agent isn't on the conduit yet.**~~ **CLEARED.** The agent is fully on
    `lib/transport_http` now (HTTP conduit live-proven: recursion, async delegate,
