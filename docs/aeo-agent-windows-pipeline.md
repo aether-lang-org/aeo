@@ -27,17 +27,26 @@ mingw — see the correction in windows-guest.md); this is about *producing* and
   for TSR (Windows scheduled task / service — the Windows arm of the init-aware
   push, cf. memory `aeo-agent-tsr-init-systems`).
 
-## BLOCKERS — status (2026-07-01: #2 CLEARED, #3 substantially de-risked)
+## BLOCKERS — status (2026-07-02: #1 body BUILT+live-proven, #2 CLEARED, #3 RESOLVED)
 
-1. **Agent body is Linux-bound, not the language.** `bin/aeo-agent.ae` shells to
-   podman (`driver_linux` + `_ensure_child_container`'s `podman run`). mingw can't
-   compile podman calls into a Windows .exe. Needs a `driver_windows` (or
-   `select(linux:…, windows:…)`) arm that runs the workload natively (winget/wslc
-   — see the `driver_wslc` TODO — launch the child, probe via tasklist/HTTP).
-   → STILL OPEN. The one real remaining blocker for a *functional* Windows agent.
+1. **Windows workload body — BUILT (2026-07-02): `lib/driver_windows`.** The
+   Linux-bound child-bring-up (`bin/aeo-agent.ae` shelling `driver_linux`/`podman
+   run`) now has a Windows arm: `driver_windows` runs the SAME podman verbs INSIDE
+   a WSL2 distro via `wsl -d <distro> -- podman ...`. So a `windows` node IS a Linux
+   container, one substrate-hop away (inside WSL) — Windows never pretends to be
+   Linux (containment-correct). Reuses driver_linux's pure argv builders verbatim;
+   owns only the `wsl -d <distro> --` prefix + the exec. Wired into compose (`windows`
+   kind + `wsl_distro()`) and the runner (up/exec/down/probe). Unit spec 4/4
+   (`test/spec_driver_windows.ae`), example `examples/silly_addition_windows.ae`.
+   → LIVE-PROVEN on the Win11 guest vs real WSL2 2.7.10 + podman: the driver's exact
+   command lines ran the full round-trip — run → ps(running) → exec(hostname) →
+   stop → rm → ps(gone). Commit `ba4141a`.
+   STILL TO WIRE for a *self-contained Windows agent .exe*: have `bin/aeo-agent.ae`'s
+   child-bring-up SELECT driver_windows when it runs on Windows (a `select(linux:…,
+   windows:…)` seam), then cross-build the agent itself with the native toolchain
+   (blocker #3). The DRIVER is done; the agent-side selection is the remaining glue.
    (The agent's CORE — protocol, transport_http, agent_auth, self-attest — is
-   substrate-agnostic and already cross-compiles; only the child-bring-up body is
-   Linux-bound.)
+   substrate-agnostic and already cross-compiles.)
 
 2. ~~**Agent isn't on the conduit yet.**~~ **CLEARED.** The agent is fully on
    `lib/transport_http` now (HTTP conduit live-proven: recursion, async delegate,
