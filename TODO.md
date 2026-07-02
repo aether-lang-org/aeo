@@ -519,6 +519,26 @@ wired yet; mapped here as candidate kinds. Ordered by how cleanly they'd land:
       the headless API is scriptable from an Aether-built binary. Sequencing: after
       the Windows agent arm exists (the two are complementary — agent = control
       plane, wslc = the container runtime it drives).
+
+      GROUND-TRUTH from the real Win11 guest on the box (winbaz, build 26200,
+      "Windows 10 Home" name-string, 2026-07-02): the container primitives are
+      present-but-OFF — `Microsoft-Windows-Subsystem-Linux` DISABLED,
+      `VirtualMachinePlatform` DISABLED, `HypervisorPlatform` (WHP — the
+      microsandbox/microVM base) DISABLED, `wsl.exe` launcher exists but WSL "is
+      not installed", `wslc.exe` NOT FOUND. So:
+        - **A `driver_wslc` (and any WSL/WHP tier) must ENABLE the feature first** —
+          `dism`/`Enable-WindowsOptionalFeature -Online -FeatureName ...` (+ likely
+          a reboot) is a prerequisite step, the Windows analog of "the seed installs
+          podman." The TODO's "does wslc expose caps" spike is downstream of that.
+        - **`wslc` isn't on this build yet** (26200) — the launchers ship before the
+          feature. So Paul's instinct ("watch Windows updates for new container
+          possibilities") is the right cadence: these are nascent, toggle-able
+          isolation primitives that arrive incrementally. Re-probe after WSL is
+          enabled + Windows updates land; when `wslc` appears, THEN spike the
+          caps↔constrain mapping on a real container.
+        - **Home-edition caveat**: WSL works on Home; the newer WSL Containers'
+          Home-vs-Pro gating is the open question — verify on THIS Home guest before
+          assuming consumer-Windows reach.
 - [ ] aether#870/#878 are CLOSED (fixed in ae 0.326). BUT investigated
       2026-06-27: they do NOT let the aeocha specs drop their bare `import
       std.string`. #878 fixes the QUALIFIED surface (`string.copy()` with the dot)
