@@ -1,0 +1,78 @@
+// spec_driver_windows.ae — the podman-through-WSL argv seam (lib/driver_windows).
+//
+// driver_windows is driver_linux's podman verbs run INSIDE a WSL2 distro via
+// `wsl -d <distro> -- podman <argv...>`. The one piece unique to this driver —
+// and the one that's testable WITHOUT a Windows host — is wsl_argv(): it wraps a
+// driver_linux-built podman argv into the wsl command line. This spec proves that
+// wrapping is exact (distro flag present/absent, `--` terminator, `podman` splice,
+// inner tokens preserved in order). The up/down/probe exec paths need a real WSL
+// host (proven on the bazzite Win11 guest); those are integration, not unit.
+//
+//   sh test/run-spec.sh test/spec_driver_windows.ae
+//
+// Covers:
+//   - wsl_argv with a distro -> [-d, DISTRO, --, podman, <inner...>]
+//   - wsl_argv with "" distro -> [--, podman, <inner...>] (WSL default distro)
+//   - the inner podman argv (a real ps builder) is spliced token-for-token
+//   - name() identifies the tier
+
+import aeocha
+import driver_windows (name, wsl_argv)
+import driver_linux (ps_running_argv)
+import std.string (string_from_int)
+import std.string   // bare form: inlined aeocha calls bare `copy` unqualified
+
+main() {
+    fw = aeocha.init()
+
+    aeocha.describe(fw, "lib/driver_windows — podman-through-WSL argv") {
+
+        aeocha.describe("wsl_argv wrapping") {
+            aeocha.it("prepends -d DISTRO -- podman when a distro is named") callback {
+                inner = list_new()
+                list_add_raw(inner, "ps")
+                list_add_raw(inner, "-a")
+                av = wsl_argv("Ubuntu", inner)
+                // [-d, Ubuntu, --, podman, ps, -a] = 6 tokens
+                aeocha.assert_str_eq(string_from_int(list_size(av)), "6", "6 tokens")
+                aeocha.assert_str_eq(list_get_raw(av, 0), "-d", "flag")
+                aeocha.assert_str_eq(list_get_raw(av, 1), "Ubuntu", "distro")
+                aeocha.assert_str_eq(list_get_raw(av, 2), "--", "terminator")
+                aeocha.assert_str_eq(list_get_raw(av, 3), "podman", "engine")
+                aeocha.assert_str_eq(list_get_raw(av, 4), "ps", "inner[0]")
+                aeocha.assert_str_eq(list_get_raw(av, 5), "-a", "inner[1]")
+            }
+
+            aeocha.it("omits -d for the default distro (empty)") callback {
+                inner = list_new()
+                list_add_raw(inner, "ps")
+                av = wsl_argv("", inner)
+                // [--, podman, ps] = 3 tokens, no -d
+                aeocha.assert_str_eq(string_from_int(list_size(av)), "3", "3 tokens")
+                aeocha.assert_str_eq(list_get_raw(av, 0), "--", "terminator first (no -d)")
+                aeocha.assert_str_eq(list_get_raw(av, 1), "podman", "engine")
+                aeocha.assert_str_eq(list_get_raw(av, 2), "ps", "inner[0]")
+            }
+
+            aeocha.it("splices a real driver_linux ps builder verbatim") callback {
+                // ps_running_argv("web") -> [ps, --filter, name=^web$, --filter,
+                //   status=running, --format, {{.Names}}] = 7 inner tokens.
+                inner = ps_running_argv("web")
+                av = wsl_argv("Ubuntu", inner)
+                // 4 wsl-prefix tokens (-d Ubuntu -- podman) + 7 inner = 11
+                aeocha.assert_str_eq(string_from_int(list_size(av)), "11", "11 tokens total")
+                aeocha.assert_str_eq(list_get_raw(av, 3), "podman", "podman at 3")
+                aeocha.assert_str_eq(list_get_raw(av, 4), "ps", "ps subcommand spliced")
+                aeocha.assert_str_eq(list_get_raw(av, 6), "name=^web$", "name filter preserved")
+            }
+        }
+
+        aeocha.describe("identity") {
+            aeocha.it("names the windows tier") callback {
+                aeocha.assert_str_eq(name(), "windows", "kind name")
+            }
+        }
+    }
+
+    aeocha.run_summary(fw)
+}

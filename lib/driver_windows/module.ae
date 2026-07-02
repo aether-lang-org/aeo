@@ -1,0 +1,247 @@
+// lib/driver_windows — Windows container backend (podman-through-WSL2).
+//
+// On a Windows host there is no native Linux-container engine; podman lives
+// INSIDE a WSL2 distro (a lightweight Linux VM Windows runs for you). So this
+// driver is `driver_linux` with one seam changed: the EXECUTOR. Every podman
+// verb is the SAME argv driver_linux already builds — we just run it through
+//   wsl.exe -d <distro> -- podman <argv...>
+// so it lands inside the WSL2 Linux where podman actually is. The argv BUILDERS
+// (run/stop/rm/ps/exec) are reused verbatim from driver_linux; this file owns
+// only the `wsl -d <distro> --` prefixing and the run_capture calls.
+//
+// This is the Principles-of-Containment-correct arm for a Windows node in the
+// tree: aeo (or its resident agent on the Windows guest) drives the contained
+// Linux workload without the Windows host itself pretending to be Linux. Proven
+// substrate on the bazzite Win11 guest: WSL2 2.7.10 + podman 5.7 run containers.
+//
+//   up    — idempotent: running -> no-op; else `wsl -d D -- podman run -d --replace`
+//   down  — stop + rm; absent == success
+//   probe — 1 if `podman ps` (in WSL) shows the name AND (no health, or the
+//           health command exits 0 inside the container)
+//   exec  — `podman exec NAME /bin/sh -c CMD` in WSL, capturing stdout
+//
+// Engine is fixed to `podman` (the WSL2 substrate we provision). The distro is
+// configurable (default "Ubuntu") via the `wsl_distro` accessor the runner
+// passes down; "" -> WSL's default distro (no `-d` flag).
+//
+// available() lets a caller SKIP cleanly off a host with no WSL — a plain PATH
+// test for wsl.exe (mirrors driver_bwrap/driver_nspawn.available).
+
+import std.os (run_capture, os_which)
+import std.list
+import std.string (string_length, string_contains, string_char_at, string_substring)
+import driver_linux (
+    run_argv_confined, run_argv, stop_argv, rm_argv,
+    ps_running_argv, ps_all_running_argv, exec_health_argv
+)
+
+exports (
+    name, available,
+    up, down, probe, exec_capture, running_names,
+    wsl_argv, wsl_exe
+)
+
+name() -> string { return "windows" }
+
+// The Windows-side `wsl.exe`. os_which finds it on PATH (System32); if a host
+// somehow lacks it on PATH, fall back to the canonical System32 location so a
+// real WSL host still works.
+wsl_exe() -> string {
+    p = os_which("wsl")
+    if string_length(p) > 0 {
+        return p
+    }
+    p = os_which("wsl.exe")
+    if string_length(p) > 0 {
+        return p
+    }
+    return "C:\\Windows\\System32\\wsl.exe"
+}
+
+// 1 if WSL is present (a Windows host with the feature installed). A plain PATH
+// probe — no distro boot — so a caller can route past this tier cheaply.
+available() -> int {
+    p = os_which("wsl")
+    if string_length(p) > 0 {
+        return 1
+    }
+    p = os_which("wsl.exe")
+    if string_length(p) > 0 {
+        return 1
+    }
+    return 0
+}
+
+// wsl_argv(distro, inner) — wrap an inner podman argv list so it runs inside the
+// WSL2 distro: `[-d, DISTRO, --, podman, <inner...>]`. distro "" -> WSL default
+// (no `-d`). The `--` terminates wsl's own flags so everything after is the
+// Linux command line, not more wsl options. Pure builder (no exec) — testable.
+wsl_argv(distro: string, inner: ptr) -> ptr {
+    av = list_new()
+    if string_length(distro) > 0 {
+        list_add_raw(av, "-d")
+        list_add_raw(av, distro)
+    }
+    list_add_raw(av, "--")
+    list_add_raw(av, "podman")
+    // splice the driver_linux-built podman argv (its FIRST token is the podman
+    // subcommand, e.g. "run"/"ps"/"stop" — we prepend "podman" above).
+    n = list_size(inner)
+    i = 0
+    while i < n {
+        list_add_raw(av, list_get_raw(inner, i))
+        i = i + 1
+    }
+    return av
+}
+
+// --- exec'ing entry points (mirror driver_linux's contract) ----------
+
+// Bring the container up idempotently inside the WSL distro. Returns "" on
+// success else an error message. Same signature shape as driver_linux.up_confined
+// minus the engine_pref (podman is fixed under WSL); `confine` is the rendered
+// confine_linux flag string (works unchanged — it's Linux podman inside WSL).
+up(res_name: string, distro: string, image: string, cmd: string, expose: int, net: string, env: string, confine: string) -> string {
+    if image == "" {
+        return "aeo: windows node '${res_name}' has no image() set"
+    }
+    if available() == 0 {
+        return "aeo: no WSL on this host (need wsl.exe for the windows/podman tier)"
+    }
+    // Already running? idempotent no-op.
+    if probe(res_name, distro, "") == 1 {
+        return ""
+    }
+    inner = run_argv_confined(res_name, image, cmd, expose, net, env, confine)
+    av = wsl_argv(distro, inner)
+    list_free(inner)
+    out, status, err = run_capture(wsl_exe(), av, null)
+    list_free(av)
+    if err != "" {
+        return "aeo: spawn failed for windows node '${res_name}': ${err}"
+    }
+    if status != 0 {
+        return "aeo: 'wsl podman run' failed for '${res_name}' (exit ${status}): ${out}"
+    }
+    return ""
+}
+
+// Tear down inside WSL: stop (ignore failure) then rm -f. Absent == success.
+down(res_name: string, distro: string) -> string {
+    if available() == 0 {
+        return "aeo: no WSL on this host (need wsl.exe for the windows/podman tier)"
+    }
+    sinner = stop_argv(res_name)
+    sav = wsl_argv(distro, sinner)
+    list_free(sinner)
+    _so, _ss, _se = run_capture(wsl_exe(), sav, null)
+    list_free(sav)
+
+    rinner = rm_argv(res_name)
+    rav = wsl_argv(distro, rinner)
+    list_free(rinner)
+    out, status, err = run_capture(wsl_exe(), rav, null)
+    list_free(rav)
+    if err != "" {
+        return "aeo: teardown spawn failed for windows node '${res_name}': ${err}"
+    }
+    if status != 0 {
+        if string_contains(out, "no such container") == 1 {
+            return ""
+        }
+        if string_contains(out, "No such container") == 1 {
+            return ""
+        }
+        return "aeo: 'wsl podman rm' failed for '${res_name}' (exit ${status}): ${out}"
+    }
+    return ""
+}
+
+// Liveness probe inside WSL. 1 if running AND (no health, or health exits 0
+// inside the container). Spawn errors -> not alive (same as driver_linux.probe).
+probe(res_name: string, distro: string, health: string) -> int {
+    if available() == 0 {
+        return 0
+    }
+    pinner = ps_running_argv(res_name)
+    pav = wsl_argv(distro, pinner)
+    list_free(pinner)
+    out, status, err = run_capture(wsl_exe(), pav, null)
+    list_free(pav)
+    if err != "" {
+        return 0
+    }
+    if string_length(out) == 0 {
+        return 0
+    }
+    if health == "" {
+        return 1
+    }
+    hinner = exec_health_argv(res_name, health)
+    hav = wsl_argv(distro, hinner)
+    list_free(hinner)
+    hout, hstatus, herr = run_capture(wsl_exe(), hav, null)
+    list_free(hav)
+    if herr != "" {
+        return 0
+    }
+    if hstatus == 0 {
+        return 1
+    }
+    return 0
+}
+
+// Run `cmd` inside the container (via podman exec, inside WSL) and return its
+// stdout, trimmed of a trailing newline. "" on any failure. The windows peer of
+// driver_linux.exec_capture — the "make a node compute something" primitive.
+exec_capture(res_name: string, distro: string, cmd: string) -> string {
+    if available() == 0 {
+        return ""
+    }
+    inner = exec_health_argv(res_name, cmd)
+    av = wsl_argv(distro, inner)
+    list_free(inner)
+    out, status, err = run_capture(wsl_exe(), av, null)
+    list_free(av)
+    if err != "" {
+        return ""
+    }
+    if status != 0 {
+        return ""
+    }
+    return _chomp(out)
+}
+
+// running_names(distro) — newline-separated names of every running container in
+// the WSL distro ("" if no WSL). The batch liveness query, mirroring
+// driver_linux.running_names, for a level's health-less windows nodes.
+running_names(distro: string) -> string {
+    if available() == 0 {
+        return ""
+    }
+    inner = ps_all_running_argv()
+    av = wsl_argv(distro, inner)
+    list_free(inner)
+    out, status, err = run_capture(wsl_exe(), av, null)
+    list_free(av)
+    if err != "" {
+        return ""
+    }
+    if status != 0 {
+        return ""
+    }
+    return out
+}
+
+// Strip a single trailing newline (WSL output carries the Linux \n).
+_chomp(s: string) -> string {
+    n = string_length(s)
+    if n == 0 {
+        return s
+    }
+    last = string_char_at(s, n - 1)
+    if last == 10 {
+        return string_substring(s, 0, n - 1)
+    }
+    return s
+}

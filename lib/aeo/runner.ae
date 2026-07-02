@@ -27,6 +27,7 @@ import driver_vm
 import driver_bwrap
 import driver_nspawn
 import driver_firecracker
+import driver_windows
 import compose
 import ipam
 import pf
@@ -556,6 +557,22 @@ driver_up(nm: string, k: string) -> string {
         // image() is a bundle dir (vmlinux + rootfs.ext4); cpus()/memory() size it.
         return driver_firecracker.up(nm, compose.get_image(nm), compose.get_cpus(nm), compose.get_memory(nm))
     }
+    if k == "windows" {
+        // Windows node (driver_windows): podman-through-WSL2. Same confinement +
+        // networking as a Linux container (it IS Linux podman, inside WSL); the
+        // driver just runs each verb via `wsl -d <distro> -- podman ...`. distro
+        // via wsl_distro() ("" = WSL default). No host podman networks here — the
+        // WSL distro owns its own; net/env pass through to podman unchanged.
+        img = _container_image(nm, "")
+        if string_starts_err(img) == 1 {
+            return _strip_err(img)
+        }
+        confine = _confine_flags(nm, "", "")
+        if string_length(confine) > 0 {
+            _ = audit.record(nm, k, "confine", confine)
+        }
+        return driver_windows.up(nm, compose.get_wsl_distro(nm), img, compose.get_command(nm), compose.get_expose(nm), "", compose.get_env(nm), confine)
+    }
     return "aeo: kind '${k}' has no up() driver on this host"
 }
 
@@ -598,6 +615,9 @@ driver_exec(nm: string, k: string, cmd: string) -> string {
     if k == "firecracker" {
         return driver_firecracker.exec_capture(nm, cmd)
     }
+    if k == "windows" {
+        return driver_windows.exec_capture(nm, compose.get_wsl_distro(nm), cmd)
+    }
     return ""
 }
 
@@ -622,6 +642,9 @@ driver_down(nm: string, k: string) -> string {
     }
     if k == "firecracker" {
         return driver_firecracker.down(nm)
+    }
+    if k == "windows" {
+        return driver_windows.down(nm, compose.get_wsl_distro(nm))
     }
     return driver_linux.down(nm, _engine_of(k))
 }
@@ -659,6 +682,9 @@ driver_probe(nm: string, k: string, health: string) -> int {
     }
     if k == "firecracker" {
         return driver_firecracker.probe(nm, health, "")
+    }
+    if k == "windows" {
+        return driver_windows.probe(nm, compose.get_wsl_distro(nm), health)
     }
     return driver_linux.probe(nm, health, _engine_of(k))
 }

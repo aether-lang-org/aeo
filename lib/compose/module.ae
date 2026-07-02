@@ -33,9 +33,9 @@ exports (
     system,
     bhyve_vm, freebsd_vm, get_flavor, kvm_vm,
     resource,
-    container, docker, lxc, kvm, jail, bhyve, bwrap, nspawn, firecracker,
+    container, docker, lxc, kvm, jail, bhyve, bwrap, nspawn, firecracker, windows,
     image, command, dockerfile, health, dataset, ip, depends, env, get_env, attest, get_attest,
-    cpus, memory, nic, expose,
+    cpus, memory, nic, expose, wsl_distro,
     guest_image, network, ssh_key,
     health_interval, health_budget, within, every, without, get_within_ms, get_without_ms,
     health_retry, up_within, down_within,
@@ -44,7 +44,7 @@ exports (
     entrypoint, base,
     get_kind, get_image, get_dockerfile, get_entrypoint, get_base, get_command, get_health, get_dataset, get_ip,
     get_depends, get_interval, get_budget,
-    get_cpus, get_memory, get_nic, get_expose,
+    get_cpus, get_memory, get_nic, get_expose, get_wsl_distro,
     get_guest_image, image_base, image_has_layer, get_network, get_ssh_key,
     image_recipe, from, install, netplan_static, systemd_unit, realize_as,
     imgcount, imgname_at, get_img_from, get_img_install, get_img_netplan,
@@ -181,6 +181,7 @@ bhyve(nm: string)     -> string { return resource(nm, "bhyve") }
 bwrap(nm: string)     -> string { return resource(nm, "bwrap") }
 nspawn(nm: string)    -> string { return resource(nm, "nspawn") }
 firecracker(nm: string) -> string { return resource(nm, "firecracker") }
+windows(nm: string)   -> string { return resource(nm, "windows") }
 
 // Inner setters — `_ctx: ptr` is the resource name pushed by resource().
 // `${_ctx}` interpolates it back to the name string for the config key.
@@ -410,6 +411,10 @@ expose(_ctx: ptr, port: int)  { config.put("aeo.cmp.expose.${_ctx}", string_from
 cpus(_ctx: ptr, n: int)       { config.put("aeo.cmp.cpus.${_ctx}", string_from_int(n)) }
 memory(_ctx: ptr, v: string)  { config.put("aeo.cmp.memory.${_ctx}", v) }
 nic(_ctx: ptr, v: string)     { config.put("aeo.cmp.nic.${_ctx}", v) }
+
+// wsl_distro — for a `windows` node, which WSL2 distro hosts its podman
+// ("" = WSL's default distro). The driver_windows seam: the Linux under Windows.
+wsl_distro(_ctx: ptr, v: string) { config.put("aeo.cmp.wsldistro.${_ctx}", v) }
 
 // VM guest provisioning (bhyve via vm-bhyve) — config IS code, down into
 // the VM. Declared on the bhyve_vm block; the driver realizes them as a
@@ -733,6 +738,7 @@ _pf_rule_of(vm: string, entry: string) -> string {
 }
 
 get_nic(nm: string) -> string     { return config.get("aeo.cmp.nic.${nm}") }
+get_wsl_distro(nm: string) -> string { return config.get("aeo.cmp.wsldistro.${nm}") }
 
 // Guest provisioning getters (defaults make a bhyve_vm work with no
 // explicit provisioning setters — debian-12 + dhcp).
@@ -1034,6 +1040,11 @@ _command_in_tree(kind: string) -> int {
         return 1
     }
     if kind == "nspawn" {
+        return 1
+    }
+    // windows: command() is the container payload (like the sandbox/system-
+    // container tiers), so surface it in the tree.
+    if kind == "windows" {
         return 1
     }
     return 0
