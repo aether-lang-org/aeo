@@ -539,6 +539,42 @@ wired yet; mapped here as candidate kinds. Ordered by how cleanly they'd land:
         - **Home-edition caveat**: WSL works on Home; the newer WSL Containers'
           Home-vs-Pro gating is the open question — verify on THIS Home guest before
           assuming consumer-Windows reach.
+      ENABLE ATTEMPT (2026-07-02, over SSH — no walking to the box):
+        - Enabled `Microsoft-Windows-Subsystem-Linux` + `VirtualMachinePlatform`
+          via `Enable-WindowsOptionalFeature` (admin-over-SSH worked, no elevation
+          block) → both `Enabled`, `RestartNeeded=True`; rebooted the guest (came
+          back on :22, key-auth survived). Guest has internet egress (virbr0 NAT).
+        - BUT `wsl --install` (and `--web-download`) DON'T WORK: the inbox
+          `wsl.exe` in System32 is an OLD STUB that doesn't implement the modern
+          `--install`/`--web-download` flags — it just prints "WSL is not installed,
+          run wsl --install" regardless of args. The real WSL is a STORE-delivered
+          appx, and **this guest is UNLICENSED (skip-license test install) so the
+          Microsoft Store doesn't function** → the app never delivers.
+        - So a `driver_wslc`/WSL provisioning path on an unlicensed or Store-less
+          Windows must **sideload the WSL `.msixbundle` from GitHub**
+          (`github.com/microsoft/WSL/releases`) + `Add-AppxPackage` — the
+          Store-free install. (In progress on the guest.) This is a REAL extra step
+          the driver must own beyond "enable the feature."
+        - **And nested-virt**: WSL2 boots a lightweight VM, but win11 is itself a
+          KVM guest — WSL2 needs the Bazzite host's KVM to expose nested virt to the
+          win11 domain (`kvm_amd nested=1` + host-passthrough CPU in the libvirt
+          XML). If a distro fails to boot post-install with a hypervisor error,
+          that's why. WSL1 needs no nested-virt (a fallback).
+      NET: on Windows, the container-tier prerequisites are a real chain —
+      enable-feature + reboot → (Store OR sideload-MSIX) the WSL app → nested-virt
+      for WSL2 → THEN a distro + a container runtime. A `driver_windows` child-run
+      arm has to automate this chain; it's meatier than the Linux "seed installs
+      podman" step. Documented from the real guest, not a news article.
+      RESULT (2026-07-02): **WSL2 INSTALLED** on the unlicensed guest via GitHub
+      MSIX sideload — `Add-AppxPackage Microsoft.WSL_2.7.10.0_x64_ARM64.msixbundle`
+      (~518MB; the crux was a clean single-writer re-download — the first tries
+      were truncated → 0x80073CF0). `wsl --version` → 2.7.10.0, Linux kernel
+      6.18.33.2, WSLg 1.0.73.2. So the Store-free WSL install path WORKS on an
+      unlicensed Windows — a real, reusable finding for a `driver_windows` provisioner.
+      STILL AHEAD: `wsl --install -d <distro>` (a distro is Store/GitHub-fetched
+      too — may hit the same sideload need), and NESTED-VIRT so WSL2's VM can boot
+      (win11 is a KVM guest → Bazzite host `kvm nested=1` + host-passthrough CPU).
+      Then podman-in-WSL2 = the Windows child-run mechanism (blocker #1).
 - [ ] aether#870/#878 are CLOSED (fixed in ae 0.326). BUT investigated
       2026-06-27: they do NOT let the aeocha specs drop their bare `import
       std.string`. #878 fixes the QUALIFIED surface (`string.copy()` with the dot)
