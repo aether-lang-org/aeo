@@ -60,21 +60,26 @@ mingw — see the correction in windows-guest.md); this is about *producing* and
      family (the Makefile selects the right poller per platform via `IO_POLLER_SRC`;
      the portable `poll` one already built). So no portability WALL — the
      Windows-relevant runtime cross-compiles.
-   #3 RESOLVED (2026-07-02) — but by BUILDING ON WINDOWS, not cross-from-Linux.
+   #3 APPROACH CHOSEN (2026-07-02): build ON WINDOWS, not cross-from-Linux.
    The cross-from-Linux path fights the Makefile (it detects Windows via `uname`,
    so it wanted the Linux poller + no `-lws2_32`). The clean answer (Paul's): build
    in **MSYS2 on the Win11 guest itself**, where `uname` = `MINGW64_NT-...` and the
-   Makefile's native-Windows branch just works. MSYS2 was already at `C:\msys64`
-   (gcc 16.1.0, make). `make all` → **native Windows binaries**:
-     build/libaether.a  (595 KB)   ← the pending piece, DONE
-     build/aetherc.exe  (8.5 MB)
-     build/ae.exe       (462 KB)
-   Link line confirms the Windows path: `-lws2_32 -lcrypt32 -lbcrypt -static .exe`.
-   So the guest can now compile any Aether program → C → `.exe` ON ITS OWN. The
-   trivial `.exe` earlier already RAN on the guest, so build+run is proven both
-   ways (cross-built ran; native-toolchain builds). What's left for a REAL agent
-   .exe is just blocker #1 (the Windows agent body — driver_windows/wslc, which we
-   proved the substrate for: WSL2 + podman live in the guest).
+   Makefile's native-Windows branch should just work.
+   ENVIRONMENT PROVEN on the guest: MSYS2 at `C:\msys64`, **gcc 16.1.0**, `make`,
+   `uname = MINGW64_NT-10.0-26200`.
+   BUILD NOT YET DONE. Two failed attempts, both build-system (not portability):
+     - `make all` → `No rule to make target 'build/obj/lsp/aether_lsp.o'`
+       (source tarball scp'd to the guest was missing `lsp/`, or its objects did
+       not compile) — need a complete tarball incl. `lsp tools VERSION`.
+     - `make libaether.a` → `No rule to make target` — wrong target name; the
+       stdlib archive target is `stdlib` / `build/libaether.a` is produced by it.
+   NEXT: re-tarball aether source WITH `lsp tools VERSION`, scp to guest, run the
+   correct targets in MINGW64 (`make stdlib` then `make` for the compiler), then
+   `aetherc <prog> → C → .exe`. The trivial cross-built `.exe` earlier already RAN
+   on the guest, so RUN is proven; only the native TOOLCHAIN build remains.
+   What's left after that for a REAL agent .exe is blocker #1 (the Windows agent
+   body — driver_windows/wslc, whose substrate we proved: WSL2 + podman live in
+   the guest).
 
 ## Suggested order when resumed
 
