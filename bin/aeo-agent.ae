@@ -25,7 +25,7 @@
 // the agent hands THEM to their agents — same code it received work through.
 
 import std.os
-import std.os (run_capture)
+import std.os (run_capture, platform)
 import std.list
 import std.config
 import std.string (string_length, string_char_at, string_contains)
@@ -34,6 +34,7 @@ import agent_auth
 import transport_file (ensure_dirs, inbox_dir, outbox_dir, put, recv_one)
 import transport_http (send_command)
 import driver_linux
+import driver_windows
 import std.http (server_create, server_set_host, server_get, server_post,
                  server_start_background,
                  response_set_status, response_set_header, response_set_body,
@@ -233,7 +234,7 @@ _dispatch_verb(me: string, token: string, line: string) -> string {
         return protocol.encode_report(token, node, st)
     }
     if v == "probe" {
-        alive = driver_linux.probe(node, "", "")
+        alive = _probe_node(node)
         st = "down"
         if alive == 1 {
             st = "up"
@@ -242,7 +243,7 @@ _dispatch_verb(me: string, token: string, line: string) -> string {
     }
     if v == "halt" {
         println("aeo-agent[${me}]: halt ${node}")
-        _de = driver_linux.down(node, "")
+        _de = _down_node(node)
         return protocol.encode_report(token, node, "down")
     }
     println("aeo-agent[${me}]: unknown verb '${v}'")
@@ -290,7 +291,41 @@ _boot_node(node: string) -> string {
     }
     img = _env_or("AEO_BOOT_IMAGE", "docker.io/library/busybox:latest")
     cmd = _env_or("AEO_BOOT_CMD", "sleep 600")
+    // SUBSTRATE SELECTION: on Windows the workload is a Linux container run through
+    // WSL2 (driver_windows: `wsl -d <distro> -- podman ...`); on Linux it's podman
+    // directly (driver_linux). Same container semantics either way — the agent
+    // just picks the arm that matches the host it was compiled for. platform() is
+    // compile-time, so the Windows agent .exe takes the WSL arm with no runtime
+    // branch cost. AEO_WSL_DISTRO selects the distro ("" = WSL's default distro).
+    if _on_windows() == 1 {
+        distro = _env_or("AEO_WSL_DISTRO", "Ubuntu")
+        return driver_windows.up(node, distro, img, cmd, 0, "", "", "")
+    }
     return driver_linux.up(node, img, cmd, 0, "")
+}
+
+// 1 if this agent runs on Windows (compile-time platform). The seam that routes
+// child bring-up to driver_windows (podman-through-WSL2) instead of driver_linux.
+_on_windows() -> int {
+    if platform() == "windows" {
+        return 1
+    }
+    return 0
+}
+
+// Leaf probe/down, substrate-selected like _boot_node so a node's whole lifecycle
+// (boot/probe/halt) uses ONE arm. On Windows both go through driver_windows (WSL).
+_probe_node(node: string) -> int {
+    if _on_windows() == 1 {
+        return driver_windows.probe(node, _env_or("AEO_WSL_DISTRO", "Ubuntu"), "")
+    }
+    return driver_linux.probe(node, "", "")
+}
+_down_node(node: string) -> string {
+    if _on_windows() == 1 {
+        return driver_windows.down(node, _env_or("AEO_WSL_DISTRO", "Ubuntu"))
+    }
+    return driver_linux.down(node, "")
 }
 
 // Hand a boot DOWN to the child's RESIDENT agent and relay its report UP. This
@@ -579,7 +614,7 @@ _next() -> int {
         n = _atoi(v)
     }
     n = n + 1
-    config.put("aeo.agent.seq", _itoa(n))
+    config.put("aeo.agent.seq", _itoa_seq(n))
     return n
 }
 
@@ -605,7 +640,13 @@ _atoi(s: string) -> int {
     }
     return acc
 }
-_itoa(n: int) -> string {
+// int->string. NOT named `_itoa`: that's a reserved MSVCRT name (stdlib.h
+// declares `_itoa`), and the entry program emits its top-level functions
+// UNPREFIXED at C file scope, so `_itoa` there collides with the CRT on a
+// native Windows build. Library modules are namespaced (driver_linux__itoa &c)
+// so they don't clash; only the program's own top-level names must avoid the
+// reserved set. (_itoa_a below is fine — not a reserved name.)
+_itoa_seq(n: int) -> string {
     if n == 0 {
         return "0"
     }
