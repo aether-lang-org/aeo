@@ -571,10 +571,19 @@ wired yet; mapped here as candidate kinds. Ordered by how cleanly they'd land:
       were truncated → 0x80073CF0). `wsl --version` → 2.7.10.0, Linux kernel
       6.18.33.2, WSLg 1.0.73.2. So the Store-free WSL install path WORKS on an
       unlicensed Windows — a real, reusable finding for a `driver_windows` provisioner.
-      STILL AHEAD: `wsl --install -d <distro>` (a distro is Store/GitHub-fetched
-      too — may hit the same sideload need), and NESTED-VIRT so WSL2's VM can boot
-      (win11 is a KVM guest → Bazzite host `kvm nested=1` + host-passthrough CPU).
-      Then podman-in-WSL2 = the Windows child-run mechanism (blocker #1).
+      **NESTED VIRT PROVEN + WSL2 DISTRO BOOTED (2026-07-02):** the Bazzite host
+      already had `kvm_amd nested=1` and the win11 libvirt domain already had
+      `<cpu mode='host-passthrough'>` — no changes needed. `wsl --install -d Ubuntu`
+      pulled Ubuntu 26.04 cleanly (WSL 2.7.10 fetches distros from its own source —
+      NO Store-sideload needed for the distro, unlike the WSL app itself), VERSION 2.
+      `wsl -d Ubuntu -- uname -a` → `Linux winbaz 6.18.33.2-microsoft-standard-WSL2
+      ... x86_64` (RC=0). A REAL Linux kernel runs in a WSL2 VM, inside the win11
+      KVM guest, inside the Bazzite host — a 3-deep virt stack, all over SSH.
+      SO: a Windows guest now has a live Linux container-capable environment. The
+      remaining piece for blocker #1 (the Windows child-run mechanism) is podman
+      INSIDE this WSL2 Ubuntu (apt install podman → run OCI containers), which the
+      driver_windows arm would drive via `wsl -d Ubuntu -- podman ...`. That's the
+      concrete, now-testable path to a functional Windows aeo-agent.
 - [ ] aether#870/#878 are CLOSED (fixed in ae 0.326). BUT investigated
       2026-06-27: they do NOT let the aeocha specs drop their bare `import
       std.string`. #878 fixes the QUALIFIED surface (`string.copy()` with the dot)
