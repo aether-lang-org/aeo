@@ -69,7 +69,11 @@ exports ( aeo_orchestration )
 
 aeo_orchestration() {
     system("web") {
-        within(30s) every(500ms)        // health-retry window for the tree (see below)
+        health_retry() {                // health-timing knobs for the tree (see below)
+            every(500ms)                // interval between probes
+            up_within(30s)              // bring-up: retry health this long
+            down_within(10s)            // teardown: wait this long for "gone"
+        }
 
         // Tier 1: database
         db = container("db") {
@@ -115,10 +119,11 @@ they declare:
 
 - **identity / lifecycle:** `image`, `command`, `entrypoint`, `dockerfile`,
   `health`, `depends`, `dataset`, `ip`, `env`, `expose`
-- **health timing** (FluentSelenium-style duration literals): `within(30s)` =
-  retry-until-up window, `every(500ms)` = probe interval, `without(10s)` =
-  retry-until-*gone* on teardown. (`health_interval`/`health_budget` int forms
-  remain.)
+- **health timing** (FluentSelenium-style duration literals), grouped in a
+  `health_retry() { … }` block: `up_within(30s)` = retry-until-up window,
+  `every(500ms)` = probe interval, `down_within(10s)` = retry-until-*gone* on
+  teardown. (The loose form `within(30s) every(500ms) without(10s)` still works;
+  `health_interval`/`health_budget` int forms remain.)
 - **confinement** — `limit{}` caps (`limit_mem`, `limit_maxproc`, `limit_cpu`,
   `limit_openfiles`) and `constrain{}` (`grant_fd`, `egress`, `ingress`,
   `ingress_from`, `deny_egress`, `deny_ingress`). The *same* grammar renders to
@@ -151,7 +156,7 @@ The front-door (Decision 1B — native Aether, no bash trampoline) assembles a
 build dir, `ae build`s the composition, and runs it under `os.run_supervised`
 (own process group + signal forwarding + group reap). Resources are modeled as
 Aether actors (Decision 2A) with a `down → booting → up` state machine and a
-self-driven, `within()`-bounded health-poll loop.
+self-driven, `up_within`-bounded health-poll loop.
 
 On an immutable host (e.g. a Fedora-atomic box) where `ae` isn't on the runtime
 PATH, aeo builds the composition inside a toolchain container via an `ae`
