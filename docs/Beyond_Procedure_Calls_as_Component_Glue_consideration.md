@@ -195,6 +195,21 @@ paper's "standing live connection": a connection whose whole job is to keep
 checking that containment still holds. More axes (image digest, cgroup caps) slot
 in behind the same verb.
 
+This is also where aeo conforms to the paper's **observability** model, which is
+worth naming because the paper derives monitoring *from* the connector model
+rather than bolting it on. Two of the paper's mechanisms map straight onto aeo:
+(1) §3's "a **breakpoint set on a specific connection would trigger whenever
+communication occurs via that connection**" — because a connection is a standing
+first-class thing, you observe it over its lifetime. aeo's agent `status`/`attest`
+is exactly that: you observe the containment tree *through the live agent
+connection*, on demand, over its lifetime. (2) §2.3's `LoggingStore` — a
+*decorator* over any store that "sends the references of any state update messages
+to a polymorphic write stream," i.e. observation-by-decoration that doesn't change
+what it observes. aeo's **tamper-evident audit trail** (`lib/audit`) is the same
+shape: it decorates every security *decision* into an append-only hash chain
+without altering the decision. So observability in aeo, as in the paper, is not a
+feature — it falls out of the standing-connection + decorator model.
+
 ### 5.4 (Not a paper item) — the one honest gap: FreeBSD `if_bridge`
 
 Stated plainly so this reads as an honest assessment, not "all green": the single
