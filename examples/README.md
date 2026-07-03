@@ -33,6 +33,8 @@ what changes is the substrate, never the app.
 | [`silly_addition_bwrap.ae`](silly_addition_bwrap.ae)        | Linux   | —        | bwrap (sandbox) | unprivileged, zero host setup |
 | [`silly_addition_nspawn.ae`](silly_addition_nspawn.ae)       | Linux   | —        | nspawn (system) | systemd-native system container |
 | [`silly_addition_firecracker.ae`](silly_addition_firecracker.ae) | Linux   | microVM  | —               | minimal "smaller VM" (Firecracker) |
+| [`silly_addition_windows.ae`](silly_addition_windows.ae)     | Windows | WSL2     | podman (in WSL) | Linux container on Windows (bring-your-own engine) |
+| [`silly_addition_wslc.ae`](silly_addition_wslc.ae)         | Windows | WSL2     | wslc (native)   | Linux container on Windows (MSFT's native engine) |
 
 `−VMM −podman` is **not** a cell — a compute node has to run *somewhere*, so "no
 VM, no container" is degenerate.
@@ -77,6 +79,16 @@ specs + ipam assert against that string.)
   kernel+rootfs bundle per node; proves the microVM substrate (boot + liveness +
   ordering). No in-guest probe yet — a microVM has no host-side exec (ssh/vsock
   into the guest is a follow-up).
+- **windows** — two Linux containers on a **Windows** host via **podman-in-WSL2**:
+  the driver runs `wsl -d <distro> -- podman …`, so the container IS Linux, one
+  substrate-hop away inside WSL. The bring-your-own-engine Windows tier (needs a
+  WSL distro with podman). `wsl_distro()` selects the distro. Proves the substrate
+  (run + ps + exec + teardown through WSL) rather than the cache service.
+- **wslc** — two Linux containers on a **Windows** host via **Microsoft's native
+  WSL Containers** (`wslc.exe`, WSL ≥ 2.9.3): no podman, no distro prefix — the
+  platform's own OCI runtime. The native-engine peer of the `windows` tier. Proves
+  the substrate (run + list + exec + teardown via `wslc`). Live-proven on a real
+  Win11 guest; see `docs/aeo-agent-windows-pipeline.md`.
 - **confined** — the `containers` cell with all three Linux confinement axes on:
   `limit{}` → cgroup caps, `constrain{}` → cap-drop/seccomp, `deny_egress` →
   `--network none`. The showcase for "contain malware" on Linux.
@@ -162,7 +174,7 @@ the single-file property that is the whole point.
 Also live on Bazzite: **image attestation** (a mismatched digest refused at
 boot), the **tamper-evident audit trail** (an edited log caught by `aeo audit`),
 and the **lifecycle ops** (snapshot/rollback round-trip on a container, prune
-keep-N). All eight demos pass `check` standalone and build via both doors.
+keep-N). Every demo passes `check` standalone and builds via both doors.
 
 ## Other examples here
 
