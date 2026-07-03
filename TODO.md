@@ -492,8 +492,23 @@ wired yet; mapped here as candidate kinds. Ordered by how cleanly they'd land:
       pipeline — `docs/aeo-agent-windows-pipeline.md`. Blockers: agent body is
       Linux-bound (needs driver_windows/select arm), not on the conduit yet, and
       the mingw cross-build is unproven (spike it first). Agent stays Aether.
-- [ ] **`driver_wslc` — a Windows Linux-container tier via WSL Containers**
-      (Build 2026, `wslc.exe`; public-preview mid-2026). Native OCI Linux
+- [x] **`driver_wslc` — a Windows Linux-container tier via WSL Containers** — DONE
+      (2026-07-03, commit `2615bbb`). `lib/driver_wslc` shells Microsoft's native
+      `wslc.exe` directly (no podman, no distro prefix). Wired into compose (`wslc`
+      kind) + runner (up/exec/down/probe); unit spec 6/6; example present. Got wslc
+      onto the guest by upgrading WSL 2.7.10 → 2.9.3 (`wsl --update --pre-release` —
+      NO Store needed, so the unlicensed-guest block didn't bite; nested virt NOT
+      required despite the old warning). LIVE-PROVEN vs real `wslc.exe` 2.9.3.0: the
+      driver's exact argv ran the full round-trip (run -d -p → list json Name-match
+      + port bound → exec hostname → container stop → container remove → list []).
+      Handled wslc's deltas from podman: `container remove` not `rm`, no `--replace`
+      (manual idempotency), `list --format json` not Go templates (probe matches the
+      "Name" field). STILL OPEN (follow-ups, not the driver itself): render
+      limit{}/constrain{} onto wslc's governance knobs (caps/network-deny/registry
+      allowlist ↔ attest); and the headless WSL container API (NuGet
+      `Microsoft.WSL.Containers`) as an alternative to shelling the CLI.
+      --- original rationale (kept for the follow-ups) ---
+      Native OCI Linux
       containers on Win11 with NO Docker Desktop, via a dedicated optimized Hyper-V
       VM. Directly relevant because:
         - **New driver tier**: `wslc` syntax mirrors Docker (`wslc run -p 8080:80
