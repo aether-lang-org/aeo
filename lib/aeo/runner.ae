@@ -28,6 +28,7 @@ import driver_bwrap
 import driver_nspawn
 import driver_firecracker
 import driver_windows
+import driver_wslc
 import compose
 import ipam
 import pf
@@ -573,6 +574,18 @@ driver_up(nm: string, k: string) -> string {
         }
         return driver_windows.up(nm, compose.get_wsl_distro(nm), img, compose.get_command(nm), compose.get_expose(nm), "", compose.get_env(nm), confine)
     }
+    if k == "wslc" {
+        // WSL Containers node (driver_wslc): Microsoft's native `wslc.exe` runs the
+        // Linux container directly on Windows — no podman, no distro prefix. Same
+        // container semantics as the linux tier; the runtime is MSFT's own. (No
+        // confine flags here yet — wslc's --network/limit surface differs from
+        // podman's; the limit/constrain rendering for wslc is a follow-up.)
+        img = _container_image(nm, "")
+        if string_starts_err(img) == 1 {
+            return _strip_err(img)
+        }
+        return driver_wslc.up(nm, img, compose.get_command(nm), compose.get_expose(nm), compose.get_env(nm))
+    }
     return "aeo: kind '${k}' has no up() driver on this host"
 }
 
@@ -618,6 +631,9 @@ driver_exec(nm: string, k: string, cmd: string) -> string {
     if k == "windows" {
         return driver_windows.exec_capture(nm, compose.get_wsl_distro(nm), cmd)
     }
+    if k == "wslc" {
+        return driver_wslc.exec_capture(nm, cmd)
+    }
     return ""
 }
 
@@ -645,6 +661,9 @@ driver_down(nm: string, k: string) -> string {
     }
     if k == "windows" {
         return driver_windows.down(nm, compose.get_wsl_distro(nm))
+    }
+    if k == "wslc" {
+        return driver_wslc.down(nm)
     }
     return driver_linux.down(nm, _engine_of(k))
 }
@@ -685,6 +704,9 @@ driver_probe(nm: string, k: string, health: string) -> int {
     }
     if k == "windows" {
         return driver_windows.probe(nm, compose.get_wsl_distro(nm), health)
+    }
+    if k == "wslc" {
+        return driver_wslc.probe(nm, health)
     }
     return driver_linux.probe(nm, health, _engine_of(k))
 }

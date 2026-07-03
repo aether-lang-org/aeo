@@ -1,0 +1,429 @@
+// lib/driver_wslc — Windows container backend via Microsoft's WSL Containers.
+//
+// The NATIVE Windows path (contrast lib/driver_windows, which shells podman
+// INSIDE a WSL2 distro). Microsoft's `wslc.exe` (WSL Containers, public preview
+// 2026-06; WSL >= 2.9.3) is a built-in, Docker-shaped CLI that runs Linux
+// containers on Windows with NO podman/docker/third-party engine. So this driver
+// shells `wslc` directly — no `wsl -d <distro> --` prefix, no podman dependency.
+//
+// A `wslc` node is still a Linux container (wslc runs a WSL-backed Linux host);
+// it's just Microsoft's own runtime instead of a bring-your-own one. Containment-
+// correct: aeo (or its resident agent on the Windows box) drives the contained
+// Linux workload through the platform's native container CLI.
+//
+//   up    — idempotent: running -> no-op; else `wslc run -d --name N [-p] [-e] IMG [cmd]`
+//           (wslc has NO --replace, so we remove-then-run when a stale one exists)
+//   down  — `wslc container stop N` + `wslc container remove N`; absent == success
+//   probe — `wslc list --filter name=N --format json`: the name appears in the
+//           JSON iff running (+ optional health command exits 0 inside)
+//   exec  — `wslc exec N /bin/sh -c CMD`, capturing stdout
+//
+// wslc differs from podman/docker in three load-bearing ways this driver handles:
+//   * teardown verb is `container remove`, not `rm`
+//   * NO `--replace` on run — idempotency is manual (probe first; stale -> remove)
+//   * `list --format` takes only json|table (NOT Go templates), so the probe
+//     matches the name in the JSON rather than a `{{.Names}}` line
+//
+// wslc.exe is NOT on the default PATH (it installs to C:\Program Files\WSL\); the
+// resolver finds it there, or on PATH, or via AEO_WSLC. All argv assembly is pure
+// builders (unit-testable without a wslc host); only up/down/probe/exec shell out.
+
+import std.os (run_capture, os_which, getenv)
+import std.list
+import std.string (string_length, string_contains, string_char_at, string_substring, string_index_of)
+
+exports (
+    name, available, wslc_exe,
+    up, down, probe, exec_capture, running_names,
+    run_argv, list_json_argv, stop_argv, remove_argv, exec_argv
+)
+
+name() -> string { return "wslc" }
+
+// Resolve the `wslc.exe` binary. AEO_WSLC overrides; else PATH; else the canonical
+// WSL install dir (wslc ships there but isn't on PATH by default).
+wslc_exe() -> string {
+    ov = _env("AEO_WSLC")
+    if string_length(ov) > 0 {
+        return ov
+    }
+    p = os_which("wslc")
+    if string_length(p) > 0 {
+        return p
+    }
+    p = os_which("wslc.exe")
+    if string_length(p) > 0 {
+        return p
+    }
+    return "C:\\Program Files\\WSL\\wslc.exe"
+}
+
+// 1 if wslc is present (a Windows host with WSL Containers). PATH probe first
+// (cheap), then the canonical install path — so a caller routes past this tier
+// cleanly off a host without WSL Containers.
+available() -> int {
+    p = os_which("wslc")
+    if string_length(p) > 0 {
+        return 1
+    }
+    p = os_which("wslc.exe")
+    if string_length(p) > 0 {
+        return 1
+    }
+    // not on PATH -> check the canonical install location via a filesystem probe
+    // (a `list` call is the cheapest "is it real + runnable" test).
+    exe = wslc_exe()
+    out, status, err = run_capture(exe, _one("--version"), null)
+    if err != "" {
+        return 0
+    }
+    return 1
+}
+
+// --- pure argv builders (one per wslc subcommand) --------------------
+
+// `wslc run -d --name NAME [-p PORT:PORT] [-e K=V ...] IMAGE [/bin/sh -c CMD]`
+// Detached. No --replace (wslc lacks it); up() handles idempotency itself.
+run_argv(res_name: string, image: string, cmd: string, expose: int, env: string) -> ptr {
+    av = list_new()
+    list_add_raw(av, "run")
+    list_add_raw(av, "-d")
+    list_add_raw(av, "--name")
+    list_add_raw(av, res_name)
+    if expose > 0 {
+        list_add_raw(av, "-p")
+        list_add_raw(av, "${_itoa(expose)}:${_itoa(expose)}")
+    }
+    if string_length(env) > 0 {
+        _add_env_args(av, env)
+    }
+    list_add_raw(av, image)
+    if string_length(cmd) > 0 {
+        list_add_raw(av, "/bin/sh")
+        list_add_raw(av, "-c")
+        list_add_raw(av, cmd)
+    }
+    return av
+}
+
+// `wslc list --filter name=NAME --format json` — the JSON of matching containers
+// (running only, unless --all). The probe matches the name in this output.
+list_json_argv(res_name: string) -> ptr {
+    av = list_new()
+    list_add_raw(av, "list")
+    list_add_raw(av, "--filter")
+    list_add_raw(av, "name=${res_name}")
+    list_add_raw(av, "--format")
+    list_add_raw(av, "json")
+    return av
+}
+
+// `wslc list --format json` — ALL running containers as JSON (batch liveness).
+list_all_json_argv() -> ptr {
+    av = list_new()
+    list_add_raw(av, "list")
+    list_add_raw(av, "--format")
+    list_add_raw(av, "json")
+    return av
+}
+
+// `wslc container stop NAME`
+stop_argv(res_name: string) -> ptr {
+    av = list_new()
+    list_add_raw(av, "container")
+    list_add_raw(av, "stop")
+    list_add_raw(av, res_name)
+    return av
+}
+
+// `wslc container remove NAME` (NOT `rm` — wslc's teardown verb is `remove`).
+remove_argv(res_name: string) -> ptr {
+    av = list_new()
+    list_add_raw(av, "container")
+    list_add_raw(av, "remove")
+    list_add_raw(av, res_name)
+    return av
+}
+
+// `wslc exec NAME /bin/sh -c CMD` — run a command INSIDE the container.
+exec_argv(res_name: string, cmd: string) -> ptr {
+    av = list_new()
+    list_add_raw(av, "exec")
+    list_add_raw(av, res_name)
+    list_add_raw(av, "/bin/sh")
+    list_add_raw(av, "-c")
+    list_add_raw(av, cmd)
+    return av
+}
+
+// split "K=V,K=V" and append `-e K=V` for each.
+_add_env_args(av: ptr, env: string) {
+    rest = env
+    more = 1
+    while more == 1 {
+        idx = _index_of(rest, ",")
+        one = rest
+        if idx >= 0 {
+            one = string_substring(rest, 0, idx)
+            rest = string_substring(rest, idx + 1, string_length(rest))
+        } else {
+            more = 0
+        }
+        if string_length(one) > 0 {
+            list_add_raw(av, "-e")
+            list_add_raw(av, one)
+        }
+    }
+}
+
+// --- exec'ing entry points (mirror the driver contract) --------------
+
+// Bring the container up idempotently. Returns "" on success else an error. wslc
+// has no --replace, so: if already running -> no-op; else remove any stale
+// (stopped) container of this name first, then run.
+up(res_name: string, image: string, cmd: string, expose: int, env: string) -> string {
+    if image == "" {
+        return "aeo: wslc node '${res_name}' has no image() set"
+    }
+    if available() == 0 {
+        return "aeo: no wslc on this host (need WSL Containers / wslc.exe)"
+    }
+    exe = wslc_exe()
+    // Already running? idempotent no-op.
+    if probe(res_name, "") == 1 {
+        return ""
+    }
+    // Clear any stale (stopped) container of this name — wslc run would else fail
+    // on the name clash (no --replace). Ignore its result (absent == fine).
+    rav = remove_argv(res_name)
+    _ro, _rs, _re = run_capture(exe, rav, null)
+    list_free(rav)
+
+    av = run_argv(res_name, image, cmd, expose, env)
+    out, status, err = run_capture(exe, av, null)
+    list_free(av)
+    if err != "" {
+        return "aeo: spawn failed for wslc node '${res_name}': ${err}"
+    }
+    if status != 0 {
+        return "aeo: 'wslc run' failed for '${res_name}' (exit ${status}): ${out}"
+    }
+    return ""
+}
+
+// Tear down: stop (ignore failure) then remove. Absent == success.
+down(res_name: string) -> string {
+    if available() == 0 {
+        return "aeo: no wslc on this host (need WSL Containers / wslc.exe)"
+    }
+    exe = wslc_exe()
+    sav = stop_argv(res_name)
+    _so, _ss, _se = run_capture(exe, sav, null)
+    list_free(sav)
+
+    rav = remove_argv(res_name)
+    out, status, err = run_capture(exe, rav, null)
+    list_free(rav)
+    if err != "" {
+        return "aeo: teardown spawn failed for wslc node '${res_name}': ${err}"
+    }
+    if status != 0 {
+        // removing an absent container is benign
+        if string_contains(out, "not found") == 1 {
+            return ""
+        }
+        if string_contains(out, "No such") == 1 {
+            return ""
+        }
+        return "aeo: 'wslc container remove' failed for '${res_name}' (exit ${status}): ${out}"
+    }
+    return ""
+}
+
+// Liveness probe. 1 if running AND (no health, or health exits 0 inside). Uses
+// `list --filter name=N --format json` and checks the name appears in the JSON
+// (running-only listing -> presence == running). Spawn errors -> not alive.
+probe(res_name: string, health: string) -> int {
+    if available() == 0 {
+        return 0
+    }
+    exe = wslc_exe()
+    pav = list_json_argv(res_name)
+    out, status, err = run_capture(exe, pav, null)
+    list_free(pav)
+    if err != "" {
+        return 0
+    }
+    if status != 0 {
+        return 0
+    }
+    // The JSON lists running matches. The name appears (as "Name": "res_name")
+    // iff a running container matched. Empty result is `[]` / no name.
+    if _json_has_name(out, res_name) == 0 {
+        return 0
+    }
+    if health == "" {
+        return 1
+    }
+    hav = exec_argv(res_name, health)
+    hout, hstatus, herr = run_capture(exe, hav, null)
+    list_free(hav)
+    if herr != "" {
+        return 0
+    }
+    if hstatus == 0 {
+        return 1
+    }
+    return 0
+}
+
+// Run `cmd` inside the container and return its stdout, trimmed of a trailing
+// newline. "" on any failure. The "make a node compute" primitive.
+exec_capture(res_name: string, cmd: string) -> string {
+    if available() == 0 {
+        return ""
+    }
+    exe = wslc_exe()
+    av = exec_argv(res_name, cmd)
+    out, status, err = run_capture(exe, av, null)
+    list_free(av)
+    if err != "" {
+        return ""
+    }
+    if status != 0 {
+        return ""
+    }
+    return _chomp(out)
+}
+
+// running_names — a newline-joined list of every running container's name ("" if
+// no wslc). The batch liveness query. wslc --format is json|table only (no Go
+// templates), so we extract the "Name" fields from the JSON.
+running_names() -> string {
+    if available() == 0 {
+        return ""
+    }
+    exe = wslc_exe()
+    av = list_all_json_argv()
+    out, status, err = run_capture(exe, av, null)
+    list_free(av)
+    if err != "" {
+        return ""
+    }
+    if status != 0 {
+        return ""
+    }
+    return _json_names(out)
+}
+
+// --- tiny JSON helpers (wslc emits `"Name": "value"` fields) ----------
+
+// 1 if the wslc list JSON contains a `"Name": "res_name"` field (running match).
+// A substring check on the quoted key/value — sufficient because names are the
+// aeo resource names (no JSON-escaping surprises) and the listing is name-
+// filtered + running-only, so any Name match means "this node is running".
+_json_has_name(json: string, res_name: string) -> int {
+    needle = "\"Name\": \"${res_name}\""
+    if string_contains(json, needle) == 1 {
+        return 1
+    }
+    // tolerate a no-space variant `"Name":"res_name"` in case formatting differs
+    needle2 = "\"Name\":\"${res_name}\""
+    if string_contains(json, needle2) == 1 {
+        return 1
+    }
+    return 0
+}
+
+// Extract every `"Name": "X"` value from the JSON as a newline-joined string.
+// Simple scan for the `"Name"` key; robust to the array-of-objects shape.
+_json_names(json: string) -> string {
+    acc = ""
+    rest = json
+    key = "\"Name\""
+    more = 1
+    while more == 1 {
+        k = _index_of(rest, key)
+        if k < 0 {
+            more = 0
+        } else {
+            rest = string_substring(rest, k + string_length(key), string_length(rest))
+            // skip to the opening quote of the value
+            q1 = _index_of(rest, "\"")
+            if q1 < 0 {
+                more = 0
+            } else {
+                rest = string_substring(rest, q1 + 1, string_length(rest))
+                q2 = _index_of(rest, "\"")
+                if q2 < 0 {
+                    more = 0
+                } else {
+                    val = string_substring(rest, 0, q2)
+                    acc = "${acc}${val}\n"
+                    rest = string_substring(rest, q2 + 1, string_length(rest))
+                }
+            }
+        }
+    }
+    return acc
+}
+
+// --- small utilities --------------------------------------------------
+
+// AEO_WSLC override lookup. getenv on an unset var returns "" — but per the
+// aether footgun, "" == "" can misreport, so guard on length.
+_env(k: string) -> string {
+    v = getenv(k)
+    if string_length(v) == 0 {
+        return ""
+    }
+    return v
+}
+
+_one(a: string) -> ptr {
+    av = list_new()
+    list_add_raw(av, a)
+    return av
+}
+
+_index_of(hay: string, needle: string) -> int {
+    return string_index_of(hay, needle)
+}
+
+_chomp(s: string) -> string {
+    n = string_length(s)
+    if n == 0 {
+        return s
+    }
+    last = string_char_at(s, n - 1)
+    if last == 10 {
+        return string_substring(s, 0, n - 1)
+    }
+    return s
+}
+
+_itoa(n: int) -> string {
+    if n == 0 {
+        return "0"
+    }
+    v = n
+    s = ""
+    while v > 0 {
+        d = v - (v / 10) * 10
+        s = "${_digit(d)}${s}"
+        v = v / 10
+    }
+    return s
+}
+_digit(x: int) -> string {
+    if x == 0 { return "0" }
+    if x == 1 { return "1" }
+    if x == 2 { return "2" }
+    if x == 3 { return "3" }
+    if x == 4 { return "4" }
+    if x == 5 { return "5" }
+    if x == 6 { return "6" }
+    if x == 7 { return "7" }
+    if x == 8 { return "8" }
+    return "9"
+}

@@ -33,7 +33,7 @@ exports (
     system,
     bhyve_vm, freebsd_vm, get_flavor, kvm_vm,
     resource,
-    container, docker, lxc, kvm, jail, bhyve, bwrap, nspawn, firecracker, windows,
+    container, docker, lxc, kvm, jail, bhyve, bwrap, nspawn, firecracker, windows, wslc,
     image, command, dockerfile, health, dataset, ip, depends, env, get_env, attest, get_attest,
     cpus, memory, nic, expose, wsl_distro,
     guest_image, network, ssh_key,
@@ -182,6 +182,7 @@ bwrap(nm: string)     -> string { return resource(nm, "bwrap") }
 nspawn(nm: string)    -> string { return resource(nm, "nspawn") }
 firecracker(nm: string) -> string { return resource(nm, "firecracker") }
 windows(nm: string)   -> string { return resource(nm, "windows") }
+wslc(nm: string)      -> string { return resource(nm, "wslc") }
 
 // Inner setters — `_ctx: ptr` is the resource name pushed by resource().
 // `${_ctx}` interpolates it back to the name string for the config key.
@@ -1042,9 +1043,12 @@ _command_in_tree(kind: string) -> int {
     if kind == "nspawn" {
         return 1
     }
-    // windows: command() is the container payload (like the sandbox/system-
+    // windows/wslc: command() is the container payload (like the sandbox/system-
     // container tiers), so surface it in the tree.
     if kind == "windows" {
+        return 1
+    }
+    if kind == "wslc" {
         return 1
     }
     return 0
