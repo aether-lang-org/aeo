@@ -1,0 +1,68 @@
+// examples/checks/containers_model.spec.ae — the DATA-MODEL check for the
+// silly_addition_containers composition. Declared by `check(...)` in that example;
+// run by `aeo check examples/silly_addition_containers.ae` (no deploy, runs
+// anywhere). It re-declares the composition (a spec is its own process, so it can't
+// inherit the runner's in-memory tree) and asserts the resolved model.
+//
+//   sh test/run-spec.sh examples/checks/containers_model.spec.ae
+//
+// This is the aeb pattern: the composition is a pure declaration; its assertions
+// live alongside in a real spec you can also run standalone.
+
+import aeocha
+import compose (system, container)
+import compose (image, expose, health, depends, env)
+import compose (health_retry, every, up_within, down_within)
+import compose (get_image, get_expose, get_depends, describe_tree)
+import std.string (string_from_int, string_concat)
+import std.string   // bare: inlined aeocha calls bare exports unqualified
+
+// The SAME declaration the example carries. Kept in sync with
+// examples/silly_addition_containers.ae (the model assertion is exactly this).
+_declare() {
+    system("silly_addition_containers") {
+        health_retry() {
+            every(500ms)
+            up_within(30s)
+            down_within(10s)
+        }
+        db = container("db") {
+            image("docker.io/library/redis:alpine")
+            expose(6379)
+            health("redis-cli ping")
+        }
+        app = container("app") {
+            image("localhost/aeo-examples/silly-add:latest")
+            expose(8080)
+            env("REDIS_HOST", "db")
+            health("python -c \"import urllib.request as u; u.urlopen('http://localhost:8080/add/0/0').read()\"")
+            health_retry() {
+                up_within(45s)
+            }
+            depends("db")
+        }
+    }
+}
+
+main() {
+    _declare()
+    fw = aeocha.init()
+
+    aeocha.describe(fw, "silly_addition_containers — data model") {
+        aeocha.it("resolves to db + app with a dependency edge") callback {
+            want = string_concat(string_concat(
+                "system silly_addition_containers:\n",
+                "  container db [image=docker.io/library/redis:alpine, expose=6379]\n"),
+                "  container app [image=localhost/aeo-examples/silly-add:latest, expose=8080] -> db")
+            aeocha.assert_str_eq(describe_tree(), want, "resolved container tree snapshot")
+        }
+        aeocha.it("db is redis on 6379; app exposes 8080 + depends on db") callback {
+            aeocha.assert_str_eq(get_image("db"), "docker.io/library/redis:alpine", "db image")
+            aeocha.assert_str_eq(string_from_int(get_expose("db")), "6379", "db port")
+            aeocha.assert_str_eq(string_from_int(get_expose("app")), "8080", "app port")
+            aeocha.assert_str_eq(get_depends("app"), "db", "app ◄ db")
+        }
+    }
+
+    aeocha.run_summary(fw)
+}

@@ -1,0 +1,34 @@
+// examples/checks/containers_suite.spec.ae — the fuller POST-DEPLOY suite for
+// silly_addition_containers. Declared by `suite(...)` in that example; run by
+// `aeo suite examples/silly_addition_containers.ae` AFTER the tree is up. aeo TEARS
+// DOWN once the suite finishes (the CI shape). Fuller than smoke: more arithmetic
+// plus the cache-read behaviour.
+//
+//   AEO_APP_HOST=<host> sh test/run-spec.sh examples/checks/containers_suite.spec.ae
+
+import aeocha
+import std.os          // WHOLE (not selective) — see the smoke spec + the ask note
+                       // asks/aeocha-selective-os-import-shadowing.md.
+import std.string (string_length)
+import std.string   // bare: inlined aeocha calls bare exports unqualified
+
+_base() -> string {
+    h = os.getenv("AEO_APP_HOST")
+    if string_length(h) == 0 {
+        h = "localhost"
+    }
+    return "http://${h}:8080"
+}
+
+main() {
+    fw = aeocha.init()
+    aeocha.describe(fw, "silly_addition_containers — full suite") {
+        aeocha.it("app computes arithmetic over HTTP (2+2=4, 2+3=5, 40+2=42)") callback {
+            base = _base()
+            aeocha.expect_http_get_body_eq("${base}/add/2/2", "4", "2 + 2 = 4")
+            aeocha.expect_http_get_body_eq("${base}/add/2/3", "5", "2 + 3 = 5")
+            aeocha.expect_http_get_body_eq("${base}/add/40/2", "42", "40 + 2 = 42")
+        }
+    }
+    aeocha.run_summary(fw)
+}

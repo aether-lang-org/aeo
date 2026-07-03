@@ -120,11 +120,32 @@ ecosystem idiom. **Kind verbs:** `container`/`docker`/`lxc`/`kvm_vm` (Linux),
 fixed-arity — repeat the call for more). `depends` takes a handle (typo-checked)
 or a name string.
 
-The seven `examples/silly_addition_*.ae` are the canonical surface — the same
-`db ◄ app` app across every substrate (the "substrate grid"). Read one, diff
-another. They're **all-in-one**: each declares the system AND self-verifies via
-`AEO_MODE` modes (`check`/`up`/`smoke`/`suite`). The mode scaffold is repeated per
-file ON PURPOSE — they're self-contained; do not factor it out.
+The `examples/silly_addition_*.ae` are the canonical surface — the same `db ◄ app`
+app across every substrate (the "substrate grid"). Read one, diff another. They are
+**PURE COMPOSITIONS** — declaration only, no `main()`, no self-test scaffold (like
+aeb's `.build.ae`). Each declares its nodes AND its own verification via first-class
+`check()`/`smoke()`/`suite()` verbs that NAME external aeocha specs:
+
+```
+system("silly_addition_containers") {
+    container("db")  { image("…redis…"); health("redis-cli ping") }
+    container("app") { image("localhost/aeo-examples/silly-add:latest"); depends("db") }
+    check("examples/checks/containers_model.spec.ae")   // data-model, NO deploy
+    smoke("examples/checks/containers_smoke.spec.ae")   // deploy + probe, leave up
+    suite("examples/checks/containers_suite.spec.ae")   // deploy + probe, tear down
+}
+```
+
+`aeo` is the executor (never `ae run <example>`; the file is not a program):
+`aeo up|down|check|smoke|suite <compose.ae>`. `check` runs the spec(s) with NO
+deploy (anywhere); `smoke` deploys then runs the spec(s), leaves standing; `suite`
+deploys, runs, then tears down (CI shape). The runner runs each spec as a SUBPROCESS
+(`ae run <spec>`), so aeocha stays OUT of the lean orchestration binary. Application
+source lives in `examples/silly_addition_app/` (a prebuilt image the compositions
+reference by tag) — NOT inline: the composition is orchestration, not an app.
+FOOTGUN: a spec that `import aeocha` must NOT `import std.os (x)` selectively — the
+selective form rebinds `os` and breaks aeocha's qualified `os.*` calls; use whole
+`import std.os` + `os.getenv(...)` (see asks/aeocha-selective-os-import-shadowing.md).
 
 ## How it's built — the shape that matters
 

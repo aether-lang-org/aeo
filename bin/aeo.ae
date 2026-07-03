@@ -97,32 +97,15 @@ main() {
     }
 
     if compose_path == "" {
-        _diag("usage: aeo [up|down|status|dry-run|snapshot|rollback|exec|restart|backup|prune|audit] <compose.ae> [tag|node cmd...]")
+        _diag("usage: aeo [up|down|status|check|smoke|suite|dry-run|snapshot|rollback|exec|restart|backup|prune|audit] <compose.ae> [tag|node cmd...]")
         exit(2)
     }
-    if cmd != "up" {
-        if cmd != "down" {
-            if cmd != "status" {
-                if cmd != "dry-run" {
-                    if cmd != "snapshot" {
-                        if cmd != "rollback" {
-                            if cmd != "exec" {
-                                if cmd != "restart" {
-                                    if cmd != "backup" {
-                                        if cmd != "prune" {
-                                            if cmd != "audit" {
-                                                _diag("aeo: unknown subcommand '${cmd}' (want up|down|status|dry-run|snapshot|rollback|exec|restart|backup|prune|audit)")
-                                                exit(2)
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+    // check/smoke/suite are the declared-verification phases (the composition's
+    // check()/smoke()/suite() spec refs): check = specs only, no deploy; smoke =
+    // deploy + specs, leave standing; suite = deploy + specs, tear down.
+    if _known_cmd(cmd) == 0 {
+        _diag("aeo: unknown subcommand '${cmd}' (want up|down|status|check|smoke|suite|dry-run|snapshot|rollback|exec|restart|backup|prune|audit)")
+        exit(2)
     }
 
     home = getenv("AEO_HOME")
@@ -254,6 +237,26 @@ main() {
 // exec stdout) comes from the spawned composition binary, never from here.
 _diag(msg: string) {
     _ = stderr_write(string_concat(msg, "\n"))
+}
+
+// 1 if `c` is a recognized subcommand. Flat list (readable) — replaced the old
+// 11-deep nested-if. check/smoke/suite are the declared-verification phases.
+_known_cmd(c: string) -> int {
+    if c == "up" { return 1 }
+    if c == "down" { return 1 }
+    if c == "status" { return 1 }
+    if c == "check" { return 1 }
+    if c == "smoke" { return 1 }
+    if c == "suite" { return 1 }
+    if c == "dry-run" { return 1 }
+    if c == "snapshot" { return 1 }
+    if c == "rollback" { return 1 }
+    if c == "exec" { return 1 }
+    if c == "restart" { return 1 }
+    if c == "backup" { return 1 }
+    if c == "prune" { return 1 }
+    if c == "audit" { return 1 }
+    return 0
 }
 
 // cp -r SRC/. DST  — copy directory contents. Returns 0 on success.

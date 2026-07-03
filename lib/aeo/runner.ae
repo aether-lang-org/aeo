@@ -200,10 +200,16 @@ _batchable(nm: string) -> int {
 _alive_set(booted: ptr) -> string {
     s = " ${_batch_pidfile_alive(booted)} "
     if _level_has_batch_kind(booted, "container") == 1 {
-        s = "${s}${_nl2sp(driver_linux.running_names(""))} "
+        // NOTE: the call is hoisted to a local BEFORE interpolation. A string
+        // literal nested inside ${...} inside a "..." (e.g. `${f("docker")}`)
+        // mis-parses in the aether the front-door builds against — the inner
+        // "docker" is read as an undefined variable (E0300). Hoisting sidesteps it.
+        names = driver_linux.running_names("")
+        s = "${s}${_nl2sp(names)} "
     }
     if _level_has_batch_kind(booted, "docker") == 1 {
-        s = "${s}${_nl2sp(driver_linux.running_names("docker"))} "
+        names = driver_linux.running_names("docker")
+        s = "${s}${_nl2sp(names)} "
     }
     return s
 }
@@ -1659,6 +1665,14 @@ main() {
         return
     }
 
+    // check — run the composition's declared check() specs, NO deploy. Data-model
+    // assertions run anywhere (before the host gate), like status. Exit non-zero if
+    // any spec fails, so `aeo check <file>` is a CI-usable pre-flight.
+    if cmd == "check" {
+        rc = _run_phase_specs("check")
+        exit(rc)
+    }
+
     // snapshot / rollback — ZFS point-in-time over each node's dataset. The tag
     // comes from AEO_TAG (the front-door sets it from the CLI arg); default
     // "snap" if unset. Dataset ops, not bring-up — run before the host gate.
@@ -1713,7 +1727,9 @@ main() {
         return
     }
 
-    // default: up
+    // up / smoke / suite all bring the tree up first. smoke + suite then run their
+    // declared specs against the LIVE tree; suite tears down after, smoke leaves it
+    // standing. Plain up just deploys.
     println(profile())
     ok = run_up()
     if ok == 0 {
@@ -1728,6 +1744,74 @@ main() {
         exit(1)
     }
     println("aeo: stack up")
+
+    // smoke — deploy + run smoke() specs against the live tree, LEAVE IT STANDING.
+    if cmd == "smoke" {
+        rc = _run_phase_specs("smoke")
+        exit(rc)
+    }
+    // suite — deploy + run suite() specs, then TEAR DOWN (the CI shape). The teardown
+    // runs regardless of spec result so a failed suite doesn't leak a live tree; the
+    // spec's exit code is what the operator (CI) sees.
+    if cmd == "suite" {
+        rc = _run_phase_specs("suite")
+        println("aeo: suite complete — tearing down")
+        run_down()
+        exit(rc)
+    }
+}
+
+// _run_phase_specs(phase) — run every spec declared for `phase` across all systems,
+// each as a SEPARATE process (`ae run <spec>`), so aeocha stays out of this runner.
+// Returns 0 if all specs passed (or none declared), else the first non-zero rc — so
+// `aeo check/smoke/suite` is CI-usable. Prints what it runs (no silent skips).
+_run_phase_specs(phase: string) -> int {
+    worst = 0
+    ran = 0
+    sc = compose.syscount()
+    si = 0
+    while si < sc {
+        sys = compose.sysname_at(si)
+        n = compose.get_phase_spec_count(sys, phase)
+        i = 0
+        while i < n {
+            spec = compose.get_phase_spec_at(sys, phase, i)
+            if string_length(spec) > 0 {
+                println("aeo: ${phase} — running spec ${spec}")
+                rc = _run_one_spec(spec)
+                ran = ran + 1
+                if rc != 0 {
+                    if worst == 0 {
+                        worst = rc
+                    }
+                }
+            }
+            i = i + 1
+        }
+        si = si + 1
+    }
+    if ran == 0 {
+        println("aeo: ${phase} — no ${phase}() specs declared (nothing to run)")
+    }
+    return worst
+}
+
+// Run one spec file as a child process. Uses the spec runner if present (it wires
+// the aeocha module path), else a bare `ae run`. Returns the child's exit status.
+_run_one_spec(spec: string) -> int {
+    av = list_new()
+    list_add(av, "-c")
+    // Prefer the project's spec harness (sets AEOCHA + lib path); fall back to a
+    // direct `ae run` with aeo's own lib. AEO_HOME is the aeo tree root.
+    home = _envc("AEO_HOME")
+    if string_length(home) == 0 {
+        home = os_getenv("AEO_HOME")
+    }
+    list_add(av, "cd ${home} && sh test/run-spec.sh ${spec}")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    println(out)
+    return status
 }
 
 // The snapshot/rollback/backup tag (AEO_TAG, set by the front-door from the CLI

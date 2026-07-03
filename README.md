@@ -13,9 +13,17 @@ aeo up       compose.ae      # bring the tree up, dependency-ordered, gated on h
 aeo status   compose.ae      # per-node state + confinement/attestation posture (--json too)
 aeo down     compose.ae      # tear down in reverse order, verifying each node is gone
 aeo dry-run  compose.ae      # validate + print the plan, touch nothing
+aeo check    compose.ae      # run the composition's declared check() specs, NO deploy (CI/anywhere)
+aeo smoke    compose.ae      # deploy + run smoke() specs, leave the tree STANDING
+aeo suite    compose.ae      # deploy + run suite() specs, then TEAR DOWN (the CI shape)
 aeo audit    compose.ae      # verify the hash-chained audit trail
 # also: snapshot | rollback | backup | prune | exec | restart  (per-node lifecycle ops)
 ```
+
+The composition file is a **pure declaration** (no `main`, no self-test scaffold) —
+`aeo` is the executor, exactly as `aeb <target>.build.ae` runs a build declaration.
+A composition declares its OWN verification with first-class `check()`/`smoke()`/
+`suite()` verbs that name external aeocha specs; `aeo <phase> compose.ae` runs them.
 
 aeo is **not** a build system and **not** an aeb SDK. It is a third sibling to
 [`aether`](https://github.com/aether-lang-org/aether) (the language) and

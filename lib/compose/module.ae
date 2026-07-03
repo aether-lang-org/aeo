@@ -34,6 +34,7 @@ exports (
     bhyve_vm, freebsd_vm, get_flavor, kvm_vm,
     resource,
     container, docker, lxc, kvm, jail, bhyve, bwrap, nspawn, firecracker, windows, wslc,
+    check, smoke, suite, get_phase_spec_count, get_phase_spec_at,
     image, command, dockerfile, health, dataset, ip, depends, env, get_env, attest, get_attest,
     cpus, memory, nic, expose, wsl_distro,
     guest_image, network, ssh_key,
@@ -183,6 +184,52 @@ nspawn(nm: string)    -> string { return resource(nm, "nspawn") }
 firecracker(nm: string) -> string { return resource(nm, "firecracker") }
 windows(nm: string)   -> string { return resource(nm, "windows") }
 wslc(nm: string)      -> string { return resource(nm, "wslc") }
+
+// --- declared verification: check() / smoke() / suite() -------------------
+//
+// A composition declares its OWN verification, as first-class DSL alongside the
+// resource nodes. Each names an external aeocha spec file; `aeo <phase> <file>`
+// runs the composition through that phase and executes the named spec(s):
+//
+//   system("myapp") {
+//       container("db") { ... }
+//       check("checks/model.spec.ae")   // data-model, NO deploy — runs anywhere
+//       smoke("checks/smoke.spec.ae")   // post-deploy slim probe; leave STANDING
+//       suite("checks/suite.spec.ae")   // post-deploy fuller checks; then TEAR DOWN
+//   }
+//
+// The spec is run as a SEPARATE process (the runner shells `ae run <spec>`), so
+// aeocha's assertion/http/timing machinery stays OUT of the lean orchestration
+// runner. This mirrors aeb: the .build.ae is a pure declaration; its checks live
+// alongside in real spec files. Multiple calls per phase accumulate (a list).
+//
+// These are SYSTEM-scoped — call them inside a system(){} block, so `_ctx` is the
+// system name. They key the per-phase spec list to that system.
+check(_ctx: ptr, spec: string) { _add_phase_spec(_ctx, "check", spec) }
+smoke(_ctx: ptr, spec: string) { _add_phase_spec(_ctx, "smoke", spec) }
+suite(_ctx: ptr, spec: string) { _add_phase_spec(_ctx, "suite", spec) }
+
+// append `spec` to system `sys`'s `phase` spec list (config-backed, indexed).
+_add_phase_spec(sys: string, phase: string, spec: string) {
+    n = _phase_spec_count(sys, phase)
+    config.put("aeo.cmp.phasespec.${sys}.${phase}.${n}", spec)
+    config.put("aeo.cmp.phasespeccount.${sys}.${phase}", string_from_int(n + 1))
+}
+_phase_spec_count(sys: string, phase: string) -> int {
+    v = config.get("aeo.cmp.phasespeccount.${sys}.${phase}")
+    if string_length(v) == 0 {
+        return 0
+    }
+    return _to_int(v)
+}
+// get_phase_spec_count(sys, phase) / get_phase_spec_at(sys, phase, i) — the runner
+// reads these to find + run the specs declared for the active phase.
+get_phase_spec_count(sys: string, phase: string) -> int {
+    return _phase_spec_count(sys, phase)
+}
+get_phase_spec_at(sys: string, phase: string, i: int) -> string {
+    return config.get("aeo.cmp.phasespec.${sys}.${phase}.${string_from_int(i)}")
+}
 
 // Inner setters — `_ctx: ptr` is the resource name pushed by resource().
 // `${_ctx}` interpolates it back to the name string for the config key.
