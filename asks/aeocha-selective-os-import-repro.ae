@@ -1,0 +1,12 @@
+// Minimal failing repro for asks/aeocha-selective-os-import-shadowing.md
+// Build (clean cache): rm -rf ~/.aether/cache && \
+//   ae build asks/aeocha-selective-os-import-repro.ae -o /tmp/r --lib lib --lib ../aeocha
+// WITH the selective line below -> error E0301 Undefined 'os.now_monotonic_ns' (from INSIDE aeocha)
+// DELETE the selective line     -> Built OK
+// `getenv` is never called — merely importing it selectively poisons qualified os.* in aeocha.
+import aeocha
+import std.os (getenv)          // <-- delete this line and it builds
+main() {
+    fw = aeocha.init()
+    aeocha.run_summary(fw)
+}
