@@ -1,0 +1,82 @@
+// examples/checks/windows_suite.spec.ae — the POST-DEPLOY suite for
+// silly_addition_windows. Declared by `suite(...)` in that example; run by
+// `aeo suite examples/silly_addition_windows.ae` AFTER the tree is up. aeo TEARS
+// DOWN once the suite finishes (the CI shape).
+//
+//   sh test/run-spec.sh examples/checks/windows_suite.spec.ae
+//
+// SCOPE NOTE: the original live probe read each container's hostname via
+// `aeo exec db hostname` to prove a contained, running Linux node inside WSL
+// (podman sets the container hostname to the container name). A spec is its OWN
+// process and can't drive `aeo exec` against the runner's live tree, so the live
+// containment behaviour is proven by the itest driver (the windows/WSL tier), not
+// here. This suite therefore re-asserts the resolved DATA MODEL — the same shape
+// the deployed tree was stood up from — as the post-deploy gate.
+
+import aeocha
+import compose (system, windows)
+import compose (image, command, health, depends, wsl_distro)
+import compose (get_image, get_command, get_depends, describe_tree)
+import std.os          // WHOLE (not selective): a selective `import std.os (getenv)`
+                       // rebinds the `os` namespace and breaks aeocha's qualified
+                       // os.* calls. See asks/aeocha-selective-os-import-shadowing.md.
+import std.string (string_length, string_concat)
+import std.string   // bare: inlined aeocha calls bare exports unqualified
+
+_image() -> string {
+    v = os.getenv("AEO_WIN_IMAGE")
+    if string_length(v) == 0 {
+        return "docker.io/library/alpine:3.21"
+    }
+    return v
+}
+
+_distro() -> string {
+    v = os.getenv("AEO_WSL_DISTRO")
+    if string_length(v) == 0 {
+        return "Ubuntu"
+    }
+    return v
+}
+
+_declare() {
+    system("silly_addition_windows") {
+        db = windows("db") {
+            image(_image())
+            wsl_distro(_distro())
+            command("sleep 600")
+            health("true")
+        }
+        app = windows("app") {
+            image(_image())
+            wsl_distro(_distro())
+            command("sleep 600")
+            health("true")
+            depends("db")
+        }
+    }
+}
+
+main() {
+    _declare()
+    fw = aeocha.init()
+
+    aeocha.describe(fw, "silly_addition_windows — post-deploy suite") {
+        aeocha.it("the deployed tree matches the declared containment shape") callback {
+            img = _image()
+            want = string_concat(string_concat(
+                "system silly_addition_windows:\n",
+                "  windows db [command=sleep 600, image=${img}]\n"),
+                "  windows app [command=sleep 600, image=${img}] -> db")
+            aeocha.assert_str_eq(describe_tree(), want, "resolved windows tree snapshot")
+        }
+        aeocha.it("both run a long-lived payload; app depends on db") callback {
+            // live containment (each container under its OWN hostname inside WSL) is
+            // proven by the windows/WSL itest driver, not from this separate process.
+            aeocha.assert_str_eq(get_command("db"), "sleep 600", "db payload")
+            aeocha.assert_str_eq(get_depends("app"), "db", "app ◄ db")
+        }
+    }
+
+    aeocha.run_summary(fw)
+}

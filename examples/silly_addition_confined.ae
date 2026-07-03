@@ -23,17 +23,21 @@
 // here is to SHOWCASE confinement rendering + enforcement (fork-bomb refused, no
 // egress), not the cache round-trip (silly_addition_containers.ae proves that).
 //
-// SIBLING NOTE: self-contained by design. Do NOT factor the scaffold out.
+// This file is a PURE COMPOSITION — orchestration only. Config IS code, and the
+// code here is the DECLARATION: nodes, confinement, and the spec files that verify
+// it. It carries NO application source and NO test bodies inline — the /add app is
+// a prebuilt image (built in examples/silly_addition_app/), and the checks are an
+// external aeocha spec named by check().
+//
+// `aeo` is the executor:
+//   aeo up    examples/silly_addition_confined.ae   deploy (dependency-ordered)
+//   aeo check examples/silly_addition_confined.ae   run check() specs, no deploy
+//   aeo down  examples/silly_addition_confined.ae   teardown (reverse)
 
-import aeocha
 import compose (system, container)
-import compose (image, entrypoint, expose, health, depends)
+import compose (image, expose, health, depends)
 import compose (limit, limit_mem, limit_maxproc, constrain, grant_fd, deny_egress)
-import compose (get_image, get_rctl, get_constraints, get_netpolicy, describe_tree)
-import std.string (string_length, string_from_int, string_concat, string_contains)
-import std.string   // bare: inlined aeocha calls bare exports unqualified
-import std.os (getenv, run_capture)
-import std.list
+import compose (check)
 
 exports ( aeo_orchestration )
 
@@ -54,20 +58,11 @@ aeo_orchestration() {
             }
         }
 
-        // app — capped + cap-dropped (but allowed network: it serves).
+        // app — capped + cap-dropped (but allowed network: it serves). A PREBUILT
+        // image (source + build live in examples/silly_addition_app/; a real shop
+        // builds this in CI and the composition just references the tag).
         app = container("app") {
-            entrypoint(<<PY
-                import http.server as h
-                class A(h.BaseHTTPRequestHandler):
-                    def do_GET(self):
-                        p = self.path.strip("/").split("/")
-                        try: b = str(int(p[1]) + int(p[2]))
-                        except: b = "err"
-                        self.send_response(200); self.end_headers(); self.wfile.write(b.encode())
-                    def log_message(self, *a): pass
-                h.HTTPServer(("0.0.0.0", 8080), A).serve_forever()
-PY
-            )
+            image("localhost/aeo-examples/silly-add:latest")
             expose(8080)
             health("python -c \"import urllib.request as u; u.urlopen('http://localhost:8080/add/0/0').read()\"")
             limit("app") {
@@ -79,84 +74,9 @@ PY
             }
             depends("db")
         }
+
+        // ---- declared verification (external spec; aeo runs it per phase) ----
+        // check: confinement data-model assertions, no deploy, runs anywhere/instant.
+        check("examples/checks/confined_model.spec.ae")
     }
-}
-
-run_aeo(mode: string) -> string {
-    aeo_orchestration()
-    match (mode) {
-        "check" -> { return _mode_check() }
-        "up"    -> { return _mode_up() }
-        _       -> { return "aeo: unknown AEO_MODE '${mode}' (check|up)" }
-    }
-}
-
-_mode_check() -> string {
-    fw = aeocha.init()
-    aeocha.describe(fw, "confined containers: db (3 axes) <- app (2 axes)") {
-
-        aeocha.describe("confinement is declared (data model)") {
-            aeocha.it("db declares limit caps, a constrain block, and deny_egress") callback {
-                aeocha.assert_str_eq(get_rctl("db"), "memoryuse=256m, maxproc=32", "db limit{} caps")
-                // constrain block recorded + netpolicy has deny_egress.
-                aeocha.assert_true(string_length(get_constraints("db")) > 0, "db is constrained")
-                aeocha.assert_true(_has(get_netpolicy("db"), "egress:DENY-ALL"), "db deny_egress (no outbound)")
-            }
-            aeocha.it("app is capped + constrained (but may serve)") callback {
-                aeocha.assert_str_eq(get_rctl("app"), "memoryuse=256m, maxproc=64", "app limit{} caps")
-                aeocha.assert_true(string_length(get_constraints("app")) > 0, "app is constrained")
-                aeocha.assert_str_eq(_has_s(get_netpolicy("app"), "egress:DENY-ALL"), "0", "app NOT deny_egress (serves)")
-            }
-        }
-    }
-    aeocha.run_summary(fw)
-    return "check: confinement data-model assertions complete"
-}
-
-_mode_up() -> string {
-    rc = _aeo_up()
-    if rc != 0 {
-        return "up: FAILED (aeo up rc=${string_from_int(rc)})"
-    }
-    return "up: confined containers stood up (capped + cap-dropped + db network-isolated)"
-}
-
-main() {
-    m = getenv("AEO_MODE")
-    if string_length(m) == 0 {
-        m = "check"
-    }
-    println(run_aeo(m))
-}
-
-// ---- helpers ----
-_has(s: string, sub: string) -> int {
-    return string_contains(s, sub)
-}
-_has_s(s: string, sub: string) -> string {
-    return string_from_int(string_contains(s, sub))
-}
-
-_aeo_up() -> int {
-    av = list_new()
-    list_add(av, "-c")
-    list_add(av, "AEO_HOME=${_aeo_home()} ${_aeo_bin()} up ${_dsl()}")
-    out, status, err = run_capture("/bin/sh", av, null)
-    list_free(av)
-    return status
-}
-_aeo_bin() -> string {
-    b = getenv("AEO")
-    if string_length(b) == 0 { return "/tmp/aeo" }
-    return b
-}
-_aeo_home() -> string {
-    h = getenv("AEO_HOME")
-    if string_length(h) == 0 { return string_concat(getenv("HOME"), "/aeo") }
-    return h
-}
-_dsl() -> string {
-    d = getenv("AEO_DSL")
-    if string_length(d) == 0 { return "examples/silly_addition_confined.ae" }
-    return d
 }

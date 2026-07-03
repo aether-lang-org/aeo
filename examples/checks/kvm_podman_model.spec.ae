@@ -1,0 +1,96 @@
+// examples/checks/kvm_podman_model.spec.ae — the DATA-MODEL check for the
+// silly_addition_kvm_podman composition. Declared by `check(...)` in that example;
+// run by `aeo check examples/silly_addition_kvm_podman.ae` (no deploy, runs
+// anywhere). It re-declares the composition (a spec is its own process, so it can't
+// inherit the runner's in-memory tree) and asserts the resolved model.
+//
+//   sh test/run-spec.sh examples/checks/kvm_podman_model.spec.ae
+//
+// This is the aeb pattern: the composition is a pure declaration; its assertions
+// live alongside in a real spec you can also run standalone.
+
+import aeocha
+import compose (system, kvm_vm, container)
+import compose (cpus, memory, image, nic, expose, health, depends, env)
+import compose (get_image, get_expose, get_depends, get_host, describe_tree)
+import std.os          // WHOLE (not selective): a selective `import std.os (getenv)`
+                       // rebinds the `os` namespace to only that name and breaks
+                       // aeocha's qualified os.now_monotonic_ns() calls. See
+                       // asks/aeocha-selective-os-import-shadowing.md.
+import std.string (string_length, string_concat)
+import std.string   // bare: inlined aeocha calls bare exports unqualified
+
+// The image helpers track the SAME env the example uses, so the snapshot follows
+// AEO_DB_IMAGE / AEO_APP_IMAGE exactly as the runner's `check` mode did.
+_db_image() -> string {
+    v = os.getenv("AEO_DB_IMAGE")
+    if string_length(v) == 0 {
+        return "/var/lib/aeo/db.qcow2"
+    }
+    return v
+}
+_app_image() -> string {
+    v = os.getenv("AEO_APP_IMAGE")
+    if string_length(v) == 0 {
+        return "/var/lib/aeo/app.qcow2"
+    }
+    return v
+}
+
+// The SAME declaration the example carries. Kept in sync with
+// examples/silly_addition_kvm_podman.ae (the model assertion is exactly this).
+_declare() {
+    system("silly_addition_kvm_podman") {
+        db_vm = kvm_vm("db_vm") {
+            cpus(2)
+            memory("2G")
+            image(_db_image())
+            nic("tap0")
+            db = container("db") {
+                image("docker.io/library/redis:alpine")
+                expose(6379)
+                health("redis-cli ping")
+            }
+        }
+        app_vm = kvm_vm("app_vm") {
+            cpus(2)
+            memory("2G")
+            image(_app_image())
+            nic("tap1")
+            app = container("app") {
+                image("localhost/aeo-examples/silly-add:latest")
+                expose(8080)
+                env("REDIS_HOST", "db")
+                health("curl -fsS http://localhost:8080/add/0/0")
+                depends("db")
+            }
+        }
+    }
+}
+
+main() {
+    _declare()
+    fw = aeocha.init()
+
+    aeocha.describe(fw, "silly_addition_kvm_podman — data model") {
+        aeocha.it("resolves to two KVM VMs, each with a container inside") callback {
+            d = _db_image()
+            a = _app_image()
+            ln1 = "system silly_addition_kvm_podman:\n"
+            ln2 = "  kvm db_vm [image=${d}]\n"
+            ln3 = "    container db [image=docker.io/library/redis:alpine, expose=6379]\n"
+            ln4 = "  kvm app_vm [image=${a}]\n"
+            ln5 = "    container app [image=localhost/aeo-examples/silly-add:latest, expose=8080] -> db"
+            want = string_concat(string_concat(string_concat(ln1, ln2), string_concat(ln3, ln4)), ln5)
+            aeocha.assert_str_eq(describe_tree(), want, "resolved kvm+podman tree snapshot")
+        }
+
+        aeocha.it("each container is nested INSIDE its own VM (the host edge)") callback {
+            aeocha.assert_str_eq(get_host("db"), "db_vm", "db lives inside db_vm")
+            aeocha.assert_str_eq(get_host("app"), "app_vm", "app lives inside app_vm")
+            aeocha.assert_str_eq(get_depends("app"), "db", "app ◄ db (cross-VM by name)")
+        }
+    }
+
+    aeocha.run_summary(fw)
+}

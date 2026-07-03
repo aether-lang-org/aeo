@@ -21,18 +21,23 @@
 // check/up resolve + boot regardless; the in-guest container step needs that
 // prepared guest. Image paths are swappable via AEO_DB_IMAGE / AEO_APP_IMAGE.
 //
-// SIBLING NOTE: shares the mode scaffold with the other demos by DESIGN — these
-// are deliberately SELF-CONTAINED. Do NOT factor the shared scaffold out.
+// This file is a PURE COMPOSITION — orchestration only. Config IS code, and the
+// code here is the DECLARATION: nodes, dependencies, and the spec files that
+// verify it. It carries NO application source and NO test bodies inline — the
+// /add app is a prebuilt image (built in examples/silly_addition_app/), and the
+// checks are external aeocha specs named by check()/suite().
+//
+// `aeo` is the executor, exactly as `aeb x/.build.ae` runs a build declaration:
+//   aeo up    examples/silly_addition_kvm_podman.ae   deploy (dependency-ordered)
+//   aeo check examples/silly_addition_kvm_podman.ae   run check() specs, no deploy
+//   aeo suite examples/silly_addition_kvm_podman.ae   deploy + suite() specs, tear down
+//   aeo down  examples/silly_addition_kvm_podman.ae   teardown (reverse)
 
-import aeocha
 import compose (system, kvm_vm, container)
-import compose (cpus, memory, image, nic, entrypoint, base, expose, health, depends)
-import compose (get_image, get_expose, get_depends, get_host, describe_tree)
-import std.string (string_length, string_from_int, string_concat)
-import std.string   // bare too: inlined aeocha calls bare exports unqualified
-import std.os (getenv, run_capture)
-import std.list
-import ipam
+import compose (cpus, memory, image, nic, expose, health, depends, env)
+import compose (check, suite)
+import std.string (string_length)
+import std.os (getenv)
 
 exports ( aeo_orchestration )
 
@@ -56,155 +61,32 @@ aeo_orchestration() {
         }
 
         // app VM + the /add service container (reaches redis cross-VM via
-        // REDIS_HOST, resolved to db_vm's address at deploy time).
+        // REDIS_HOST, resolved to db_vm's address at deploy time). The /add
+        // service is a PREBUILT image (source + build live in
+        // examples/silly_addition_app/) — no application source inline.
         app_vm = kvm_vm("app_vm") {
             cpus(2)
             memory("2G")
             image(_app_image())
             nic("tap1")
             app = container("app") {
-                entrypoint(<<PY
-                    import http.server as h, socket, os
-                    RHOST = os.environ.get("REDIS_HOST", "127.0.0.1")
-                    def rcmd(*a):
-                        s = socket.create_connection((RHOST, 6379), 1)
-                        s.sendall(("*%d\r\n" % len(a) + "".join("$%d\r\n%s\r\n" % (len(x), x) for x in a)).encode())
-                        r = s.recv(4096); s.close(); return r
-                    class A(h.BaseHTTPRequestHandler):
-                        def do_GET(self):
-                            p = self.path.strip("/").split("/")
-                            try:
-                                k = "add:%s:%s" % (p[1], p[2]); c = rcmd("GET", k)
-                                if c[:1] == b"$" and c[1:2] != b"-": b = c.split(b"\r\n")[1].decode()
-                                else: b = str(int(p[1]) + int(p[2])); rcmd("SET", k, b)
-                            except: b = "err"
-                            self.send_response(200); self.end_headers(); self.wfile.write(b.encode())
-                        def log_message(self, *a): pass
-                    h.HTTPServer(("0.0.0.0", 8080), A).serve_forever()
-PY
-                )
+                image("localhost/aeo-examples/silly-add:latest")
                 expose(8080)
+                env("REDIS_HOST", "db")        // reach the db container by name
                 health("curl -fsS http://localhost:8080/add/0/0")
                 depends("db")    // cross-VM edge: 'db' is in db_vm
             }
         }
+
+        // ---- declared verification (external specs; aeo runs them per phase) ----
+        // check: data-model assertions, no deploy, runs anywhere/instant.
+        check("examples/checks/kvm_podman_model.spec.ae")
+        // suite: fuller post-deploy checks (HTTP), then teardown.
+        suite("examples/checks/kvm_podman_suite.spec.ae")
     }
-}
-
-// ---- MODES (same rich entrypoint shape as the siblings) ----
-run_aeo(mode: string) -> string {
-    aeo_orchestration()
-    match (mode) {
-        "check" -> { return _mode_check() }
-        "up"    -> { return _mode_up() }
-        "suite" -> { return _mode_suite() }
-        _       -> { return "aeo: unknown AEO_MODE '${mode}' (check|up|suite)" }
-    }
-}
-
-// CHECK — data-model assertions, in-process, no deploy (the default).
-_mode_check() -> string {
-    fw = aeocha.init()
-
-    aeocha.describe(fw, "kvm+podman: VM{db redis} ; VM{app /add} -> db") {
-
-        aeocha.describe("declaration (data model)") {
-            aeocha.it("resolves to two KVM VMs, each with a container inside") callback {
-                d = _db_image()
-                a = _app_image()
-                ln1 = "system silly_addition_kvm_podman:\n"
-                ln2 = "  kvm db_vm [image=${d}]\n"
-                ln3 = "    container db [image=docker.io/library/redis:alpine, expose=6379]\n"
-                ln4 = "  kvm app_vm [image=${a}]\n"
-                ln5 = "    container app [entrypoint(docker.io/library/python:3-alpine), expose=8080] -> db"
-                want = string_concat(string_concat(string_concat(ln1, ln2), string_concat(ln3, ln4)), ln5)
-                aeocha.assert_str_eq(describe_tree(), want, "resolved kvm+podman tree snapshot")
-            }
-
-            aeocha.it("each container is nested INSIDE its own VM (the host edge)") callback {
-                aeocha.assert_str_eq(get_host("db"), "db_vm", "db lives inside db_vm")
-                aeocha.assert_str_eq(get_host("app"), "app_vm", "app lives inside app_vm")
-                aeocha.assert_str_eq(get_depends("app"), "db", "app ◄ db (cross-VM by name)")
-            }
-        }
-    }
-
-    aeocha.run_summary(fw)
-    return "check: kvm+podman data-model assertions complete"
-}
-
-_mode_up() -> string {
-    rc = _aeo_up()
-    if rc != 0 {
-        return "up: FAILED (aeo up rc=${string_from_int(rc)})"
-    }
-    return "up: kvm+podman stood up + left running (no checks)"
-}
-
-_mode_suite() -> string {
-    rc = _aeo_up()
-    if rc != 0 {
-        return "suite: deploy FAILED (rc=${string_from_int(rc)})"
-    }
-    fw = aeocha.init()
-    aeocha.describe(fw, "live kvm+podman (HTTP)") {
-        aeocha.it("the /add service answers over HTTP") callback {
-            base = _base()
-            aeocha.expect_http_get_body_eq("${base}/add/2/2", "4", "2 + 2 = 4")
-            aeocha.expect_http_get_body_eq("${base}/add/40/2", "42", "40 + 2 = 42")
-        }
-    }
-    aeocha.run_summary(fw)
-    _aeo_down()
-    return "suite: live kvm+podman checks ran, system TORN DOWN"
-}
-
-main() {
-    m = getenv("AEO_MODE")
-    if string_length(m) == 0 {
-        m = "check"
-    }
-    println(run_aeo(m))
 }
 
 // ---- helpers ----
-
-_aeo_up() -> int {
-    av = list_new()
-    list_add(av, "-c")
-    list_add(av, "AEO_HOME=${_aeo_home()} ${_aeo_bin()} up ${_dsl()}")
-    out, status, err = run_capture("/bin/sh", av, null)
-    list_free(av)
-    return status
-}
-_aeo_down() {
-    av = list_new()
-    list_add(av, "-c")
-    list_add(av, "AEO_HOME=${_aeo_home()} ${_aeo_bin()} down ${_dsl()}")
-    out, status, err = run_capture("/bin/sh", av, null)
-    list_free(av)
-}
-_aeo_bin() -> string {
-    b = getenv("AEO")
-    if string_length(b) == 0 {
-        return "/tmp/aeo"
-    }
-    return b
-}
-_aeo_home() -> string {
-    h = getenv("AEO_HOME")
-    if string_length(h) == 0 {
-        return string_concat(getenv("HOME"), "/aeo")
-    }
-    return h
-}
-_dsl() -> string {
-    d = getenv("AEO_DSL")
-    if string_length(d) == 0 {
-        return "examples/silly_addition_kvm_podman.ae"
-    }
-    return d
-}
 
 _db_image() -> string {
     v = getenv("AEO_DB_IMAGE")
@@ -219,12 +101,4 @@ _app_image() -> string {
         return "/var/lib/aeo/app.qcow2"
     }
     return v
-}
-
-// app_vm's address for the HTTP probes — its ipam binding, AEO_GUEST_IP override.
-_ip() -> string {
-    return ipam.resolve_ip_or_env("silly_addition_kvm_podman", "app_vm")
-}
-_base() -> string {
-    return "http://${_ip()}:8080"
 }

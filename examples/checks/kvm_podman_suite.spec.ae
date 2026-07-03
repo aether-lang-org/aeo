@@ -1,0 +1,105 @@
+// examples/checks/kvm_podman_suite.spec.ae — the POST-DEPLOY suite for
+// silly_addition_kvm_podman. Declared by `suite(...)` in that example; run by
+// `aeo suite examples/silly_addition_kvm_podman.ae` AFTER both KVM VMs are booted and
+// each guest's podman container is up. aeo TEARS DOWN once the suite finishes (the
+// CI shape).
+//
+//   sh test/run-spec.sh examples/checks/kvm_podman_suite.spec.ae
+//
+// HONEST scope: the live /add probe here would have to reach the app CONTAINER
+// nested inside app_vm — aeo's nested path ssh'es into the guest and runs podman
+// (driver_vm.guest_container_up), and the guest's published :8080 sits behind the
+// VM's tap address (resolved by ipam at deploy time). A spec is its OWN process and
+// can't re-derive that live guest endpoint reliably, so there is no in-guest HTTP
+// probe here — the live arithmetic + cross-VM cache path is exercised by the itest
+// driver (driver_vm). This suite therefore RE-ASSERTS the resolved data model (same
+// as the model check), documenting that live containment is proven by the itest
+// driver, not from here.
+
+import aeocha
+import compose (system, kvm_vm, container)
+import compose (cpus, memory, image, nic, expose, health, depends, env)
+import compose (get_image, get_expose, get_depends, get_host, describe_tree)
+import std.os          // WHOLE (not selective): a selective `import std.os (getenv)`
+                       // rebinds the `os` namespace to only that name and breaks
+                       // aeocha's qualified os.now_monotonic_ns() calls. See
+                       // asks/aeocha-selective-os-import-shadowing.md.
+import std.string (string_length, string_concat)
+import std.string   // bare: inlined aeocha calls bare exports unqualified
+
+// The image helpers track the SAME env the example uses.
+_db_image() -> string {
+    v = os.getenv("AEO_DB_IMAGE")
+    if string_length(v) == 0 {
+        return "/var/lib/aeo/db.qcow2"
+    }
+    return v
+}
+_app_image() -> string {
+    v = os.getenv("AEO_APP_IMAGE")
+    if string_length(v) == 0 {
+        return "/var/lib/aeo/app.qcow2"
+    }
+    return v
+}
+
+// The SAME declaration the example carries. Kept in sync with
+// examples/silly_addition_kvm_podman.ae.
+_declare() {
+    system("silly_addition_kvm_podman") {
+        db_vm = kvm_vm("db_vm") {
+            cpus(2)
+            memory("2G")
+            image(_db_image())
+            nic("tap0")
+            db = container("db") {
+                image("docker.io/library/redis:alpine")
+                expose(6379)
+                health("redis-cli ping")
+            }
+        }
+        app_vm = kvm_vm("app_vm") {
+            cpus(2)
+            memory("2G")
+            image(_app_image())
+            nic("tap1")
+            app = container("app") {
+                image("localhost/aeo-examples/silly-add:latest")
+                expose(8080)
+                env("REDIS_HOST", "db")
+                health("curl -fsS http://localhost:8080/add/0/0")
+                depends("db")
+            }
+        }
+    }
+}
+
+main() {
+    _declare()
+    fw = aeocha.init()
+
+    aeocha.describe(fw, "silly_addition_kvm_podman — post-deploy suite") {
+        // Live in-guest arithmetic (the app container answering /add over HTTP,
+        // reaching redis cross-VM) is proven by the driver_vm itests; a separate
+        // spec process can't re-derive the nested guest endpoint. Here we re-assert
+        // the tree deployed as declared.
+        aeocha.it("two KVM VMs, each with its container (booted + torn down live by the itest driver)") callback {
+            d = _db_image()
+            a = _app_image()
+            ln1 = "system silly_addition_kvm_podman:\n"
+            ln2 = "  kvm db_vm [image=${d}]\n"
+            ln3 = "    container db [image=docker.io/library/redis:alpine, expose=6379]\n"
+            ln4 = "  kvm app_vm [image=${a}]\n"
+            ln5 = "    container app [image=localhost/aeo-examples/silly-add:latest, expose=8080] -> db"
+            want = string_concat(string_concat(string_concat(ln1, ln2), string_concat(ln3, ln4)), ln5)
+            aeocha.assert_str_eq(describe_tree(), want, "resolved kvm+podman tree snapshot")
+        }
+        aeocha.it("each container is nested inside its own VM; app depends on db") callback {
+            aeocha.assert_str_eq(get_host("db"), "db_vm", "db lives inside db_vm")
+            aeocha.assert_str_eq(get_host("app"), "app_vm", "app lives inside app_vm")
+            aeocha.assert_str_eq(get_depends("app"), "db", "app ◄ db (cross-VM by name)")
+        }
+    }
+
+    aeocha.run_summary(fw)
+}

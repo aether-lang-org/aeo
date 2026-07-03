@@ -1,0 +1,79 @@
+// examples/checks/nspawn_suite.spec.ae — the POST-DEPLOY suite for
+// silly_addition_nspawn. Declared by `suite(...)` in that example; run by
+// `aeo suite examples/silly_addition_nspawn.ae` AFTER the containers are up. aeo
+// TEARS DOWN once the suite finishes (the CI shape).
+//
+//   sh test/run-spec.sh examples/checks/nspawn_suite.spec.ae
+//
+// The original in-file suite ran a LIVE CONTAINMENT probe: `aeo exec db hostname`
+// and asserted it returned "db" (nspawn/machined sets each container's hostname
+// to its machine name — proof of a contained, running system container, not the
+// host). A spec is its OWN process and cannot drive `aeo exec` into the runner's
+// deployed tree, so that live containment is proven by the itest driver
+// (test/spec_nspawn.ae + the driver_nspawn integration path), not here. This
+// suite therefore re-asserts the resolved DATA MODEL post-deploy — the same
+// db<-app shape the model check asserts — as a standalone, always-runnable proof.
+
+import aeocha
+import compose (system, nspawn)
+import compose (image, command, health, depends)
+import compose (get_command, get_depends, describe_tree)
+import std.os          // WHOLE (not selective): a selective `import std.os (getenv)`
+                       // rebinds the `os` namespace to only that name and breaks
+                       // aeocha's qualified os.now_monotonic_ns() calls. See
+                       // asks/aeocha-selective-os-import-shadowing.md.
+import std.string (string_length, string_concat)
+import std.string   // bare: inlined aeocha calls bare exports unqualified
+
+// the rootfs directory for a node. AEO_NSPAWN_ROOTDIR overrides the base
+// (default /var/lib/machines, machined's conventional home).
+_rootfs(node: string) -> string {
+    base = os.getenv("AEO_NSPAWN_ROOTDIR")
+    if string_length(base) == 0 {
+        base = "/var/lib/machines"
+    }
+    return "${base}/${node}"
+}
+
+// The SAME declaration the example carries. Kept in sync with
+// examples/silly_addition_nspawn.ae.
+_declare() {
+    system("silly_addition_nspawn") {
+        db = nspawn("db") {
+            image(_rootfs("db"))
+            command("sleep 600")
+            health("true")
+        }
+        app = nspawn("app") {
+            image(_rootfs("app"))
+            command("sleep 600")
+            health("true")
+            depends("db")
+        }
+    }
+}
+
+main() {
+    _declare()
+    fw = aeocha.init()
+
+    aeocha.describe(fw, "silly_addition_nspawn — post-deploy suite") {
+        // Live containment (each container its OWN hostname via machined) is
+        // proven by the itest driver; here we re-assert the deployed data model.
+        aeocha.it("the deployed tree is two nspawn containers with a dependency edge") callback {
+            rdb = _rootfs("db")
+            rapp = _rootfs("app")
+            want = string_concat(string_concat(
+                "system silly_addition_nspawn:\n",
+                "  nspawn db [command=sleep 600, image=${rdb}]\n"),
+                "  nspawn app [command=sleep 600, image=${rapp}] -> db")
+            aeocha.assert_str_eq(describe_tree(), want, "resolved nspawn tree snapshot")
+        }
+        aeocha.it("both run a long-lived payload; app depends on db") callback {
+            aeocha.assert_str_eq(get_command("db"), "sleep 600", "db payload")
+            aeocha.assert_str_eq(get_depends("app"), "db", "app ◄ db")
+        }
+    }
+
+    aeocha.run_summary(fw)
+}

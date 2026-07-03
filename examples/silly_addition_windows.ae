@@ -29,17 +29,22 @@
 // 2.7.10 + podman 5.7 ran a container (see docs/aeo-agent-windows-pipeline.md).
 // wsl_distro() selects the distro ("" = WSL's default distro).
 //
-// SIBLING NOTE: shares the mode scaffold with the other demos by DESIGN — these
-// are deliberately SELF-CONTAINED. Do NOT factor the shared scaffold out.
+// This file is a PURE COMPOSITION — orchestration only. Config IS code, and the
+// code here is the DECLARATION: nodes, dependencies, and the spec files that verify
+// it. It carries NO application source and NO test bodies inline — the checks are
+// external aeocha specs named by check()/suite().
+//
+// `aeo` is the executor, exactly as `aeb x/.build.ae` runs a build declaration:
+//   aeo up    examples/silly_addition_windows.ae   deploy (dependency-ordered)
+//   aeo check examples/silly_addition_windows.ae   run check() specs, no deploy
+//   aeo suite examples/silly_addition_windows.ae   deploy + suite() specs, tear down
+//   aeo down  examples/silly_addition_windows.ae   teardown (reverse)
 
-import aeocha
 import compose (system, windows)
 import compose (image, command, health, depends, wsl_distro)
-import compose (get_image, get_command, get_depends, describe_tree)
-import std.string (string_length, string_from_int, string_concat, string_char_at, string_substring)
-import std.string   // bare too: inlined aeocha calls bare exports unqualified
-import std.os (getenv, run_capture)
-import std.list
+import compose (check, suite)
+import std.string (string_length)
+import std.os (getenv)
 
 exports ( aeo_orchestration )
 
@@ -62,86 +67,13 @@ aeo_orchestration() {
             health("true")
             depends("db")              // app starts after db (dependency-ordered)
         }
+
+        // ---- declared verification (external specs; aeo runs them per phase) ----
+        // check: data-model assertions, no deploy, runs anywhere/instant.
+        check("examples/checks/windows_model.spec.ae")
+        // suite: post-deploy containment probe, then teardown (the CI shape).
+        suite("examples/checks/windows_suite.spec.ae")
     }
-}
-
-// ---- MODES ----
-//   check  — (DEFAULT) data-model assertions only; no deploy. Runs anywhere.
-//   up     — `aeo up`, leave the containers STANDING. No checks.
-//   suite  — `aeo up` + a live containment probe, then TEAR DOWN.
-run_aeo(mode: string) -> string {
-    aeo_orchestration()
-    match (mode) {
-        "check" -> { return _mode_check() }
-        "up"    -> { return _mode_up() }
-        "suite" -> { return _mode_suite() }
-        _       -> { return "aeo: unknown AEO_MODE '${mode}' (check|up|suite)" }
-    }
-}
-
-// CHECK — data-model assertions, in-process, no deploy (the default).
-_mode_check() -> string {
-    fw = aeocha.init()
-
-    aeocha.describe(fw, "windows (podman-through-WSL): db <- app") {
-
-        aeocha.describe("declaration (data model)") {
-            aeocha.it("resolves to two windows containers with a dependency edge") callback {
-                img = _image()
-                want = string_concat(string_concat(
-                    "system silly_addition_windows:\n",
-                    "  windows db [command=sleep 600, image=${img}]\n"),
-                    "  windows app [command=sleep 600, image=${img}] -> db")
-                aeocha.assert_str_eq(describe_tree(), want, "resolved windows tree snapshot")
-            }
-
-            aeocha.it("both run a long-lived payload; app depends on db") callback {
-                aeocha.assert_str_eq(get_command("db"), "sleep 600", "db payload")
-                aeocha.assert_str_eq(get_depends("app"), "db", "app ◄ db")
-            }
-        }
-    }
-
-    aeocha.run_summary(fw)
-    return "check: windows data-model assertions complete"
-}
-
-// UP — deploy the containers, LEAVE THEM STANDING. No checks.
-_mode_up() -> string {
-    rc = _aeo_up()
-    if rc != 0 {
-        return "up: FAILED (aeo up rc=${string_from_int(rc)})"
-    }
-    return "up: windows/WSL containers stood up + left running (no checks)"
-}
-
-// SUITE — deploy, a live CONTAINMENT probe (each container has its OWN hostname,
-// set by podman to the container name), then TEAR DOWN.
-_mode_suite() -> string {
-    rc = _aeo_up()
-    if rc != 0 {
-        return "suite: deploy FAILED (rc=${string_from_int(rc)})"
-    }
-    fw = aeocha.init()
-    aeocha.describe(fw, "live windows/WSL (containment)") {
-        aeocha.it("each container runs under its OWN hostname (podman in WSL)") callback {
-            // podman sets the container hostname to the container name — reading it
-            // back proves a contained, running Linux node inside WSL (not the host).
-            hn = _chomp(_exec("db", "hostname"))
-            aeocha.assert_str_eq(hn, "db", "db is a contained container (hostname '${hn}')")
-        }
-    }
-    aeocha.run_summary(fw)
-    _aeo_down()
-    return "suite: live containment probe ran, containers TORN DOWN"
-}
-
-main() {
-    m = getenv("AEO_MODE")
-    if string_length(m) == 0 {
-        m = "check"
-    }
-    println(run_aeo(m))
 }
 
 // ---- helpers ----
@@ -164,57 +96,4 @@ _distro() -> string {
         return "Ubuntu"
     }
     return v
-}
-
-_aeo_up() -> int {
-    av = list_new()
-    list_add(av, "-c")
-    list_add(av, "AEO_HOME=${_aeo_home()} ${_aeo_bin()} up ${_dsl()}")
-    out, status, err = run_capture("/bin/sh", av, null)
-    list_free(av)
-    return status
-}
-_aeo_down() {
-    av = list_new()
-    list_add(av, "-c")
-    list_add(av, "AEO_HOME=${_aeo_home()} ${_aeo_bin()} down ${_dsl()}")
-    out, status, err = run_capture("/bin/sh", av, null)
-    list_free(av)
-}
-// `aeo exec <dsl> <node> <cmd>` — capture a command's stdout from inside a node.
-_exec(node: string, cmd: string) -> string {
-    av = list_new()
-    list_add(av, "-c")
-    list_add(av, "AEO_HOME=${_aeo_home()} ${_aeo_bin()} exec ${_dsl()} ${node} ${cmd}")
-    out, status, err = run_capture("/bin/sh", av, null)
-    list_free(av)
-    return out
-}
-_aeo_bin() -> string {
-    b = getenv("AEO")
-    if string_length(b) == 0 {
-        return "/tmp/aeo"
-    }
-    return b
-}
-_aeo_home() -> string {
-    h = getenv("AEO_HOME")
-    if string_length(h) == 0 {
-        return string_concat(getenv("HOME"), "/aeo")
-    }
-    return h
-}
-_dsl() -> string {
-    d = getenv("AEO_DSL")
-    if string_length(d) == 0 {
-        return "examples/silly_addition_windows.ae"
-    }
-    return d
-}
-// trim a trailing newline for tidy messages.
-_chomp(s: string) -> string {
-    n = string_length(s)
-    if n == 0 { return s }
-    if string_char_at(s, n - 1) == 10 { return string_substring(s, 0, n - 1) }
-    return s
 }

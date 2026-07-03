@@ -1,0 +1,41 @@
+// examples/checks/bhyve_podman_suite.spec.ae — the fuller POST-DEPLOY suite for
+// silly_addition_bhyve_podman. Declared by `suite(...)` in that example; run by
+// `aeo suite examples/silly_addition_bhyve_podman.ae` AFTER the tree is up. aeo
+// TEARS DOWN once the suite finishes (the CI shape). Fuller than smoke: more
+// arithmetic over HTTP.
+//
+//   AEO_APP_HOST=<python_vm ip> sh test/run-spec.sh examples/checks/bhyve_podman_suite.spec.ae
+//
+// NOTE on the cache-read behaviour: the original _mode_suite also poked a value
+// into the deployed redis over ssh (podman exec db redis-cli SET ...) and read it
+// back through the app to prove a cache HIT. That cross-VM ssh poke is a LIVE
+// driver operation that a separate spec process can't cleanly perform; the
+// cross-VM redis cache path is exercised by the itest driver during deploy. Here
+// the suite re-asserts the arithmetic contract over the live app's HTTP surface.
+
+import aeocha
+import std.os          // WHOLE (not selective) — see the smoke spec + the ask note
+                       // asks/aeocha-selective-os-import-shadowing.md.
+import std.string (string_length)
+import std.string   // bare: inlined aeocha calls bare exports unqualified
+
+_base() -> string {
+    h = os.getenv("AEO_APP_HOST")
+    if string_length(h) == 0 {
+        h = "localhost"
+    }
+    return "http://${h}:8080"
+}
+
+main() {
+    fw = aeocha.init()
+    aeocha.describe(fw, "silly_addition_bhyve_podman — full suite") {
+        aeocha.it("app computes arithmetic over HTTP (2+2=4, 2+3=5, 40+2=42)") callback {
+            base = _base()
+            aeocha.expect_http_get_body_eq("${base}/add/2/2", "4", "2 + 2 = 4")
+            aeocha.expect_http_get_body_eq("${base}/add/2/3", "5", "2 + 3 = 5")
+            aeocha.expect_http_get_body_eq("${base}/add/40/2", "42", "40 + 2 = 42")
+        }
+    }
+    aeocha.run_summary(fw)
+}

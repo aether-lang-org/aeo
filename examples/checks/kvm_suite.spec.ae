@@ -1,0 +1,87 @@
+// examples/checks/kvm_suite.spec.ae — the POST-DEPLOY suite for
+// silly_addition_kvm. Declared by `suite(...)` in that example; run by
+// `aeo suite examples/silly_addition_kvm.ae` AFTER the tree is up. aeo TEARS DOWN
+// once the suite finishes (the CI shape).
+//
+//   sh test/run-spec.sh examples/checks/kvm_suite.spec.ae
+//
+// LIVE-LIVENESS NOTE: the original suite verified each VM is alive by reading its
+// qemu -pidfile (kill -0 on the daemonized pid) on the deploy host. A spec runs in
+// its OWN process and can't reach the runner's per-VM pidfile state, so we DON'T
+// fake an HTTP/pidfile probe here — that live boot+liveness is proven by the kvm
+// itest driver. What this suite CAN own portably is the resolved data model, so it
+// re-asserts the same tree the model spec does (the composition is the contract).
+
+import aeocha
+import compose (system, kvm_vm)
+import compose (cpus, memory, image, nic, depends)
+import compose (get_image, get_depends, describe_tree)
+import std.os          // WHOLE (not selective) — see the model spec + the ask note
+                       // asks/aeocha-selective-os-import-shadowing.md.
+import std.string (string_length, string_concat)
+import std.string   // bare: inlined aeocha calls bare exports unqualified
+
+_declare() {
+    system("silly_addition_kvm") {
+        db_vm = kvm_vm("db_vm") {
+            cpus(2)
+            memory("2G")
+            image(_db_image())
+            nic(_nic("AEO_DB_NIC"))
+        }
+        app_vm = kvm_vm("app_vm") {
+            cpus(2)
+            memory("2G")
+            image(_app_image())
+            nic(_nic("AEO_APP_NIC"))
+            depends("db_vm")
+        }
+    }
+}
+
+_db_image() -> string {
+    v = os.getenv("AEO_DB_IMAGE")
+    if string_length(v) == 0 {
+        return "/var/lib/aeo/db.qcow2"
+    }
+    return v
+}
+_app_image() -> string {
+    v = os.getenv("AEO_APP_IMAGE")
+    if string_length(v) == 0 {
+        return "/var/lib/aeo/app.qcow2"
+    }
+    return v
+}
+_nic(key: string) -> string {
+    v = os.getenv(key)
+    if string_length(v) == 0 {
+        return ""
+    }
+    return v
+}
+
+main() {
+    _declare()
+    fw = aeocha.init()
+
+    aeocha.describe(fw, "silly_addition_kvm — post-deploy suite") {
+        // Live VM boot + qemu-pidfile liveness is proven by the kvm itest driver;
+        // from a separate spec process we re-assert the resolved model (the
+        // composition contract the deploy is expected to honour).
+        aeocha.it("resolves to two KVM VMs with a dependency edge") callback {
+            d = _db_image()
+            a = _app_image()
+            want = string_concat(string_concat(
+                "system silly_addition_kvm:\n",
+                "  kvm db_vm [image=${d}]\n"),
+                "  kvm app_vm [image=${a}] -> db_vm")
+            aeocha.assert_str_eq(describe_tree(), want, "resolved kvm tree snapshot")
+        }
+        aeocha.it("app_vm depends on db_vm (ordering edge)") callback {
+            aeocha.assert_str_eq(get_depends("app_vm"), "db_vm", "app_vm ◄ db_vm")
+        }
+    }
+
+    aeocha.run_summary(fw)
+}

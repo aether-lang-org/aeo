@@ -299,8 +299,10 @@ Don't over-engineer this into an in-process binding.
   `run_capture`, or use `list_*_raw`.
 - Don't hand-craft Aether link flags → `$(ae cflags)`.
 - Don't reinvent host detection → consume `std.capsicum.available()` etc.
-- Don't factor the per-demo mode scaffold into a shared module → demos are
-  deliberately self-contained.
+- Don't put `main()`/`AEO_MODE`/self-test scaffold in a compose example → examples
+  are PURE declarations; `aeo <phase> <file>` executes them, and verification is
+  declared via `check()`/`smoke()`/`suite()` naming external specs (like aeb's
+  `.build.ae`). (This replaced the old all-in-one AEO_MODE scaffold.)
 - Don't overclaim "live" → keep the proven-vs-modeled discipline; say which box,
   which date, what was actually run.
 

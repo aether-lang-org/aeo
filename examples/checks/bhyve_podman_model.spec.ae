@@ -1,0 +1,131 @@
+// examples/checks/bhyve_podman_model.spec.ae — the DATA-MODEL check for the
+// silly_addition_bhyve_podman composition. Declared by `check(...)` in that
+// example; run by `aeo check examples/silly_addition_bhyve_podman.ae` (no deploy,
+// runs anywhere). It re-declares the composition (a spec is its own process, so
+// it can't inherit the runner's in-memory tree) and asserts the resolved model.
+//
+//   sh test/run-spec.sh examples/checks/bhyve_podman_model.spec.ae
+//
+// This is the aeb pattern: the composition is a pure declaration; its assertions
+// live alongside in a real spec you can also run standalone.
+
+import aeocha
+import compose (system, bhyve_vm, container)
+import compose (image, cpus, memory, guest_image, network, ssh_key, health, expose, depends)
+import compose (suspend, constrain, grant_fd, egress, ingress, ingress_from, deny_egress, start)
+import compose (get_suspended, get_started, get_constraints, get_netpolicy, describe_tree)
+import std.os          // WHOLE (not selective): a selective `import std.os (getenv)`
+                       // rebinds the `os` namespace to only that name and breaks
+                       // aeocha's qualified os.now_monotonic_ns() calls. See
+                       // asks/aeocha-selective-os-import-shadowing.md.
+import std.string (string_length, string_concat)
+import std.string   // bare: inlined aeocha calls bare exports unqualified
+
+// The SAME declaration the example carries. Kept in sync with
+// examples/silly_addition_bhyve_podman.ae (the model assertion is exactly this).
+_declare() {
+    system("silly_addition_cache") {
+        db_vm = bhyve_vm("db_vm") {
+            cpus(2)
+            memory("2G")
+            guest_image(_guest_image())
+            network("dhcp")
+            ssh_key(_key_pub())
+            db = container("db") {
+                image("docker.io/library/redis:alpine")
+                expose(6379)
+                health("redis-cli ping")
+            }
+        }
+        suspend(db_vm)
+        constrain(db_vm) {
+            grant_fd("disk",    "/zroot/vm/db_vm/disk0.img", "rd,wr")
+            grant_fd("net",     "tap0", "rd,wr")
+            grant_fd("console", "nmdm-db_vm", "rd,wr")
+            ingress_from(6379, "python_vm")
+            deny_egress()
+        }
+        start(db_vm)
+
+        python_vm = bhyve_vm("python_vm") {
+            cpus(2)
+            memory("2G")
+            guest_image(_guest_image())
+            network("dhcp")
+            ssh_key(_key_pub())
+            app = container("app") {
+                image("localhost/aeo-examples/silly-add:latest")
+                expose(8080)
+                health("curl -fsS http://localhost:8080/add/0/0")
+                depends("db")
+            }
+        }
+        suspend(python_vm)
+        constrain(python_vm) {
+            grant_fd("disk",    "/zroot/vm/python_vm/disk0.img", "rd,wr")
+            grant_fd("net",     "tap1", "rd,wr")
+            grant_fd("console", "nmdm-python_vm", "rd,wr")
+            egress("db_vm", 6379)
+            ingress(8080)
+        }
+        start(python_vm)
+    }
+}
+
+// helpers the declaration calls — kept in sync with the example.
+_home() -> string { return os.getenv("HOME") }
+_key_pub() -> string  { return string_concat(_home(), "/.ssh/id_rsa.pub") }
+_guest_image() -> string {
+    g = os.getenv("AEO_GUEST_IMAGE")
+    if string_length(g) == 0 {
+        return "ubuntu-24.04-minimal+podman"
+    }
+    return g
+}
+
+main() {
+    _declare()
+    fw = aeocha.init()
+
+    aeocha.describe(fw, "silly_addition_bhyve_podman — data model") {
+        aeocha.it("resolves to two top-level VMs, each with its OWN confinement") callback {
+            // Built with ${gi} interpolation (a <<TREE heredoc is RAW — it would
+            // NOT interpolate) so the snapshot tracks AEO_GUEST_IMAGE: the check
+            // stays correct on any lib/images/ guest, not just the default.
+            gi = _guest_image()
+            ln1 = "system silly_addition_cache:\n"
+            ln2 = "  bhyve db_vm [guest=${gi}, cpus=2, mem=2G, confined: disk(/zroot/vm/db_vm/disk0.img)=rd,wr, net(tap0)=rd,wr, console(nmdm-db_vm)=rd,wr, net{ingress:6379<-python_vm, egress:DENY-ALL; deny rest}]\n"
+            ln3 = "    container db [image=docker.io/library/redis:alpine, expose=6379]\n"
+            ln4 = "  bhyve python_vm [guest=${gi}, cpus=2, mem=2G, confined: disk(/zroot/vm/python_vm/disk0.img)=rd,wr, net(tap1)=rd,wr, console(nmdm-python_vm)=rd,wr, net{egress->db_vm:6379, ingress:8080; deny rest}]\n"
+            ln5 = "    container app [image=localhost/aeo-examples/silly-add:latest, expose=8080] -> db"
+            want = string_concat(string_concat(string_concat(ln1, ln2), string_concat(ln3, ln4)), ln5)
+            aeocha.assert_str_eq(describe_tree(), want, "resolved tree snapshot")
+        }
+
+        aeocha.it("each VM's constrain block names ITS OWN VM (no floating block)") callback {
+            aeocha.assert_str_eq(get_suspended("db_vm"), "1", "db_vm suspended")
+            aeocha.assert_str_eq(get_started("db_vm"), "1", "db_vm resumed")
+            aeocha.assert_str_eq(get_constraints("db_vm"),
+                "disk(/zroot/vm/db_vm/disk0.img)=rd,wr, net(tap0)=rd,wr, console(nmdm-db_vm)=rd,wr",
+                "db_vm's own fd grants")
+            aeocha.assert_str_eq(get_suspended("python_vm"), "1", "python_vm suspended")
+            aeocha.assert_str_eq(get_constraints("python_vm"),
+                "disk(/zroot/vm/python_vm/disk0.img)=rd,wr, net(tap1)=rd,wr, console(nmdm-python_vm)=rd,wr",
+                "python_vm's own fd grants (DIFFERENT from db_vm's)")
+        }
+
+        aeocha.it("python_vm's workload-mode network is a deny-all whitelist") callback {
+            aeocha.assert_str_eq(get_netpolicy("python_vm"),
+                "egress->db_vm:6379, ingress:8080",
+                "may reach db_vm:6379 + accept 8080 — and NOTHING else")
+        }
+
+        aeocha.it("db_vm answers 6379 to python_vm ONLY, and BLOCKS all egress") callback {
+            aeocha.assert_str_eq(get_netpolicy("db_vm"),
+                "ingress:6379<-python_vm, egress:DENY-ALL",
+                "6379 from python_vm only (no 3rd VM); zero outbound")
+        }
+    }
+
+    aeocha.run_summary(fw)
+}

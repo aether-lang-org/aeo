@@ -1,0 +1,84 @@
+// examples/checks/confined_model.spec.ae — the DATA-MODEL check for the
+// silly_addition_confined composition. Declared by `check(...)` in that example;
+// run by `aeo check examples/silly_addition_confined.ae` (no deploy, runs
+// anywhere). It re-declares the composition (a spec is its own process, so it can't
+// inherit the runner's in-memory tree) and asserts the resolved CONFINEMENT model.
+//
+//   sh test/run-spec.sh examples/checks/confined_model.spec.ae
+//
+// This is the aeb pattern: the composition is a pure declaration; its assertions
+// live alongside in a real spec you can also run standalone. Unlike the plain
+// containers model spec (which snapshots describe_tree), confinement asserts the
+// three axes: limit{} caps (rctl), the constrain{} block, and netpolicy egress.
+
+import aeocha
+import compose (system, container)
+import compose (image, expose, health, depends)
+import compose (limit, limit_mem, limit_maxproc, constrain, grant_fd, deny_egress)
+import compose (get_rctl, get_constraints, get_netpolicy)
+import std.string (string_length, string_from_int, string_contains)
+import std.string   // bare: inlined aeocha calls bare exports unqualified
+
+// The SAME declaration the example carries. Kept in sync with
+// examples/silly_addition_confined.ae (the confinement assertion is exactly this).
+_declare() {
+    system("silly_addition_confined") {
+        db = container("db") {
+            image("docker.io/library/redis:alpine")
+            expose(6379)
+            health("redis-cli ping")
+            limit("db") {
+                limit_mem("256m")
+                limit_maxproc(32)
+            }
+            constrain("db") {
+                grant_fd("none", "none", "none")
+                deny_egress()
+            }
+        }
+        app = container("app") {
+            image("localhost/aeo-examples/silly-add:latest")
+            expose(8080)
+            health("python -c \"import urllib.request as u; u.urlopen('http://localhost:8080/add/0/0').read()\"")
+            limit("app") {
+                limit_mem("256m")
+                limit_maxproc(64)
+            }
+            constrain("app") {
+                grant_fd("none", "none", "none")
+            }
+            depends("db")
+        }
+    }
+}
+
+// ---- helpers ----
+_has(s: string, sub: string) -> int {
+    return string_contains(s, sub)
+}
+_has_s(s: string, sub: string) -> string {
+    return string_from_int(string_contains(s, sub))
+}
+
+main() {
+    _declare()
+    fw = aeocha.init()
+
+    aeocha.describe(fw, "silly_addition_confined — confinement data model") {
+        aeocha.describe("confinement is declared (data model)") {
+            aeocha.it("db declares limit caps, a constrain block, and deny_egress") callback {
+                aeocha.assert_str_eq(get_rctl("db"), "memoryuse=256m, maxproc=32", "db limit{} caps")
+                // constrain block recorded + netpolicy has deny_egress.
+                aeocha.assert_true(string_length(get_constraints("db")) > 0, "db is constrained")
+                aeocha.assert_true(_has(get_netpolicy("db"), "egress:DENY-ALL"), "db deny_egress (no outbound)")
+            }
+            aeocha.it("app is capped + constrained (but may serve)") callback {
+                aeocha.assert_str_eq(get_rctl("app"), "memoryuse=256m, maxproc=64", "app limit{} caps")
+                aeocha.assert_true(string_length(get_constraints("app")) > 0, "app is constrained")
+                aeocha.assert_str_eq(_has_s(get_netpolicy("app"), "egress:DENY-ALL"), "0", "app NOT deny_egress (serves)")
+            }
+        }
+    }
+
+    aeocha.run_summary(fw)
+}

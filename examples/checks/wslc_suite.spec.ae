@@ -1,0 +1,70 @@
+// examples/checks/wslc_suite.spec.ae — the POST-DEPLOY suite for
+// silly_addition_wslc. Declared by `suite(...)` in that example; run by
+// `aeo suite examples/silly_addition_wslc.ae` AFTER the tree is up. aeo TEARS DOWN
+// once the suite finishes (the CI shape).
+//
+//   sh test/run-spec.sh examples/checks/wslc_suite.spec.ae
+//
+// LIVE CONTAINMENT IS PROVEN BY THE ITEST DRIVER, NOT HERE. The original suite mode
+// probed each container's hostname via `aeo exec` to show a contained, running Linux
+// node under Windows (wslc sets the hostname to the short container ID). A spec runs
+// as its OWN process and can't `aeo exec` into the runner's live tree, and this is a
+// non-HTTP substrate (no /add service to GET) — so we do NOT invent an HTTP probe.
+// The wslc driver's integration test carries the real hostname/containment probe;
+// this spec re-asserts the DATA MODEL so the suite phase has a concrete pass.
+
+import aeocha
+import compose (system, wslc)
+import compose (image, command, health, depends)
+import compose (get_command, get_depends, describe_tree)
+import std.os          // WHOLE (not selective) — see the model spec + the ask note
+                       // asks/aeocha-selective-os-import-shadowing.md.
+import std.string (string_length, string_concat)
+import std.string   // bare: inlined aeocha calls bare exports unqualified
+
+_declare() {
+    system("silly_addition_wslc") {
+        db = wslc("db") {
+            image(_image())
+            command("sleep 600")
+            health("true")
+        }
+        app = wslc("app") {
+            image(_image())
+            command("sleep 600")
+            health("true")
+            depends("db")
+        }
+    }
+}
+
+_image() -> string {
+    v = os.getenv("AEO_WSLC_IMAGE")
+    if string_length(v) == 0 {
+        return "docker.io/library/alpine:latest"
+    }
+    return v
+}
+
+main() {
+    _declare()
+    fw = aeocha.init()
+
+    aeocha.describe(fw, "silly_addition_wslc — post-deploy suite") {
+        // Live containment (own hostname/namespace under Windows) is proven by the
+        // wslc itest driver, which can `aeo exec` the live tree. Here we re-assert
+        // the resolved model so the suite phase records a concrete pass.
+        aeocha.it("the deployed tree matches the declared model (db <- app)") callback {
+            img = _image()
+            want = string_concat(string_concat(
+                "system silly_addition_wslc:\n",
+                "  wslc db [command=sleep 600, image=${img}]\n"),
+                "  wslc app [command=sleep 600, image=${img}] -> db")
+            aeocha.assert_str_eq(describe_tree(), want, "resolved wslc tree snapshot")
+            aeocha.assert_str_eq(get_command("db"), "sleep 600", "db payload")
+            aeocha.assert_str_eq(get_depends("app"), "db", "app ◄ db")
+        }
+    }
+
+    aeocha.run_summary(fw)
+}

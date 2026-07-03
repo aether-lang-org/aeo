@@ -1,0 +1,55 @@
+// examples/checks/bwrap_model.spec.ae — the DATA-MODEL check for the
+// silly_addition_bwrap composition. Declared by `check(...)` in that example;
+// run by `aeo check examples/silly_addition_bwrap.ae` (no deploy, runs anywhere).
+// It re-declares the composition (a spec is its own process, so it can't inherit
+// the runner's in-memory tree) and asserts the resolved model.
+//
+//   sh test/run-spec.sh examples/checks/bwrap_model.spec.ae
+//
+// This is the aeb pattern: the composition is a pure declaration; its assertions
+// live alongside in a real spec you can also run standalone.
+
+import aeocha
+import compose (system, bwrap)
+import compose (command, health, depends)
+import compose (get_command, get_depends, describe_tree)
+import std.string (string_from_int, string_concat)
+import std.string   // bare: inlined aeocha calls bare exports unqualified
+
+// The SAME declaration the example carries. Kept in sync with
+// examples/silly_addition_bwrap.ae (the model assertion is exactly this).
+_declare() {
+    system("silly_addition_bwrap") {
+        db = bwrap("db") {
+            command("sleep 600")
+            health("true")
+        }
+        app = bwrap("app") {
+            command("sleep 600")
+            health("true")
+            depends("db")
+        }
+    }
+}
+
+main() {
+    _declare()
+    fw = aeocha.init()
+
+    aeocha.describe(fw, "silly_addition_bwrap — data model") {
+        aeocha.it("resolves to two bwrap sandboxes with a dependency edge") callback {
+            want = string_concat(string_concat(
+                "system silly_addition_bwrap:\n",
+                "  bwrap db [command=sleep 600]\n"),
+                "  bwrap app [command=sleep 600] -> db")
+            aeocha.assert_str_eq(describe_tree(), want, "resolved bwrap tree snapshot")
+        }
+        aeocha.it("both run a long-lived sleep; app depends on db") callback {
+            aeocha.assert_str_eq(get_command("db"), "sleep 600", "db command")
+            aeocha.assert_str_eq(get_command("app"), "sleep 600", "app command")
+            aeocha.assert_str_eq(get_depends("app"), "db", "app ◄ db")
+        }
+    }
+
+    aeocha.run_summary(fw)
+}

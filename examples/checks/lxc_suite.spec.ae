@@ -1,0 +1,71 @@
+// examples/checks/lxc_suite.spec.ae — the POST-DEPLOY suite for
+// silly_addition_lxc. Declared by `suite(...)` in that example; run by
+// `aeo suite examples/silly_addition_lxc.ae` AFTER both LXC system containers are
+// booted. aeo TEARS DOWN once the suite finishes (the CI shape).
+//
+//   sh test/run-spec.sh examples/checks/lxc_suite.spec.ae
+//
+// HONEST scope: the original live probe attached into each container (lxc-attach)
+// and read /etc/alpine-release to prove a contained, running system container with
+// its OWN root. That in-container exec can't be driven from a separate spec process
+// — the boot + containment + dependency-ordered teardown proof is exercised by `aeo
+// up`/`aeo down` around this suite and is covered LIVE by the itest driver
+// (driver_lxc). This suite therefore RE-ASSERTS the resolved data model (same as the
+// model check), documenting that live containment is proven by the itest driver, not
+// from here.
+
+import aeocha
+import compose (system, lxc)
+import compose (image, health, depends)
+import compose (get_image, get_depends, describe_tree)
+import std.os          // WHOLE (not selective): a selective `import std.os (getenv)`
+                       // rebinds the `os` namespace to only that name and breaks
+                       // aeocha's qualified os.now_monotonic_ns() calls. See
+                       // asks/aeocha-selective-os-import-shadowing.md.
+import std.string (string_length, string_concat)
+import std.string   // bare: inlined aeocha calls bare exports unqualified
+
+// the LXC image as the download-template "dist:release". AEO_LXC_IMAGE overrides.
+_image() -> string {
+    v = os.getenv("AEO_LXC_IMAGE")
+    if string_length(v) == 0 {
+        return "alpine:3.21"
+    }
+    return v
+}
+
+// The SAME declaration the example carries. Kept in sync with
+// examples/silly_addition_lxc.ae.
+_declare() {
+    system("silly_addition_lxc") {
+        db = lxc("db") {
+            image(_image())
+            health("test -d /etc")
+        }
+        app = lxc("app") {
+            image(_image())
+            health("test -d /etc")
+            depends("db")
+        }
+    }
+}
+
+main() {
+    _declare()
+    fw = aeocha.init()
+
+    aeocha.describe(fw, "silly_addition_lxc — post-deploy suite") {
+        aeocha.it("both LXC system containers are declared with the dependency edge (booted + contained live by the itest driver)") callback {
+            img = _image()
+            want = string_concat(string_concat(
+                "system silly_addition_lxc:\n",
+                "  lxc db [image=${img}]\n"),
+                "  lxc app [image=${img}] -> db")
+            aeocha.assert_str_eq(describe_tree(), want, "resolved lxc tree snapshot")
+            aeocha.assert_str_eq(get_image("db"), _image(), "db image (dist:release)")
+            aeocha.assert_str_eq(get_depends("app"), "db", "app ◄ db")
+        }
+    }
+
+    aeocha.run_summary(fw)
+}

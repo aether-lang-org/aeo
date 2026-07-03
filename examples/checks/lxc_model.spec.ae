@@ -1,0 +1,69 @@
+// examples/checks/lxc_model.spec.ae — the DATA-MODEL check for the
+// silly_addition_lxc composition. Declared by `check(...)` in that example;
+// run by `aeo check examples/silly_addition_lxc.ae` (no deploy, runs anywhere).
+// It re-declares the composition (a spec is its own process, so it can't inherit
+// the runner's in-memory tree) and asserts the resolved model.
+//
+//   sh test/run-spec.sh examples/checks/lxc_model.spec.ae
+//
+// This is the aeb pattern: the composition is a pure declaration; its assertions
+// live alongside in a real spec you can also run standalone.
+
+import aeocha
+import compose (system, lxc)
+import compose (image, health, depends)
+import compose (get_image, get_depends, describe_tree)
+import std.os          // WHOLE (not selective): a selective `import std.os (getenv)`
+                       // rebinds the `os` namespace to only that name and breaks
+                       // aeocha's qualified os.now_monotonic_ns() calls. See
+                       // asks/aeocha-selective-os-import-shadowing.md.
+import std.string (string_length, string_concat)
+import std.string   // bare: inlined aeocha calls bare exports unqualified
+
+// the LXC image as the download-template "dist:release". AEO_LXC_IMAGE overrides.
+_image() -> string {
+    v = os.getenv("AEO_LXC_IMAGE")
+    if string_length(v) == 0 {
+        return "alpine:3.21"
+    }
+    return v
+}
+
+// The SAME declaration the example carries. Kept in sync with
+// examples/silly_addition_lxc.ae (the model assertion is exactly this).
+_declare() {
+    system("silly_addition_lxc") {
+        db = lxc("db") {
+            image(_image())
+            health("test -d /etc")
+        }
+        app = lxc("app") {
+            image(_image())
+            health("test -d /etc")
+            depends("db")
+        }
+    }
+}
+
+main() {
+    _declare()
+    fw = aeocha.init()
+
+    aeocha.describe(fw, "silly_addition_lxc — data model") {
+        aeocha.it("resolves to two LXC system containers with a dependency edge") callback {
+            img = _image()
+            want = string_concat(string_concat(
+                "system silly_addition_lxc:\n",
+                "  lxc db [image=${img}]\n"),
+                "  lxc app [image=${img}] -> db")
+            aeocha.assert_str_eq(describe_tree(), want, "resolved lxc tree snapshot")
+        }
+        aeocha.it("both are LXC of the same image; app depends on db") callback {
+            aeocha.assert_str_eq(get_image("db"), _image(), "db image (dist:release)")
+            aeocha.assert_str_eq(get_image("app"), _image(), "app image")
+            aeocha.assert_str_eq(get_depends("app"), "db", "app ◄ db")
+        }
+    }
+
+    aeocha.run_summary(fw)
+}

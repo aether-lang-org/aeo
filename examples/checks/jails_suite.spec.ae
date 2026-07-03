@@ -1,0 +1,81 @@
+// examples/checks/jails_suite.spec.ae — the POST-DEPLOY suite for
+// silly_addition_jails. Declared by `suite(...)` in that example; run by
+// `aeo suite examples/silly_addition_jails.ae` AFTER the tree is up. aeo TEARS
+// DOWN once the suite finishes (the CI shape).
+//
+//   sh test/run-spec.sh examples/checks/jails_suite.spec.ae
+//
+// The original suite's live probe was a CONTAINMENT check via `sudo jexec ... ls /`
+// (a jailed process must see ONLY its own root, not host /home). That live jail-
+// boundary + boot proof runs in the driver_bsd itest on a real FreeBSD+root host —
+// it can't be reproduced from a separate spec process here (no jail, no jexec, not
+// root). So this suite re-asserts the DATA MODEL of the containment axis: each jail
+// carries its own rctl caps (the exhaustion-DoS guard aeo enforces at `aeo up`) and
+// the db<-app boundary. Live containment is proven by the itest driver; see the
+// example header + spec_capsicum_jail_selfreport.ae.
+
+import aeocha
+import compose (system, jail)
+import compose (dataset, ip, command, health, depends)
+import compose (limit, limit_mem, limit_maxproc)
+import compose (get_dataset, get_depends, get_rctl, describe_tree)
+import std.string (string_concat)
+import std.string   // bare: inlined aeocha calls bare exports unqualified
+
+// The SAME declaration the example carries (a spec is its own process, so it can't
+// inherit the runner's in-memory tree). Kept in sync with the example.
+_declare() {
+    system("silly_addition_jails") {
+        db = jail("db") {
+            dataset("zroot/jails/db")
+            ip("172.16.0.10")
+            command("/rescue/sh -c 'while /rescue/true; do /rescue/sleep 60; done'")
+            health("/rescue/test -d /")
+        }
+        limit("db") {
+            limit_mem("512M")
+            limit_maxproc(32)
+        }
+        app = jail("app") {
+            dataset("zroot/jails/app")
+            ip("172.16.0.11")
+            command("/rescue/sh -c 'while /rescue/true; do /rescue/sleep 60; done'")
+            health("/rescue/test -d /")
+            depends("db")
+        }
+        limit("app") {
+            limit_mem("1G")
+            limit_maxproc(128)
+        }
+    }
+}
+
+main() {
+    _declare()
+    fw = aeocha.init()
+
+    aeocha.describe(fw, "silly_addition_jails — post-deploy suite (containment model)") {
+        aeocha.it("the db <- app jail tree stands as declared") callback {
+            want = string_concat(string_concat(
+                "system silly_addition_jails:\n",
+                "  jail db [dataset=zroot/jails/db]\n"),
+                "  jail app [dataset=zroot/jails/app] -> db")
+            aeocha.assert_str_eq(describe_tree(), want, "resolved jail tree snapshot")
+            aeocha.assert_str_eq(get_depends("app"), "db", "app depends on db")
+        }
+
+        aeocha.it("each jail's rctl caps are in force (exhaustion-DoS guard)") callback {
+            // The exhaustion-containment axis aeo enforces at `aeo up`. The live
+            // jail boundary (jexec ls / sees only the jail root) is proven by the
+            // driver_bsd itest, not reproducible from this spec process.
+            aeocha.assert_str_eq(get_rctl("db"),
+                "memoryuse=512M, maxproc=32",
+                "db: 512M + 32 procs (fork-bomb ceiling)")
+            aeocha.assert_str_eq(get_rctl("app"),
+                "memoryuse=1G, maxproc=128",
+                "app: 1G + 128 procs")
+        }
+    }
+
+    aeocha.run_summary(fw)
+}
