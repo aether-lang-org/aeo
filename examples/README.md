@@ -115,37 +115,46 @@ trail** (`aeo audit` verifies the hash chain). The FreeBSD demos carry the
 FreeBSD side: Capsicum + pf (bhyve_podman, pf delivery pending the if_bridge
 fix), rctl + the jail boundary (jails, live).
 
-## Every demo is ALL-IN-ONE (self-contained, by design)
+## Each demo is a PURE COMPOSITION (declaration only)
 
-Each file BOTH declares the system AND verifies it — composition + operational
-modes, nothing imported from a sibling spec. A shop writes thousands like these,
-each standing alone. Two doors:
+Each `silly_addition_*.ae` is a **pure declaration** — nodes, dependencies, health
+windows, and the spec files that verify it. NO `main()`, NO self-test scaffold: `aeo`
+is the executor, exactly as `aeb <target>.build.ae` runs a build declaration. A demo
+declares its OWN verification with first-class `check()`/`smoke()`/`suite()` verbs
+that name external aeocha specs (under [`checks/`](checks/)):
 
-- **`aeo up examples/<demo>.ae`** — the front-door imports it as the
-  `aeo_compose` module and calls `aeo_orchestration()`.
-- **`ae run examples/<demo>.ae`** (with `AEO_MODE=...`) — runs `main()` → the
-  rich `run_aeo()` door, asserting/deploying in place.
+```
+system("silly_addition_containers") {
+    container("db")  { image("…redis…"); health("redis-cli ping") }
+    container("app") { image("localhost/aeo-examples/silly-add:latest"); depends("db") }
+    check("examples/checks/containers_model.spec.ae")   // data-model, NO deploy
+    smoke("examples/checks/containers_smoke.spec.ae")   // deploy + probe, leave up
+    suite("examples/checks/containers_suite.spec.ae")   // deploy + probe, tear down
+}
+```
 
-### Modes (env `AEO_MODE`, default `check`)
+### Phases (`aeo <phase> <demo>.ae`)
 
-| Mode | What |
+| Phase | What |
 |---|---|
-| `check` | (DEFAULT) data-model assertions only; no deploy. Runs ANYWHERE, instant. |
-| `up`    | `aeo up`, leave it STANDING. No checks. |
-| `smoke` | `aeo up` + a slim post-deploy HTTP check, leave it STANDING. (bhyve_podman, containers) |
-| `suite` | `aeo up` + fuller checks, then TEAR DOWN. CI shape. |
+| `aeo check` | run the demo's `check()` specs, NO deploy. Runs ANYWHERE, instant. CI-usable exit code. |
+| `aeo up`    | deploy, dependency-ordered, gated on health. Leave STANDING. |
+| `aeo smoke` | deploy + run `smoke()` specs, leave STANDING. |
+| `aeo suite` | deploy + run `suite()` specs, then TEAR DOWN. The CI shape. |
+| `aeo down`  | tear down in reverse, verifying each node is gone. |
 
 ```sh
 # data-model check (anywhere, no backend needed):
-ae run examples/silly_addition_jails.ae --lib lib --lib ../aeocha
-# a live deploy (on the right host):
-aeo up examples/silly_addition_containers.ae
+aeo check examples/silly_addition_jails.ae
+# a live deploy + probe + teardown (on the right host):
+aeo suite examples/silly_addition_containers.ae
 ```
 
-The shared mode scaffold (`run_aeo`/`_mode_*`/the `_aeo_*` helpers) is repeated in
-each file **on purpose** — these are self-contained, like every standalone program
-repeating its own `main()`. **Do NOT** factor it into a common module: that breaks
-the single-file property that is the whole point.
+The runner runs each spec as a SEPARATE process, so aeocha stays OUT of the lean
+orchestration binary. Application source (the `/add` service) lives in
+[`silly_addition_app/`](silly_addition_app/) as a prebuilt image the compositions
+reference by tag — NOT inline: the composition is orchestration, not an app. The
+thin itest driver is [`test/examples-suite.sh`](../test/examples-suite.sh).
 
 ## Live-proven status (what's actually been run)
 
@@ -161,10 +170,9 @@ the single-file property that is the whole point.
   `aeo down`, live on Bazzite.
 - **jails** — boot + jail-boundary containment + rctl caps, live on the GhostBSD
   box. The strongest FreeBSD live story.
-- **bwrap** — full `AEO_MODE=suite` round-trip live on Bazzite: `aeo up` →
-  two rootless sandboxes, the containment probe confirms each runs as PID 1 in
-  its own pid namespace (`/proc/1/comm` → `bwrap`), then `aeo down` reaps both
-  cleanly (no leaked processes). Rootless, zero host setup.
+- **bwrap** — full `aeo suite` round-trip live on Bazzite: deploy two rootless
+  sandboxes, run the suite spec, then verified-gone teardown. Rootless, zero host
+  setup. (Post-redesign: `aeo suite examples/silly_addition_bwrap.ae`.)
 - **bhyve_podman** — confinement data-model proven; live pf inter-VM *delivery* is
   the one BROKEN axis (TODO §1, the if_bridge bug — the Linux per-flow netpolicy
   sidesteps it).
