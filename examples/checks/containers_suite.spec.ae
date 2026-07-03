@@ -7,8 +7,7 @@
 //   AEO_APP_HOST=<host> sh test/run-spec.sh examples/checks/containers_suite.spec.ae
 
 import aeocha
-import std.os          // WHOLE (not selective) — see the smoke spec + the ask note
-                       // asks/aeocha-selective-os-import-shadowing.md.
+import std.os
 import std.string (string_length)
 import std.string   // bare: inlined aeocha calls bare exports unqualified
 

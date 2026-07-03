@@ -13,10 +13,7 @@ import aeocha
 import compose (system, windows)
 import compose (image, command, health, depends, wsl_distro)
 import compose (get_image, get_command, get_depends, describe_tree)
-import std.os          // WHOLE (not selective): a selective `import std.os (getenv)`
-                       // rebinds the `os` namespace to only that name and breaks
-                       // aeocha's qualified os.now_monotonic_ns() calls. See
-                       // asks/aeocha-selective-os-import-shadowing.md.
+import std.os
 import std.string (string_length, string_concat)
 import std.string   // bare: inlined aeocha calls bare exports unqualified
 

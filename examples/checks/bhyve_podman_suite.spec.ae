@@ -14,8 +14,7 @@
 // the suite re-asserts the arithmetic contract over the live app's HTTP surface.
 
 import aeocha
-import std.os          // WHOLE (not selective) — see the smoke spec + the ask note
-                       // asks/aeocha-selective-os-import-shadowing.md.
+import std.os
 import std.string (string_length)
 import std.string   // bare: inlined aeocha calls bare exports unqualified
 

@@ -16,8 +16,7 @@ import aeocha
 import compose (system, kvm_vm)
 import compose (cpus, memory, image, nic, depends)
 import compose (get_image, get_depends, describe_tree)
-import std.os          // WHOLE (not selective) — see the model spec + the ask note
-                       // asks/aeocha-selective-os-import-shadowing.md.
+import std.os
 import std.string (string_length, string_concat)
 import std.string   // bare: inlined aeocha calls bare exports unqualified
 

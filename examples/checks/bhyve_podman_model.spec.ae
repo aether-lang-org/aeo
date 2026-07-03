@@ -14,10 +14,7 @@ import compose (system, bhyve_vm, container)
 import compose (image, cpus, memory, guest_image, network, ssh_key, health, expose, depends)
 import compose (suspend, constrain, grant_fd, egress, ingress, ingress_from, deny_egress, start)
 import compose (get_suspended, get_started, get_constraints, get_netpolicy, describe_tree)
-import std.os          // WHOLE (not selective): a selective `import std.os (getenv)`
-                       // rebinds the `os` namespace to only that name and breaks
-                       // aeocha's qualified os.now_monotonic_ns() calls. See
-                       // asks/aeocha-selective-os-import-shadowing.md.
+import std.os
 import std.string (string_length, string_concat)
 import std.string   // bare: inlined aeocha calls bare exports unqualified
 

@@ -143,9 +143,6 @@ deploys, runs, then tears down (CI shape). The runner runs each spec as a SUBPRO
 (`ae run <spec>`), so aeocha stays OUT of the lean orchestration binary. Application
 source lives in `examples/silly_addition_app/` (a prebuilt image the compositions
 reference by tag) — NOT inline: the composition is orchestration, not an app.
-FOOTGUN: a spec that `import aeocha` must NOT `import std.os (x)` selectively — the
-selective form rebinds `os` and breaks aeocha's qualified `os.*` calls; use whole
-`import std.os` + `os.getenv(...)` (see asks/aeocha-selective-os-import-shadowing.md).
 
 ## How it's built — the shape that matters
 
