@@ -265,12 +265,15 @@ audited like confinement):
 Modes: `"shared"` (shared ∩ shared OK), `"exclusive"` (∩ anything = conflict),
 `"slice"` reserved (MIG / SR-IOV VF — exclusive-ish sub-devices, later).
 
-**Per-substrate rendering** (all real mechanisms today): podman `--device
-/dev/dri` / CDI nvidia; docker `--gpus`; **wslc `--gpus` (already in its run
-flags — seen in the CLI probe)**; lxc cgroup device-allow + /dev/dri mount (the
-Proxmox `dev0:` pattern); kvm/bhyve exclusive via VFIO/ppt; jail devfs ruleset;
-bwrap `--dev-bind`. REFUSED at check: any gpu() on firecracker (no device
-model); `shared` on VM kinds until vGPU/SR-IOV support exists (honest frontier).
+**Per-substrate rendering** (all real mechanisms today): podman `--gpus`
+(**podman 6.0, ~2026-06, made `--gpus` work with AMD GPUs too — so a single
+`--gpus` renders `gpu("shared")` uniformly on podman, not just the DRI mount;
+bazzite is AMD, testable here**) or `--device /dev/dri` / CDI nvidia on older
+podman; docker `--gpus`; **wslc `--gpus` (already in its run flags — seen in the
+CLI probe)**; lxc cgroup device-allow + /dev/dri mount (the Proxmox `dev0:`
+pattern); kvm/bhyve exclusive via VFIO/ppt; jail devfs ruleset; bwrap
+`--dev-bind`. REFUSED at check: any gpu() on firecracker (no device model);
+`shared` on VM kinds until vGPU/SR-IOV support exists (honest frontier).
 
 **The earn-its-place part — check-time allocation rules:**
 1. exclusive ∩ anything on one device → FAIL `aeo check`, with the article's

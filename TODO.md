@@ -410,6 +410,28 @@ wired yet; mapped here as candidate kinds. Ordered by how cleanly they'd land:
 
 ## Cross-cutting / smaller
 
+- [ ] **Podman 6.0 readiness (released ~2026-06-25) — preflight + follow-throughs.**
+      aeo's engine() work is version-agnostic (it selects the binary), so nothing
+      breaks on podman 5; but podman 6 changes ground aeo stands on:
+        - **cgroups v1 REMOVED** — aeo's limit{}→cgroup confinement now REQUIRES a
+          cgroups-v2 host under podman 6. Add a preflight probe (a v1 host + podman 6
+          = confinement silently unavailable — must fail loud at `aeo check`, like the
+          RACCT/kern.racct preflight on FreeBSD).
+        - **Windows 10 support REMOVED** — the `wsl_podman` engine (podman-in-WSL) is
+          Win11-only now; wslc (MSFT's, WSL 2.9.3) is separate and unaffected. Note in
+          any Windows host-gating.
+        - **iptables→nftables required, CNI gone (Netavark only)** — aeo's
+          network_ensure/--internal netpolicy goes through podman's net layer so it's
+          insulated, but the per-flow confinement (§5) now runs on nftables/Netavark;
+          live-re-verify the deny_egress/internal-net tiers on a podman-6 box.
+        - **Version lockstep** — podman 6 demands Buildah 1.44 / Skopeo 1.23 /
+          Netavark+Aardvark 2.0. aeo doesn't bundle these, but the attest follow-up
+          (cosign/skopeo signature path) must use the matching versions.
+        - **--gpus now covers AMD** — firms up the gpu() proposal (fable-5-insights
+          §G): one `--gpus` renders gpu(\"shared\") uniformly on podman 6, and bazzite
+          is AMD → testable. (Cross-ref the gpu() TODO item.)
+        - Box status: bazzite host 5.8.2, WSL2 guest 5.7.0 — upgrade one to 6 to
+          exercise pasta-forwarder + AMD --gpus + the cgroups-v2 preflight live.
 - [ ] **A secrets engine — encrypted-throughout, never plaintext in state/logs**
       (transfer from Pulumi's model; the one idea from their talk that's a real
       aeo gap). Today aeo has attestation + a tamper-evident audit trail but NO
@@ -467,8 +489,14 @@ wired yet; mapped here as candidate kinds. Ordered by how cleanly they'd land:
           teardown should explicitly clear stale pasta forward rules before a
           restart, or the node fails to come back up. Test this in the
           container-restart path (lib/snapshot_linux / lifecycle ops).
-        - Note: needs podman ≥ 6 (still marked experimental); the box is on 4.3.1
-          (in-guest) — check host podman version before relying on it.
+        - PODMAN 6.0 UPDATE (released ~2026-06-25): the premise firmed up. slirp4netns
+          is REMOVED — pasta IS the rootless networking stack now. BUT the source-IP-
+          preserving path (`rootless_port_forwarder = "pasta"`, kernel-level forwarding
+          via "Pesto") is NOT the default yet — default stays `rootlessport` (5.x
+          behavior); the pasta forwarder is opt-in until stability firms. So aeo still
+          writes the `containers.conf.d` drop-in explicitly; "experimental" softens to
+          "opt-in-default." Box versions: bazzite host 5.8.2, WSL2 guest 5.7.0 — NOT 6
+          yet, so this waits on a podman-6 box (or upgrade one).
       Sequencing: small + high-value for any real ingress/reverse-proxy topology
       (which the blue-green cutover below will also want).
 
