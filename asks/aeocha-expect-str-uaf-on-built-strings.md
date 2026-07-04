@@ -1,7 +1,16 @@
 # Ask: aeocha `expect_str(<fn returning a freshly-built string>)` is a use-after-free
 
-**Status:** reproduced minimally on `ae 0.353`. Blocks the fluent-facade spec sweep
-for string assertions (int/bool assertions are unaffected — those proceed).
+**Status: RESOLVED + CONFIRMED CONSUMED (aeo side, 2026-07-04).** Fixed in aeocha
+`707ab9b` — `expect_str(v)` now captures `string.copy(v)` (aeocha.ae:1224), the exact
+fix this ask proposed. aeo-side re-verified: the minimal repro (a built `${d}/vmlinux`
+string) now PASSES on `ae 0.353` with the current `../aeocha`. The held string sites
+are being re-swept to `expect_str`/`to_equal_str` (the string-half of the fluent
+migration this ask blocked). Thanks — clean fix, and the regression guard in
+`example_self_test.ae` means it won't regress.
+
+Original status (for context): reproduced minimally on `ae 0.353`; blocked the
+fluent-facade spec sweep for string assertions (int/bool assertions were
+unaffected).
 
 ## Symptom
 
