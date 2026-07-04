@@ -274,9 +274,11 @@ _pidfile_of(nm: string, kind: string) -> string {
     if kind == "bwrap" {
         return driver_bwrap.pidfile_for(nm)
     }
-    if kind == "firecracker" {
-        return driver_firecracker.pidfile_for(nm)
-    }
+    // NB: firecracker is NOT here — it now launches via `systemd-run --user` (for
+    // SIGHUP-survival) and writes NO pidfile, so it can't be batch-swept by
+    // pidfile. Its per-node probe() checks `systemctl --user is-active` instead.
+    // (The non-systemd fallback writes a pidfile, but per-node probe reads it too,
+    // so firecracker always takes the per-node path — correct, just not batched.)
     if kind == "kvm" {
         return driver_vm.pidfile_for(nm)
     }

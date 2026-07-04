@@ -380,16 +380,24 @@ wired yet; mapped here as candidate kinds. Ordered by how cleanly they'd land:
       exec_capture is a no-op — a microVM has no host-side exec; reaching the guest
       needs ssh/vsock over a tap (the driver_vm ssh shape). (2) No networking yet
       (bare boot; a tap/CNI for guest egress is next). (3) Artifact provisioning —
-      image() must point at a prebuilt vmlinux+rootfs bundle today. (4) NEW from the
-      live run — a LIVENESS RACE: aeo's pidfile probe ran BEFORE driver_firecracker
-      wrote the pidfile (`cat: /tmp/aeo-fc-*.pid: No such file` during bring-up), yet
-      the batch-liveness path promoted the nodes to `up` anyway; and the CI rootfs is
-      EPHEMERAL (boots to login, no long-lived payload, so the firecracker process
-      exits — unlike the podman sleep-600 demos). Fix: driver should write the pidfile
-      BEFORE returning from up() (or the poller must tolerate a not-yet-written pid as
-      "still booting", not "up"); and firecracker demos need a rootfs with an
-      init-held workload to persist. The suite spec only re-asserts the data model
-      (no in-guest probe per gap #1), so it passed regardless — honest.
+      image() must point at a prebuilt vmlinux+rootfs bundle today. (4) FIXED 2026-07-04 — the live run's two bugs turned out to be ONE root cause
+      each, both now resolved + re-proven live: (a) NOT ephemeral-rootfs — the
+      microVMs died because a bare bg-child of the short-lived aeo front-door is
+      SIGHUP-reaped (the exact KVM bug; setsid+bg ALSO dies on a systemd box, live-
+      confirmed). Fix: driver_firecracker now launches via `systemd-run --user
+      --unit=aeo-fc-NAME --collect` (Type=simple; the lingering --user scope
+      survives aeo's exit), with a setsid-bg fallback off a non-systemd host. (b) The
+      HANG (app never dispatched) was because firecracker was still on the batch-
+      liveness PIDFILE path, but systemd-run writes NO pidfile → the batch sweep never
+      saw db "up" → app (depends db) never dispatched → poller hung. Fix: removed
+      firecracker from _pidfile_of so it's NOT batchable; its per-node probe() now
+      checks `systemctl --user is-active` (unit) OR the fallback pidfile. Also
+      silenced the cosmetic `cat: No such file` noise (_read_pid now guards with
+      `[ -f ]`). LIVE-PROVEN on bazzite: `aeo up` → BOTH microVMs active + persist
+      (pgrep=2 after aeo exits); `aeo suite` → up → spec 1 passing → teardown →
+      both units inactive, 0 leftover procs. firecracker spec 3/3, full suite green.
+      (The suite spec still re-asserts data model only — no in-guest probe, gap #1 —
+      but the LIFECYCLE now genuinely boots+persists+tears-down real microVMs.)
 - [ ] **microsandbox (`msb`) — fast local microVMs for UNTRUSTED workloads**
       (github.com/superradcompany/microsandbox, Apache-2.0, libkrun+smoltcp).
       An almost-tailor-made fit for aeo's *purpose* ("orchestrated trees that

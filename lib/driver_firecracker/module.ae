@@ -12,10 +12,18 @@
 //
 //   up    — write a Firecracker config.json (boot-source=vmlinux, drive=rootfs,
 //           machine-config=vcpus/mem) and launch `firecracker --api-sock SOCK
-//           --config-file CONFIG` in the background, recording its pid. Firecracker
-//           is the process (no re-exec), so the launcher's pid IS the microVM.
-//   down  — kill the recorded pid + drop the pidfile/socket/config. Absent == ok.
-//   probe — 1 if the recorded pid is alive (kill -0).
+//           --config-file CONFIG` as a PERSISTENT transient unit via
+//           `systemd-run --user --unit=aeo-fc-NAME` (Type=simple — firecracker
+//           does NOT daemonize). The --user scope LINGERS, so the microVM survives
+//           the short-lived aeo front-door process. (A bare background child is
+//           SIGHUP-reaped when aeo's session scope is torn down — the exact bug the
+//           KVM path hit; systemd-run --user is the same fix. Live-confirmed on
+//           bazzite 2026-07-04: setsid+bg died across the aeo exit; the unit
+//           survived.) Falls back to a setsid bg-launch off a non-systemd host.
+//   down  — `systemctl --user stop aeo-fc-NAME` (+ drop socket/config); falls back
+//           to killing the recorded pid. Absent == ok.
+//   probe — 1 if `systemctl --user is-active aeo-fc-NAME` reports active (else the
+//           pidfile kill -0 fallback).
 //   exec  — NOT yet supported: a microVM has no host-side exec primitive (no
 //           nsenter/jexec). Reaching in means ssh/vsock into the guest (needs a
 //           tap + guest sshd), the same shape as driver_vm's ssh path — a
@@ -40,6 +48,12 @@ exports (
 )
 
 name() -> string { return "firecracker" }
+
+// The transient --user unit that wraps a microVM, keeping it alive across the
+// short-lived aeo front-door (the SIGHUP-survival fix). systemctl keys on this.
+unit_name(res_name: string) -> string {
+    return "aeo-fc-${res_name}"
+}
 
 pidfile_for(res_name: string) -> string {
     return "/tmp/aeo-fc-${res_name}.pid"
@@ -145,26 +159,104 @@ up(res_name: string, image: string, cpus: int, mem: string) -> string {
     }
     // a stale api socket blocks startup — clear it first.
     _rm(sockfile_for(res_name))
-    pf = pidfile_for(res_name)
     log = "/tmp/aeo-fc-${res_name}.log"
-    bg = _bg_command(bin, sockfile_for(res_name), cfgpath, pf, log)
-    sh = list_new()
-    list_add(sh, "-c")
-    list_add(sh, bg)
-    _out, _status, err = run_capture("/bin/sh", sh, null)
-    list_free(sh)
-    if err != "" {
-        return "aeo: firecracker spawn failed for '${res_name}': ${err}"
+    // PERSISTENT launch: systemd-run --user gives the microVM a lingering scope so
+    // it survives the aeo front-door's exit (a bare bg child is SIGHUP-reaped — the
+    // KVM bug). Fall back to a setsid bg-launch where systemd-run --user isn't
+    // available (a non-systemd host).
+    lerr = _launch(bin, sockfile_for(res_name), cfgpath, res_name, log)
+    if lerr != "" {
+        return "aeo: firecracker spawn failed for '${res_name}': ${lerr}"
     }
-    if _read_pid(res_name) <= 0 {
-        return "aeo: firecracker '${res_name}' did not start (see ${log}; /dev/kvm present?)"
+    // Give it a moment to bind /dev/kvm + start, then confirm it's actually up
+    // (systemd unit active, or a live pid). A config error exits firecracker fast.
+    if probe(res_name, "", "") == 0 {
+        return "aeo: firecracker '${res_name}' did not stay up (see ${log}; /dev/kvm present? kernel/rootfs paths in the bundle?)"
     }
     return ""
 }
 
-// Tear down: kill the recorded pid + drop the pidfile/socket/config. Absent == ok.
+// _launch — start firecracker persistently. Prefer `systemd-run --user
+// --unit=aeo-fc-NAME` (Type=simple; the --user scope lingers past the aeo
+// process). Fall back to a setsid+bg launch when systemd-run isn't present.
+// Returns "" on a successful spawn (not a proof of staying up — up() probes that).
+_launch(bin: string, sock: string, cfg: string, res_name: string, log: string) -> string {
+    sr = os_which("systemd-run")
+    if string_length(sr) > 0 {
+        _systemctl_user_stop(res_name)          // clear any prior unit of this name
+        av = list_new()
+        list_add(av, "--user")
+        list_add(av, "--unit=${unit_name(res_name)}")
+        list_add(av, "--collect")               // GC the unit when it exits
+        list_add_raw(av, bin)
+        list_add(av, "--api-sock")
+        list_add_raw(av, sock)
+        list_add(av, "--config-file")
+        list_add_raw(av, cfg)
+        out, status, err = run_capture(sr, av, null)
+        list_free(av)
+        if err != "" {
+            return err
+        }
+        if status != 0 {
+            return "systemd-run --user failed (exit ${string_from_int(status)}): ${out}"
+        }
+        return ""
+    }
+    // fallback: setsid-detached bg launch (best-effort on a non-systemd host).
+    pf = pidfile_for(res_name)
+    bg = _bg_command(bin, sock, cfg, pf, log)
+    sh = list_new()
+    list_add(sh, "-c")
+    list_add(sh, "setsid ${bg}")
+    _o, _s, e = run_capture("/bin/sh", sh, null)
+    list_free(sh)
+    if e != "" {
+        return e
+    }
+    return ""
+}
+
+// `systemctl --user stop aeo-fc-NAME` — best-effort; ignore result (may be absent).
+_systemctl_user_stop(res_name: string) {
+    av = list_new()
+    list_add(av, "--user")
+    list_add(av, "stop")
+    list_add(av, unit_name(res_name))
+    _o, _s, _e = run_capture(_systemctl(), av, null)
+    list_free(av)
+}
+
+// 1 if `systemctl --user is-active aeo-fc-NAME` reports the unit active.
+_unit_active(res_name: string) -> int {
+    sc = _systemctl()
+    if string_length(sc) == 0 {
+        return 0
+    }
+    av = list_new()
+    list_add(av, "--user")
+    list_add(av, "is-active")
+    list_add(av, unit_name(res_name))
+    out, status, err = run_capture(sc, av, null)
+    list_free(av)
+    if err != "" {
+        return 0
+    }
+    if status == 0 {
+        return 1
+    }
+    return 0
+}
+
+_systemctl() -> string {
+    return os_which("systemctl")
+}
+
+// Tear down: stop the transient unit (or kill the recorded pid), drop the
+// pidfile/socket/config. Absent == ok.
 down(res_name: string) -> string {
-    pid = _read_pid(res_name)
+    _systemctl_user_stop(res_name)        // stop the --user unit if present
+    pid = _read_pid(res_name)             // fallback path (setsid/bg launch)
     if pid > 0 {
         _kill(pid)
     }
@@ -174,10 +266,14 @@ down(res_name: string) -> string {
     return ""
 }
 
-// Liveness. 1 if the recorded pid is alive (kill -0). `health` is accepted for
-// signature parity with the other drivers; a microVM has no host-side exec to
-// run it through yet (see exec_capture), so only the pid is checked.
+// Liveness. 1 if the transient --user unit is active (the systemd-run launch), or
+// — for the setsid/bg fallback — the recorded pid is alive. `health` is accepted
+// for signature parity; a microVM has no host-side exec yet (see exec_capture), so
+// only the process/unit liveness is checked.
 probe(res_name: string, health: string, _unused: string) -> int {
+    if _unit_active(res_name) == 1 {
+        return 1
+    }
     return _pid_alive(res_name)
 }
 
@@ -216,9 +312,13 @@ _shq(s: string) -> string {
 }
 
 _read_pid(res_name: string) -> int {
+    // Read the pidfile only if it exists — `sh -c '[ -f f ] && cat f'` so an
+    // absent pidfile (the systemd-run path writes none; a not-yet-booted node)
+    // yields "" quietly instead of `cat: ...: No such file` noise on stderr.
     av = list_new()
-    list_add(av, pidfile_for(res_name))
-    out, status, err = run_capture("/bin/cat", av, null)
+    list_add(av, "-c")
+    list_add(av, "[ -f ${_shq(pidfile_for(res_name))} ] && cat ${_shq(pidfile_for(res_name))} || true")
+    out, status, err = run_capture("/bin/sh", av, null)
     list_free(av)
     if err != "" {
         return 0
