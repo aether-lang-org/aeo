@@ -10,9 +10,9 @@
 // live alongside in a real spec you can also run standalone.
 
 import aeocha
-import compose (system, windows)
+import compose (system, container, engine)
 import compose (image, command, health, depends, wsl_distro)
-import compose (get_image, get_command, get_depends, describe_tree)
+import compose (get_image, get_command, get_depends, get_engine, describe_tree)
 import std.os
 import std.string (string_length, string_concat)
 import std.string   // bare: inlined aeocha calls bare exports unqualified
@@ -40,13 +40,14 @@ _distro() -> string {
 // examples/silly_addition_windows.ae (the model assertion is exactly this).
 _declare() {
     system("silly_addition_windows") {
-        db = windows("db") {
+        engine("wsl_podman")
+        db = container("db") {
             image(_image())
             wsl_distro(_distro())
             command("sleep 600")
             health("true")
         }
-        app = windows("app") {
+        app = container("app") {
             image(_image())
             wsl_distro(_distro())
             command("sleep 600")
@@ -61,17 +62,21 @@ main() {
     fw = aeocha.init()
 
     aeocha.describe(fw, "silly_addition_windows — data model") {
-        aeocha.it("resolves to two windows containers with a dependency edge") callback {
+        aeocha.it("resolves to two containers with a dependency edge") callback {
             img = _image()
             want = string_concat(string_concat(
                 "system silly_addition_windows:\n",
-                "  windows db [command=sleep 600, image=${img}]\n"),
-                "  windows app [command=sleep 600, image=${img}] -> db")
-            aeocha.assert_str_eq(describe_tree(), want, "resolved windows tree snapshot")
+                "  container db [image=${img}]\n"),
+                "  container app [image=${img}] -> db")
+            aeocha.assert_str_eq(describe_tree(), want, "resolved container tree snapshot")
         }
         aeocha.it("both run a long-lived payload; app depends on db") callback {
             aeocha.assert_str_eq(get_command("db"), "sleep 600", "db payload")
             aeocha.assert_str_eq(get_depends("app"), "db", "app ◄ db")
+        }
+        aeocha.it("the wsl_podman engine floats onto both nodes") callback {
+            aeocha.assert_str_eq(get_engine("db"), "wsl_podman", "db engine")
+            aeocha.assert_str_eq(get_engine("app"), "wsl_podman", "app engine (floated)")
         }
     }
 

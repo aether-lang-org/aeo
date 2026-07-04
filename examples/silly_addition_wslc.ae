@@ -1,17 +1,19 @@
-// examples/silly_addition_wslc.ae — the WSL-CONTAINERS cell: Microsoft's native
-// `wslc.exe`. Unlike the `windows` tier (which shells podman INSIDE a WSL2 distro),
-// this uses Microsoft's built-in WSL Containers CLI (WSL >= 2.9.3, public preview
-// 2026-06) directly — Linux containers on Windows with NO podman/docker/third-party
-// engine. A `wslc` node IS a Linux container; the runtime is just MSFT's own.
+// examples/silly_addition_wslc.ae — CONTAINERS via Microsoft's native WSL
+// Containers engine (`wslc.exe`). This is the SAME `container()` kind as the Linux
+// demo — only the ENGINE differs: `engine("wslc")` realizes the OCI container via
+// Microsoft's built-in WSL Containers CLI (WSL >= 2.9.3, public preview 2026-06),
+// with NO podman/docker/third-party engine. A wslc-engined container IS a Linux
+// container; the runtime is just MSFT's own. (Contrast silly_addition_windows.ae:
+// same kind, `engine("wsl_podman")` — podman INSIDE a WSL2 distro.)
 //
 //   system("silly_addition_wslc")   (a WINDOWS host with WSL Containers / wslc.exe)
-//     ├─ db   (wslc) — a container via wslc, long-lived payload
-//     └─ app  (wslc) — a container via wslc ──depends──► db
+//     ├─ db   (container, engine=wslc) — long-lived payload
+//     └─ app  (container, engine=wslc) ──depends──► db
 //
 // vs the grid siblings:
-//   silly_addition_windows.ae    = podman-through-WSL2 (bring-your-own engine)
-//   silly_addition_containers.ae = podman on a LINUX host (the native-Linux peer)
-//   THIS one                     = wslc — Microsoft's native WSL Containers on Windows
+//   silly_addition_windows.ae    = container + engine("wsl_podman") (podman-in-WSL2)
+//   silly_addition_containers.ae = container + engine auto (podman on a LINUX host)
+//   THIS one                     = container + engine("wslc") — MSFT's native engine
 //
 // HONEST scope: proves the SUBSTRATE — bring a container up via wslc from the
 // Windows side, containment (its own hostname/namespace), dependency ordering, and
@@ -35,7 +37,7 @@
 //   aeo suite examples/silly_addition_wslc.ae   deploy + suite() specs, tear down
 //   aeo down  examples/silly_addition_wslc.ae   teardown (reverse)
 
-import compose (system, wslc)
+import compose (system, container, engine)
 import compose (image, command, health, depends)
 import compose (check, suite)
 import std.os (getenv)
@@ -43,15 +45,17 @@ import std.string (string_length)
 
 exports ( aeo_orchestration )
 
-// ---- the composition — two wslc containers, db <- app ----
+// ---- the composition — two wslc-engined containers, db <- app ----
 aeo_orchestration() {
     system("silly_addition_wslc") {
-        db = wslc("db") {
+        // engine() at SYSTEM scope floats onto every container below: MSFT's wslc.
+        engine("wslc")
+        db = container("db") {
             image(_image())
             command("sleep 600")
             health("true")
         }
-        app = wslc("app") {
+        app = container("app") {
             image(_image())
             command("sleep 600")
             health("true")

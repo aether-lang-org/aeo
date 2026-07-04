@@ -1,21 +1,24 @@
-// examples/silly_addition_windows.ae — the WINDOWS cell: podman-through-WSL2.
+// examples/silly_addition_windows.ae — CONTAINERS via podman-INSIDE-WSL2
+// (`engine("wsl_podman")`).
 //
-// On a Windows host there's no native Linux-container engine, so aeo's `windows`
-// tier runs podman INSIDE a WSL2 distro: every verb is the SAME podman argv the
-// Linux tier builds, executed via `wsl -d <distro> -- podman ...`. So a `windows`
-// node IS a Linux container — it just lands one substrate-hop away, inside the
-// lightweight Linux VM Windows keeps for WSL. This is the Principles-of-Containment
-// arm for a Windows guest in the tree: aeo (or its resident agent on the Windows
-// box) drives the contained Linux workload without Windows pretending to be Linux.
+// This is the SAME `container()` kind as the Linux demo — only the ENGINE differs.
+// On a Windows host there's no native Linux-container engine, so `engine("wsl_podman")`
+// runs podman INSIDE a WSL2 distro: the SAME podman argv the Linux tier builds,
+// executed via `wsl -d <distro> -- podman ...`. So the container IS Linux — it just
+// lands one substrate-hop away, inside the lightweight Linux VM Windows keeps for
+// WSL. The Principles-of-Containment arm for a Windows guest: aeo (or its resident
+// agent on the box) drives the contained Linux workload without Windows pretending
+// to be Linux. (Contrast silly_addition_wslc.ae: same kind, `engine("wslc")` —
+// Microsoft's NATIVE WSL Containers engine, no bring-your-own podman.)
 //
 //   system("silly_addition_windows")   (a WINDOWS host with WSL2 + podman)
-//     ├─ db   (windows) — a container in WSL, long-lived payload
-//     └─ app  (windows) — a container in WSL ──depends──► db
+//     ├─ db   (container, engine=wsl_podman) — a container in WSL, long-lived payload
+//     └─ app  (container, engine=wsl_podman) ──depends──► db
 //
 // vs the grid siblings:
-//   silly_addition_containers.ae = podman on a LINUX host (the native peer)
-//   silly_addition_nspawn.ae     = systemd-nspawn system containers (Linux)
-//   THIS one                     = podman-through-WSL2 on a WINDOWS host
+//   silly_addition_containers.ae = container + engine auto (podman on a LINUX host)
+//   silly_addition_wslc.ae       = container + engine("wslc") (MSFT's native engine)
+//   THIS one                     = container + engine("wsl_podman") on a WINDOWS host
 //
 // HONEST scope: this proves the SUBSTRATE — bring a container up INSIDE WSL from
 // the Windows side, containment (its own hostname/namespace), dependency ordering,
@@ -40,7 +43,7 @@
 //   aeo suite examples/silly_addition_windows.ae   deploy + suite() specs, tear down
 //   aeo down  examples/silly_addition_windows.ae   teardown (reverse)
 
-import compose (system, windows)
+import compose (system, container, engine)
 import compose (image, command, health, depends, wsl_distro)
 import compose (check, suite)
 import std.string (string_length)
@@ -48,19 +51,21 @@ import std.os (getenv)
 
 exports ( aeo_orchestration )
 
-// ---- the composition — two WSL-hosted containers, db <- app ----
+// ---- the composition — two wsl_podman-engined containers, db <- app ----
 // Each runs a long-lived `sleep` payload (so the container stays up to probe) in
 // the WSL distro named by AEO_WSL_DISTRO (default "Ubuntu"). app depends on db
 // (ordering edge). `image` is the container image; `command` is the payload.
 aeo_orchestration() {
     system("silly_addition_windows") {
-        db = windows("db") {
+        // engine() at SYSTEM scope floats onto every container below: podman-in-WSL.
+        engine("wsl_podman")
+        db = container("db") {
             image(_image())
             wsl_distro(_distro())
             command("sleep 600")
             health("true")
         }
-        app = windows("app") {
+        app = container("app") {
             image(_image())
             wsl_distro(_distro())
             command("sleep 600")

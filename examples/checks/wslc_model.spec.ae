@@ -10,9 +10,9 @@
 // live alongside in a real spec you can also run standalone.
 
 import aeocha
-import compose (system, wslc)
+import compose (system, container, engine)
 import compose (image, command, health, depends)
-import compose (get_command, get_depends, describe_tree)
+import compose (get_command, get_depends, get_engine, describe_tree)
 import std.os
 import std.string (string_length, string_concat)
 import std.string   // bare: inlined aeocha calls bare exports unqualified
@@ -21,12 +21,13 @@ import std.string   // bare: inlined aeocha calls bare exports unqualified
 // examples/silly_addition_wslc.ae (the model assertion is exactly this).
 _declare() {
     system("silly_addition_wslc") {
-        db = wslc("db") {
+        engine("wslc")
+        db = container("db") {
             image(_image())
             command("sleep 600")
             health("true")
         }
-        app = wslc("app") {
+        app = container("app") {
             image(_image())
             command("sleep 600")
             health("true")
@@ -48,17 +49,21 @@ main() {
     fw = aeocha.init()
 
     aeocha.describe(fw, "silly_addition_wslc — data model") {
-        aeocha.it("resolves to two wslc containers with a dependency edge") callback {
+        aeocha.it("resolves to two containers with a dependency edge") callback {
             img = _image()
             want = string_concat(string_concat(
                 "system silly_addition_wslc:\n",
-                "  wslc db [command=sleep 600, image=${img}]\n"),
-                "  wslc app [command=sleep 600, image=${img}] -> db")
-            aeocha.assert_str_eq(describe_tree(), want, "resolved wslc tree snapshot")
+                "  container db [image=${img}]\n"),
+                "  container app [image=${img}] -> db")
+            aeocha.assert_str_eq(describe_tree(), want, "resolved container tree snapshot")
         }
         aeocha.it("both run a long-lived payload; app depends on db") callback {
             aeocha.assert_str_eq(get_command("db"), "sleep 600", "db payload")
             aeocha.assert_str_eq(get_depends("app"), "db", "app ◄ db")
+        }
+        aeocha.it("the wslc engine floats onto both nodes") callback {
+            aeocha.assert_str_eq(get_engine("db"), "wslc", "db engine")
+            aeocha.assert_str_eq(get_engine("app"), "wslc", "app engine (floated)")
         }
     }
 

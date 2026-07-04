@@ -14,7 +14,7 @@
 // this spec re-asserts the DATA MODEL so the suite phase has a concrete pass.
 
 import aeocha
-import compose (system, wslc)
+import compose (system, container, engine)
 import compose (image, command, health, depends)
 import compose (get_command, get_depends, describe_tree)
 import std.os
@@ -23,12 +23,13 @@ import std.string   // bare: inlined aeocha calls bare exports unqualified
 
 _declare() {
     system("silly_addition_wslc") {
-        db = wslc("db") {
+        engine("wslc")
+        db = container("db") {
             image(_image())
             command("sleep 600")
             health("true")
         }
-        app = wslc("app") {
+        app = container("app") {
             image(_image())
             command("sleep 600")
             health("true")
@@ -57,9 +58,9 @@ main() {
             img = _image()
             want = string_concat(string_concat(
                 "system silly_addition_wslc:\n",
-                "  wslc db [command=sleep 600, image=${img}]\n"),
-                "  wslc app [command=sleep 600, image=${img}] -> db")
-            aeocha.assert_str_eq(describe_tree(), want, "resolved wslc tree snapshot")
+                "  container db [image=${img}]\n"),
+                "  container app [image=${img}] -> db")
+            aeocha.assert_str_eq(describe_tree(), want, "resolved container tree snapshot")
             aeocha.assert_str_eq(get_command("db"), "sleep 600", "db payload")
             aeocha.assert_str_eq(get_depends("app"), "db", "app ◄ db")
         }

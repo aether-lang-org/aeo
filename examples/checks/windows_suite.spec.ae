@@ -14,7 +14,7 @@
 // the deployed tree was stood up from — as the post-deploy gate.
 
 import aeocha
-import compose (system, windows)
+import compose (system, container, engine)
 import compose (image, command, health, depends, wsl_distro)
 import compose (get_image, get_command, get_depends, describe_tree)
 import std.os
@@ -39,13 +39,14 @@ _distro() -> string {
 
 _declare() {
     system("silly_addition_windows") {
-        db = windows("db") {
+        engine("wsl_podman")
+        db = container("db") {
             image(_image())
             wsl_distro(_distro())
             command("sleep 600")
             health("true")
         }
-        app = windows("app") {
+        app = container("app") {
             image(_image())
             wsl_distro(_distro())
             command("sleep 600")
@@ -64,9 +65,9 @@ main() {
             img = _image()
             want = string_concat(string_concat(
                 "system silly_addition_windows:\n",
-                "  windows db [command=sleep 600, image=${img}]\n"),
-                "  windows app [command=sleep 600, image=${img}] -> db")
-            aeocha.assert_str_eq(describe_tree(), want, "resolved windows tree snapshot")
+                "  container db [image=${img}]\n"),
+                "  container app [image=${img}] -> db")
+            aeocha.assert_str_eq(describe_tree(), want, "resolved container tree snapshot")
         }
         aeocha.it("both run a long-lived payload; app depends on db") callback {
             // live containment (each container under its OWN hostname inside WSL) is
