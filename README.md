@@ -18,6 +18,7 @@ aeo smoke    compose.ae      # deploy + run smoke() specs, leave the tree STANDI
 aeo suite    compose.ae      # deploy + run suite() specs, then TEAR DOWN (the CI shape)
 aeo audit    compose.ae      # verify the hash-chained audit trail
 aeo cutover  compose.ae node  # zero-downtime blue-green: green up + confined + health-gated, alias-swap, retire blue
+aeo pasta    compose.ae on   # rootless source-IP fidelity: switch the port forwarder to pasta (see docs/linux-host-setup.md)
 # also: snapshot | rollback | backup | prune | exec | restart  (per-node lifecycle ops)
 ```
 
@@ -269,7 +270,7 @@ lib/resource/         the actor↔main state bridge
 lib/driver_windows/  lib/driver_wslc/   Windows OCI engines (podman-in-WSL2 / MSFT's native wslc.exe)
 examples/             the substrate grid — twelve `db ◄ app` compositions (see examples/README.md)
 examples/checks/      the per-example check()/smoke()/suite() aeocha specs
-test/                 ~29 specs (fluent-aeocha style): driver/confinement/attest/audit/lifecycle/gpu + real-jail
+test/                 ~30 specs (fluent-aeocha style): driver/confinement/attest/audit/lifecycle/gpu/pasta + real-jail
 ```
 
 ## What aeo is NOT

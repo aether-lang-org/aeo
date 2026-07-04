@@ -575,7 +575,23 @@ wired yet; mapped here as candidate kinds. Ordered by how cleanly they'd land:
       Pulumi's grain, not aeo's. aeo is config-IS-code for a CONTAINMENT tree, not
       a cloud-resource graph. Keep the seam sharp, same as aeo-is-NOT-aeb.)
 
-- [ ] **pasta port-forwarder for rootless containers — preserve true source IP**
+- [~] **pasta port-forwarder for rootless containers — preserve true source IP**
+      MECHANISM BUILT + lifecycle live-proven 2026-07-05; full source-IP
+      preservation is UPSTREAM-BLOCKED (podman #28478), so aeo writes the
+      forward-compatible mechanism now and reports honestly. Built: driver_linux
+      pasta_dropin_path/content (pure, unit-tested — spec_pasta.ae, 3) +
+      pasta_forwarder_ensure/active/clear (sudo -n NOPASSWD writes, matching the
+      pf/nspawn/lxc contract); `aeo pasta <compose> on|off|status` subcommand
+      (front-door + runner run_pasta, audit-recorded). LIVE-PROVEN: full
+      status(off)->on->status(active)->off->status(off) cycle on the N100 box, drop-in
+      written/removed correctly, forwarder switches to pasta. HONEST GAP: `-p` source
+      still showed 169.254.x under pasta — preservation for the rootless BRIDGE net is
+      upstream-WIP (podman #28478; docs call it experimental). passt on the box
+      (2026_06_11) meets the version floor; the moment upstream's pesto/bridge path
+      ships, aeo nodes inherit true source IPs with NO aeo change. Findings:
+      docs/linux-host-setup.md (the NOPASSWD grant + the honest status). Remaining:
+      the source-preserving behavior itself (upstream), and wiring the teardown
+      stale-rule guard (#29032) into the restart path.
       (podman 6, `rootless_port_forwarder = "pasta"`). Directly serves aeo's
       rootless-containment thesis: without it, a rootless container behind a
       reverse-proxy node sees the PROXY's internal IP, not the real client — which

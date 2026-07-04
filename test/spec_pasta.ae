@@ -1,0 +1,44 @@
+// spec_pasta.ae — the rootless pasta port-forwarder drop-in (lib/driver_linux).
+//
+// The problem (proven live on podman 6.0.0): rootless `-p` publishing defaults to
+// `rootlessport`, a userspace proxy that REWRITES the client source to its own
+// gateway (LAN clients arrive as 169.254.x). That breaks IP-based defence + pollutes
+// the audit trail. The fix is a containers.conf.d drop-in switching the forwarder to
+// `pasta` (kernel-level, source-IP-preserving via pesto).
+//
+// This locks the PURE core — the exact drop-in PATH and CONTENT aeo writes — so the
+// mechanism can't silently drift. The applied write (sudo tee) + the effective
+// source-IP behaviour are proven on a real podman host, not here (source-IP
+// preservation for the bridge net is upstream-WIP per podman #28478; aeo writes the
+// correct, forward-compatible mechanism regardless).
+//
+//   sh test/run-spec.sh test/spec_pasta.ae
+
+import aeocha
+import driver_linux (pasta_dropin_path, pasta_dropin_content)
+import std.string
+
+main() {
+    fw = aeocha.init()
+    aeocha.describe(fw, "lib/driver_linux — rootless pasta port-forwarder drop-in") {
+
+        aeocha.describe("pasta_dropin_path — the canonical, aeo-owned drop-in") {
+            aeocha.it("targets a dedicated file in containers.conf.d (idempotent + removable)") callback {
+                aeocha.expect_str(pasta_dropin_path()).to_equal_str("/etc/containers/containers.conf.d/aeo-pasta.conf")
+            }
+        }
+
+        aeocha.describe("pasta_dropin_content — the [network] stanza selecting pasta") {
+            aeocha.it("declares rootless_port_forwarder = pasta under [network]") callback {
+                c = pasta_dropin_content()
+                aeocha.expect_str(c).to_contain("[network]")
+                aeocha.expect_str(c).to_contain("rootless_port_forwarder")
+                aeocha.expect_str(c).to_contain("pasta")
+            }
+            aeocha.it("is exactly the two-line stanza podman expects") callback {
+                aeocha.expect_str(pasta_dropin_content()).to_equal_str("[network]\nrootless_port_forwarder = \"pasta\"\n")
+            }
+        }
+    }
+    aeocha.run_summary(fw)
+}

@@ -29,6 +29,7 @@ exports (
     up, up_net, up_confined, up_green, alias_move, network_ensure, network_ensure_internal, down, probe, exec_capture, build, build_entrypoint, built_tag,
     ps_running_argv, ps_all_running_argv, running_names, run_argv, run_argv_net, run_argv_confined, stop_argv, rm_argv, exec_health_argv,
     net_disconnect_argv, net_connect_alias_argv,
+    pasta_dropin_path, pasta_dropin_content, pasta_forwarder_ensure, pasta_forwarder_active, pasta_forwarder_clear,
     build_argv
 )
 
@@ -236,6 +237,81 @@ network_ensure_internal(net: string, engine_pref: string) -> string {
     if status != 0 {
         return "aeo: internal network create '${net}' failed: ${out}"
     }
+    return ""
+}
+
+// --- pasta port-forwarder: preserve the client source IP (rootless) --------
+//
+// A rootless published port (`-p`) defaults to `rootlessport`, a userspace proxy
+// that REWRITES the source to its own gateway (192.168-side clients arrive as
+// 169.254.x — proven live on podman 6.0.0). Any IP-based defence (brute-force
+// lockout, ban lists) and the audit trail then see a proxy address, not the real
+// client. The fix is a containers.conf drop-in switching the forwarder to `pasta`
+// (kernel-level forwarding via "pesto"), which preserves the client source IP.
+//
+// HONEST STATUS (verified on the box 2026-07-05, podman 6.0.0 + pasta 2026_06_11):
+// the drop-in DOES switch the active forwarder to pasta (podman info + the pasta
+// process confirm it). But full source-IP preservation for the rootless BRIDGE
+// network aeo uses is still landing upstream (podman #28478 "under development";
+// the setting is documented experimental). So this writes the CORRECT, forward-
+// compatible mechanism — when the upstream pesto/bridge path ships, aeo nodes get
+// true source IPs with no aeo change. We do NOT claim preservation we can't yet
+// prove; pasta_forwarder_active() reports what's actually in effect.
+
+// pasta_dropin_path() — the canonical drop-in aeo writes. A dedicated aeo-owned
+// file (not the base containers.conf) so it's idempotent + cleanly removable.
+pasta_dropin_path() -> string { return "/etc/containers/containers.conf.d/aeo-pasta.conf" }
+
+// pasta_dropin_content() — the exact file body. Pure (unit-tested): the [network]
+// stanza selecting pasta as the rootless port forwarder.
+pasta_dropin_content() -> string { return "[network]\nrootless_port_forwarder = \"pasta\"\n" }
+
+// pasta_forwarder_ensure(engine_pref) — idempotently install the drop-in (root, via
+// `sudo -n` — never prompt: the operator must have the NOPASSWD grant for mkdir/tee,
+// same contract as the pf/nspawn/lxc host writes; see docs/linux-host-setup.md).
+// FULL binary paths so a path-specific NOPASSWD rule matches. Returns "" on success,
+// else a diagnostic (a TTY-prompt failure surfaces as the missing-grant hint).
+pasta_forwarder_ensure(engine_pref: string) -> string {
+    p = pasta_dropin_path()
+    body = pasta_dropin_content()
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "sudo -n /usr/bin/mkdir -p /etc/containers/containers.conf.d && printf '%b' '${body}' | sudo -n /usr/bin/tee ${p} >/dev/null")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    if status != 0 {
+        return "aeo: pasta drop-in write failed (${p}) — need NOPASSWD sudo for /usr/bin/mkdir + /usr/bin/tee (see docs/linux-host-setup.md): ${out}"
+    }
+    return ""
+}
+
+// pasta_forwarder_active(engine_pref) — the AUDIT/self-attest read: 1 if the pasta
+// forwarder drop-in is in effect (the aeo drop-in present AND selecting pasta), 0
+// otherwise. This is the honest "what is actually forwarding my ports" probe — a
+// node whose ingress preserves the real client IP is more defensible (§5.4).
+pasta_forwarder_active(engine_pref: string) -> int {
+    p = pasta_dropin_path()
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "grep -qE 'rootless_port_forwarder[[:space:]]*=[[:space:]]*.?pasta' ${p} 2>/dev/null && echo yes || echo no")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    if string_contains(out, "yes") == 1 {
+        return 1
+    }
+    return 0
+}
+
+// pasta_forwarder_clear(engine_pref) — remove the drop-in (revert to rootlessport).
+// Also the teardown guard for podman #29032 (stale pasta forward rules conflict on
+// restart): clearing the drop-in + a fresh bring-up avoids the stuck-port failure.
+pasta_forwarder_clear(engine_pref: string) -> string {
+    p = pasta_dropin_path()
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "sudo -n /usr/bin/rm -f ${p} 2>/dev/null; echo done")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
     return ""
 }
 

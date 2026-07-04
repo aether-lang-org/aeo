@@ -90,6 +90,12 @@ main() {
             exec_cmd = aether_args_get(4)           // reuse the cmd slot for the new image
         }
     }
+    // pasta: aeo pasta <compose.ae> <on|off|status>  (mode=arg3, via the node slot)
+    if cmd == "pasta" {
+        if argc >= 4 {
+            exec_node = aether_args_get(3)          // on | off | status
+        }
+    }
     // backup: aeo backup <compose.ae> <tag> [dir]   (tag=arg3 already; dir=arg4)
     // prune:  aeo prune  <compose.ae> [keep]         (keep=arg3 already as `tag`)
     backup_dir = ""
@@ -106,14 +112,14 @@ main() {
     }
 
     if compose_path == "" {
-        _diag("usage: aeo [up|down|status|check|smoke|suite|dry-run|snapshot|rollback|exec|restart|cutover|backup|prune|audit] <compose.ae> [tag|node cmd...]")
+        _diag("usage: aeo [up|down|status|check|smoke|suite|dry-run|snapshot|rollback|exec|restart|cutover|backup|prune|audit|pasta] <compose.ae> [tag|node cmd...]")
         exit(2)
     }
     // check/smoke/suite are the declared-verification phases (the composition's
     // check()/smoke()/suite() spec refs): check = specs only, no deploy; smoke =
     // deploy + specs, leave standing; suite = deploy + specs, tear down.
     if _known_cmd(cmd) == 0 {
-        _diag("aeo: unknown subcommand '${cmd}' (want up|down|status|check|smoke|suite|dry-run|snapshot|rollback|exec|restart|cutover|backup|prune|audit)")
+        _diag("aeo: unknown subcommand '${cmd}' (want up|down|status|check|smoke|suite|dry-run|snapshot|rollback|exec|restart|cutover|backup|prune|audit|pasta)")
         exit(2)
     }
 
@@ -221,6 +227,10 @@ main() {
             _ = _setenv("AEO_CUTOVER_IMAGE", exec_cmd)
         }
     }
+    // pasta: the mode (on|off|status) rides the node slot -> AEO_NODE.
+    if cmd == "pasta" {
+        _ = _setenv("AEO_NODE", exec_node)
+    }
     // backup: AEO_TAG (the tag arg, already set above) + the output dir.
     if cmd == "backup" {
         if backup_dir != "" {
@@ -273,6 +283,7 @@ _known_cmd(c: string) -> int {
     if c == "backup" { return 1 }
     if c == "prune" { return 1 }
     if c == "audit" { return 1 }
+    if c == "pasta" { return 1 }
     return 0
 }
 

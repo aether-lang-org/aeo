@@ -1484,6 +1484,53 @@ _count_lines(p: string) -> string {
     return out
 }
 
+// run_pasta — `aeo pasta <compose.ae> <on|off|status>`: manage the rootless pasta
+// port-forwarder drop-in (preserve the client source IP). A HOST-level posture op
+// (not per-node) — but bound to a composition so the change is recorded in that
+// composition's audit trail. Linux-only (rootless podman); a no-op elsewhere.
+//
+// HONEST CONTRACT: `on` switches the active forwarder to pasta (verified: podman
+// then forwards via pasta, not rootlessport). FULL source-IP preservation for the
+// rootless bridge net aeo uses is still landing upstream (podman #28478); aeo writes
+// the correct mechanism now, so nodes inherit true source IPs the moment upstream
+// ships. `on` never claims preservation it can't prove — it reports what took effect.
+run_pasta() {
+    mode = _envc("AEO_NODE")
+    if mode == "" { mode = "status" }
+    if host.family() == "bsd" {
+        println("aeo: pasta forwarder is a rootless-podman (Linux) feature — nothing to do on a BSD host")
+        return
+    }
+    if mode == "status" {
+        if driver_linux.pasta_forwarder_active("") == 1 {
+            println("aeo: pasta forwarder ACTIVE (${driver_linux.pasta_dropin_path()}) — rootless published ports forward via pasta")
+            println("     note: full source-IP preservation for the bridge net is upstream-WIP (podman #28478); the mechanism is in place")
+        } else {
+            println("aeo: pasta forwarder OFF — rootless published ports use rootlessport (masks the client source IP as the gateway)")
+        }
+        return
+    }
+    if mode == "on" {
+        err = driver_linux.pasta_forwarder_ensure("")
+        if err != "" {
+            println(err)
+            exit(1)
+        }
+        _ = audit.record("_host", "pasta", "forwarder", "on (${driver_linux.pasta_dropin_path()})")
+        println("aeo: pasta forwarder ON — wrote ${driver_linux.pasta_dropin_path()}")
+        println("     rootless published ports now forward via pasta (source-IP-preserving path lands with upstream podman #28478)")
+        return
+    }
+    if mode == "off" {
+        _ = driver_linux.pasta_forwarder_clear("")
+        _ = audit.record("_host", "pasta", "forwarder", "off")
+        println("aeo: pasta forwarder OFF — removed ${driver_linux.pasta_dropin_path()} (reverted to rootlessport)")
+        return
+    }
+    println("aeo: pasta wants a mode — usage: aeo pasta <compose.ae> <on|off|status>")
+    exit(2)
+}
+
 // run_exec — `aeo exec <compose.ae> <node> <cmd>`: run cmd IN one node, print its
 // stdout. The per-node operability primitive. Node + cmd come from AEO_NODE /
 // AEO_EXEC_CMD (the front-door sets them). Errors loudly if the node isn't in the
@@ -2047,6 +2094,10 @@ main() {
     }
     if cmd == "audit" {
         run_audit()
+        return
+    }
+    if cmd == "pasta" {
+        run_pasta()
         return
     }
 
