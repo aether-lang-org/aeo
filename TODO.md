@@ -224,10 +224,12 @@ Gaps:
       float machinery as within/every). Auto default per host family: Linux →
       podman → docker; Windows → wslc → podman-through-WSL. `engine()` does NOT
       admit lxc (fails the swap test: image namespace, expose, env, init-vs-command
-      — a kind, not an engine). Deprecate `docker()`/`wslc()` kind-verbs to aliases;
-      DISSOLVE the `windows` kind (container-on-Windows = host-family engine
-      resolution; the windows/wslc examples collapse into "containers.ae on a
-      Windows host"). FIXES A REAL BUG en route: the `docker` kind's dispatch is
+      — a kind, not an engine). DELETE `docker()`/`wslc()`/`windows()` kind-verbs
+      outright — no aliases (pre-1.0, no back-compat; Paul 2026-07-04). Container-
+      on-Windows = host-family engine resolution; the windows/wslc examples
+      collapse into "containers.ae on a Windows host". Kinds staying OUTSIDE
+      container(): lxc, nspawn (which also don't merge with each other), bwrap,
+      jail, kvm_vm/bhyve_vm/freebsd_vm/firecracker. FIXES A REAL BUG en route: the `docker` kind's dispatch is
       second-class today — plain `up()`, silently losing the shared aeo-<system>
       net, env() pairs, and ALL limit{}/constrain{} rendering that `container`
       gets via up_confined(). Also: warn loudly when ONE system mixes engines —

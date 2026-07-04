@@ -133,13 +133,20 @@ That's the promise `engine()` makes — change one string, nothing else.
   row (image namespace, expose, env, payload model). Putting it in `engine()`
   would make the property lie: a kind change wearing an engine costume. Same
   logic keeps `nspawn` (rootfs dir, machinectl) and `bwrap` (no image) as kinds.
-- `docker()` and `wslc()` kind-verbs → deprecated aliases of
-  `container(){ engine(...) }`.
-- The `windows` kind **dissolves** (rather than being renamed): container-on-
-  Windows is just `container()` with host-family engine resolution. The
+- `docker()`, `wslc()`, and `windows()` kind-verbs → **deleted outright** (Paul,
+  2026-07-04: pre-1.0, no back-compat needed — no deprecated aliases). Container-
+  on-Windows is just `container()` with host-family engine resolution. The
   `silly_addition_windows`/`_wslc` examples collapse into "the containers demo
   deployed on a Windows host" — the substrate grid gets SMALLER while covering
   the same ground.
+- The full post-change taxonomy (what stays OUTSIDE `container()` — seven kinds,
+  each failing the swap test for its own concrete reason): system containers
+  `lxc()` + `nspawn()` (template/rootfs images, own init — and they don't merge
+  with EACH OTHER either: dist:release template vs rootfs dir, template init vs
+  --boot/payload); sandbox `bwrap()` (no image at all); `jail()` (dataset/ip/
+  rctl); VMs `kvm_vm()`/`bhyve_vm()`/`freebsd_vm()`/`firecracker()` (whole
+  machines — firecracker is the "smaller VM," but a VM, never a container
+  candidate).
 - **Bug this fixes en route:** the `docker` kind's dispatch is second-class TODAY
   — it goes through plain `up()` and silently loses the shared `aeo-<system>`
   network, `env()` pairs, and ALL `limit{}`/`constrain{}` rendering that
