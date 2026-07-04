@@ -325,6 +325,83 @@ vs wslconfig — varies per substrate and belongs to the drivers).
 
 STATUS: proposed 2026-07-04, not built.
 
+## I. WIDE SWEEP (2026-07-04): journaling, witnessing, replication, failover,
+## cutover-slider, router grammar — the connector-type harvest
+
+Paul's prompt: go wide — journaling, witnessing, active replication, failover,
+blue-green with a human percentage slider, "reverse-proxying" in the grammar
+(term hated, rightly), following Daniel Flower's projects
+(intercepting-forward-proxy, app-runner-router, cranker-connector, app-runner,
+http-proxy-cache, app-migrator, javasysmon) + HSBC's mu-cranker-router.
+Unifying observation: most of these are CONNECTOR TYPES — the Beyond Procedure
+Calls thesis again (standing relationships deserve first-class grammar). Session
+rule applied throughout: no verb without a check.
+
+1. **journal(){ retain(30d) sink(...) }** — WAL semantics for orchestration:
+   write-intent-BEFORE-acting, then the outcome. Payoffs: interrupted `aeo up`
+   RESUMES from the journal; journal-vs-live drift is detectable; the existing
+   hash-chained audit widens from security decisions to lifecycle events.
+   Check: chain integrity (aeo audit); replay reconstructs status.
+
+2. **witness("w1"){ observes("db") apart_from("db") }** — two flavors: quorum
+   witness (tie-breaker voter, prevents 2-node split-brain) and ATTESTATION
+   witness (observes peers' health/attest streams, keeps its OWN signed journal
+   — two independent hash chains that must agree; divergence = tampering or
+   partition; non-repudiation for the orchestrator itself). Check: witness
+   co-located with its subject = error → requires FAILURE DOMAINS as supporting
+   grammar: domain("rack1") / apart("a","b") — cheap, foundational.
+
+3. **replication{ from("db-1") to("db-2") lag_within(5s) }** — the replication
+   LINK as a first-class edge with its own health (replicas(3) alone can't
+   order a failover — it never declared who replicates whom). Check: failover
+   refuses to exist without a declared edge; lag probed.
+
+4. **failover("db"){ primary(...) standby(...) witness(...) promote_within(30s)
+   manual() }** — aeo's unfair advantage: **FENCING = CONFINEMENT**. The
+   step everyone bolts on (STONITH agents), aeo already owns: fence the failed
+   primary with deny_egress + halt — existing containment grammar applied
+   posthumously. Check: quorum arithmetic (2 voters need a witness);
+   primary/standby in different domains; replication lag was in bounds.
+
+5. **cutover("app"){ blue(...) green(...) weight(0) slider() guard(spec) }** —
+   the human-slider blue-green (strictly: a weighted canary with a human hand,
+   the better thing). `aeo weight <file> app 25` moves it live. aeo-flavored:
+   (a) the slider is an AUDITED runtime input (who/when, hash-chained);
+   (b) slider position is journal state — survives restarts; (c) green is
+   ineligible for weight>0 until its declared smoke() spec PASSES — the
+   check/smoke/suite verbs become the promotion gate.
+
+6. **router("edge"){ ingress(443) route("/", "app") route_weighted(...) }** —
+   the traffic element, named honestly (app-runner-router / mu-cranker-router
+   lineage; "reverse proxy" describes packet topology, not role). THE CHECK
+   THAT EARNS IT: only router() nodes may hold public ingress — any other node
+   with internet-facing ingress fails `aeo check`. North-south enters via
+   declared edges or not at all: an architectural invariant, machine-enforced.
+   From the Flower set also: **egress_via("guard")** (http-proxy-cache /
+   intercepting-forward-proxy) — all outbound through a declared caching/
+   attesting proxy node: auditable egress, deterministic fetches, supply-chain
+   attestation AT the proxy (composes with attest()); **aeo migrate <node>
+   <host>** (app-migrator) — composes replicate → cutover → retire;
+   **javasysmon** → not grammar: `aeo status` grows actual-vs-limit{} gauges.
+
+7. **CRANKER SEED (follow-up promised)** — the "reverse reverse proxy": the
+   app-side connector DIALS OUT to the router and registers; requests flow back
+   down the established connection; the app NEVER LISTENS (NAT-friendly, zero
+   ingress). This is the resident-agent doctrine applied to the DATA PLANE, and
+   it detonates §F's service/worker split in the best way: with a cranker-style
+   connector, EVERY node can carry worker posture (deny_ingress everywhere) and
+   still serve — only routers hold sockets.
+       worker("app") { container("app"){...} serves_via("edge") }
+   A tree that is deny-ingress except its declared edges = the strongest
+   containment posture an orchestrator can ship by default.
+
+Priority: domains/anti-affinity + journal are foundations (cheap, everything
+leans on them) → router + cutover/slider (most visible, exercises the smoke
+gate) → replication + failover + witness (deepest design risk, last) →
+cranker/serves_via (the follow-up discussion).
+
+STATUS: idea sweep, none built; cranker follow-up owed.
+
 ## What's good (for balance)
 
 - The 12 compositions share a genuinely uniform skeleton: header (what/vs-siblings/
