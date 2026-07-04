@@ -17,6 +17,7 @@ aeo check    compose.ae      # run the composition's declared check() specs, NO 
 aeo smoke    compose.ae      # deploy + run smoke() specs, leave the tree STANDING
 aeo suite    compose.ae      # deploy + run suite() specs, then TEAR DOWN (the CI shape)
 aeo audit    compose.ae      # verify the hash-chained audit trail
+aeo cutover  compose.ae node  # zero-downtime blue-green: green up + confined + health-gated, alias-swap, retire blue
 # also: snapshot | rollback | backup | prune | exec | restart  (per-node lifecycle ops)
 ```
 

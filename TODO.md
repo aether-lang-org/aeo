@@ -587,7 +587,7 @@ wired yet; mapped here as candidate kinds. Ordered by how cleanly they'd land:
       Sequencing: small + high-value for any real ingress/reverse-proxy topology
       (which the blue-green cutover below will also want).
 
-- [ ] **Blue-green upgrades (zero-downtime node/tree cutover)** — orchestration,
+- [x] **Blue-green upgrades (zero-downtime node/tree cutover) — `aeo cutover` BUILT + LIVE-PROVEN 2026-07-04 (d316e02): forward zero-downtime (0 drops) + rollback, on podman 6. Details below; NEXT is subtree cutover + the wslc/wsl_podman + VM arms.** — orchestration,
       not just lifecycle ops. Upgrade a node (or subtree) by standing the NEW
       version up ALONGSIDE the old (green beside blue), health-gating it to
       readiness, cutting traffic/dependents over, verifying, THEN tearing down the
