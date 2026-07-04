@@ -609,6 +609,25 @@ wired yet; mapped here as candidate kinds. Ordered by how cleanly they'd land:
       Sequencing: after the agent path is the blessed default and a real workload
       runs in the child (both currently opt-in / NOOP). This is the marquee
       operational feature the agent architecture unlocks.
+      CUTOVER MECHANISM PROVEN LIVE on podman 6 (CachyOS box, 2026-07-04): the
+      network-alias-swap approach WORKS end-to-end — blue holds a shared
+      --network-alias 'svc', green is staged + health-gated on its own name, then
+      the alias moves to green and blue's is dropped; a client resolving http://svc
+      switches BLUE->GREEN, blue retired, service intact. So the "cutover mechanism
+      per substrate" open question is answered for containers: podman network alias
+      swap (no router/cranker needed for the first cut). TWO podman-6 GOTCHAS the
+      `aeo cutover` driver must handle: (1) both blue+green must be on a BRIDGE net
+      from the start — a container defaulting to podman-6's `pasta` net can't be
+      `network connect`'d ('"pasta" is not supported: invalid network mode'); (2)
+      re-aliasing = `network disconnect` then `network connect --alias` (podman
+      refuses re-connecting an already-connected container). NEXT (buildable now,
+      no box): an `aeo cutover <node>` verb = stand green up beside blue on a
+      distinct name + the shared net (no alias), health-gate + attest+confine-gate
+      it (green must be CONFINED before the swap — the invariant above), then
+      disconnect/reconnect-with-alias to cut, retire blue, rollback-to-blue on
+      failure. The alias-swap commands are pure argv builders (unit-testable like
+      every driver op); the live zero-downtime measurement (curl-loop across the
+      cut) is the box-gated proof.
 
 - [x] **PARALLEL bring-up — the detached single-poller engine** (2026-07-01) —
       run_up() used to boot serially: spawn a node, block until it is up, THEN

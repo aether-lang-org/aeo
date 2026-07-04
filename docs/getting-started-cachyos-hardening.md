@@ -80,3 +80,16 @@ cd aeo && ae build bin/aeo.ae -o /tmp/aeo --lib lib            # -> Built: /tmp/
   as a podman dep — the pasta-forwarder work is testable here.
 - `podman run --help` has `--gpus`; `/dev/dri/renderD128` present (Intel iGPU) —
   the `gpu()` DRI path is testable (AMD `--gpus` needs an AMD box).
+
+## Box-ops note: idle suspend drops the ssh session (2026-07-04)
+
+The CachyOS box became unreachable (`No route to host`) after ~idle — NOT a reboot
+or reimage: the DESKTOP idle-suspend cut in (systemd-logind's `IdleAction=ignore`,
+so it was the GUI/power settings, not logind). A suspended machine drops even the
+WIRED link. Fix for a headless/remote dev box:
+```
+sudo systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target
+```
+Verified: `systemctl is-enabled suspend.target sleep.target` → `masked`; the box no
+longer suspends on idle and the ssh session stays up. (We ssh over `enp3s0`/wired,
+so wifi power-save was irrelevant; on a wifi box also `iw dev wlanN set power_save off`.)
