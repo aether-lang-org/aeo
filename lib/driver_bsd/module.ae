@@ -27,7 +27,7 @@
 
 import std.os (run_capture)
 import std.list
-import std.string (string_length, string_char_at, string_from_char)
+import std.string (string_length)
 
 exports (
     name,
@@ -212,41 +212,31 @@ exec_capture(res_name: string, cmd: string) -> string {
 // NOPASSWD (see docs/bsd-host-setup.md). This is what un-parks real_jail.ae +
 // lets the jail demo run via real `aeo up` unprivileged.
 //
-// argv is single-quoted per element so args with spaces (a jail's exec.start=...
-// or a jexec health command) survive the shell. Returns (out, status, err) like
-// run_capture, so the call sites are a drop-in swap.
+// argv is passed DIRECTLY to run_capture("sudo", [...]) — NOT interpolated into
+// an `sh -c` string. The old form did `astr = "${list_get(argv,i)}"`, but
+// list_get returns a PTR and "${ptr}" yields the element's ADDRESS, not the
+// string (the LLM.md list_get footgun) — so jail/jls/jexec args would arrive as
+// memory addresses the first time this ran privileged for real. Use list_get_raw
+// + list_add_raw to copy element ptrs verbatim, exactly like driver_lxc._sudo_lxc
+// and driver_vm's qemu exec. Args with spaces (exec.start=..., a jexec health
+// command) survive naturally — argv is a real vector, no shell quoting needed.
+// Returns (out, status, err) like run_capture, so the call sites are a drop-in.
 _sudo_run(prog: string, argv: ptr) -> {
-    cmd = "sudo -n ${prog}"
+    full = list_new()
+    list_add(full, "-n")
+    list_add(full, prog)                   // e.g. "/usr/sbin/jail" — the NOPASSWD path
     n = list_size(argv)
     i = 0
     while i < n {
-        a = list_get(argv, i)
-        astr = "${a}"                      // ptr -> string (list stores strings)
-        cmd = "${cmd} ${_squote(astr)}"
+        a = list_get_raw(argv, i)          // raw ptr to the stored string
+        _ = list_add_raw(full, a)          // copy the element ptr verbatim (no interp)
         i = i + 1
     }
-    av = list_new()
-    list_add(av, "-c")
-    list_add(av, cmd)
-    out, status, err = run_capture("/bin/sh", av, null)
-    list_free(av)
+    out, status, err = run_capture("sudo", full, null)
+    list_free(full)
     return out, status, err
 }
 
-// single-quote a shell arg: wrap in '...' and escape any embedded ' as '\''.
-_squote(s: string) -> string {
-    out = "'"
-    n = string_length(s)
-    i = 0
-    while i < n {
-        c = string_char_at(s, i)
-        if c == 39 {                       // '
-            out = "${out}'\\''"
-        } else {
-            out = "${out}${_chr(c)}"
-        }
-        i = i + 1
-    }
-    return "${out}'"
-}
-_chr(c: int) -> string { return string_from_char(c) }
+// (_squote / _chr removed: the sudo path no longer builds a shell string — argv
+// goes straight to run_capture("sudo", [...]) as a real vector, so no per-element
+// shell quoting is needed. See _sudo_run above.)

@@ -6,6 +6,8 @@
 // Run:  ae build test/smoke_bsd.ae -o /tmp/sb --lib lib && /tmp/sb
 
 import driver_bsd
+import std.list
+import std.string (string_length)
 
 main() {
     // --- pure-logic assertions (always) ---
@@ -13,6 +15,48 @@ main() {
         println("FAIL: name")
         return
     }
+
+    // --- argv shape (locks the _sudo_run fix) ---
+    // _sudo_run now forwards each builder-produced element VERBATIM to
+    // run_capture("sudo", [...]) via list_get_raw/list_add_raw — NOT interpolated
+    // into an sh -c string (the old bug turned ptrs into memory ADDRESSES). Assert
+    // the builder yields real string tokens, so the forwarded vector is sound.
+    cav = driver_bsd.jail_create_argv("db", "/zroot/jails/db", "10.0.0.10", "sleep 600")
+    // expected: -c name=db path=/zroot/jails/db host.hostname=db ip4.addr=10.0.0.10 persist exec.start=sleep 600
+    if list_size(cav) < 6 {
+        println("FAIL: jail_create_argv too short (${list_size(cav)})")
+        return
+    }
+    if list_get_raw(cav, 0) != "-c" {
+        println("FAIL: argv[0] want -c got '${list_get_raw(cav, 0)}'")
+        return
+    }
+    if list_get_raw(cav, 1) != "name=db" {
+        println("FAIL: argv[1] want name=db got '${list_get_raw(cav, 1)}' (address, not string?)")
+        return
+    }
+    if list_get_raw(cav, 2) != "path=/zroot/jails/db" {
+        println("FAIL: argv[2] want path=... got '${list_get_raw(cav, 2)}'")
+        return
+    }
+    // an element with a SPACE (exec.start=sleep 600) must survive as ONE token —
+    // the argv-vector path needs no shell quoting; find it.
+    seen_exec = 0
+    n = list_size(cav)
+    j = 0
+    while j < n {
+        el = list_get_raw(cav, j)
+        if el == "exec.start=sleep 600" {
+            seen_exec = 1
+        }
+        j = j + 1
+    }
+    if seen_exec == 0 {
+        println("FAIL: exec.start=sleep 600 not a single verbatim token")
+        return
+    }
+    list_free(cav)
+    println("PASS: jail_create_argv shape — real string tokens, space-safe (sudo argv-vector, no sh -c)")
     mp = driver_bsd.mountpoint_for("zroot/jails/db")
     if mp != "/zroot/jails/db" {
         println("FAIL: mountpoint_for got ${mp}")
