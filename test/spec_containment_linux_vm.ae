@@ -30,35 +30,33 @@ main() {
 
         aeocha.describe("the contained reported back over the configured channel") {
             aeocha.it("it is a Linux guest, and it reported") callback {
-                aeocha.assert_true(_r("GUEST uname=Linux"), "naive Linux process ran inside the VM")
-                aeocha.assert_true(_r("CONFIGURED-CHANNEL ok"), "reported over the one channel the container allowed")
+                aeocha.expect_int(_r("GUEST uname=Linux")).to_be_truthy()
+                aeocha.expect_int(_r("CONFIGURED-CHANNEL ok")).to_be_truthy()
             }
         }
 
         aeocha.describe("the VM boundary contains it (discovered by attempts, not self-imposed)") {
             aeocha.it("cannot reach the host's bhyve binary") callback {
-                aeocha.assert_true(_r("host-bhyve-binary CONTAINED"), "host file outside the VM is unreachable")
+                aeocha.expect_int(_r("host-bhyve-binary CONTAINED")).to_be_truthy()
             }
             aeocha.it("cannot reach host-only (FreeBSD) files") callback {
-                aeocha.assert_true(_r("host-freebsd-passwd CONTAINED"), "host /etc/master.passwd not present in guest")
+                aeocha.expect_int(_r("host-freebsd-passwd CONTAINED")).to_be_truthy()
             }
             aeocha.it("cannot see the host's processes (only its own)") callback {
-                aeocha.assert_true(_r("host-bhyve-process CONTAINED"), "host process table invisible to the guest")
+                aeocha.expect_int(_r("host-bhyve-process CONTAINED")).to_be_truthy()
             }
         }
 
         aeocha.describe("'cannot reach the container unless it configured you to'") {
             aeocha.it("an UN-configured host port is unreachable") callback {
-                aeocha.assert_true(_r("host-unconfigured-port-8911 CONTAINED"),
-                    "8911 unreachable BECAUSE the container did not open it")
+                aeocha.expect_int(_r("host-unconfigured-port-8911 CONTAINED")).to_be_truthy()
             }
             aeocha.it("the CONFIGURED host channel IS reachable") callback {
-                aeocha.assert_true(_r("host-configured-port-22 REACHED"),
-                    "ssh:22 reachable because the container configured it")
+                aeocha.expect_int(_r("host-configured-port-22 REACHED")).to_be_truthy()
             }
             aeocha.it("nothing host-side was REACHED that shouldn't be") callback {
-                aeocha.assert_true(_absent_r("host-bhyve-binary REACHED"), "no host-file escape")
-                aeocha.assert_true(_absent_r("host-unconfigured-port-8911 REACHED"), "no un-configured-port escape")
+                aeocha.expect_int(_absent_r("host-bhyve-binary REACHED")).to_be_truthy()
+                aeocha.expect_int(_absent_r("host-unconfigured-port-8911 REACHED")).to_be_truthy()
             }
         }
     }

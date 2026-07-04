@@ -36,7 +36,7 @@ main() {
 
         aeocha.it("builds the image from the inline Dockerfile, runs it, reads the baked-in marker") callback {
             if _no_engine() == 1 {
-                aeocha.assert_true(1, "skipped — no container engine on PATH")
+                aeocha.expect_int(1).to_be_truthy()
             } else {
                 // build
                 berr = driver_linux.build("myapp", DF(), "")
@@ -45,7 +45,7 @@ main() {
                 // run + alive
                 uerr = driver_linux.up("myapp", tag, "sleep 600", 0, "")
                 aeocha.assert_str_eq(uerr, "", "run succeeds")
-                aeocha.assert_eq(driver_linux.probe("myapp", "", ""), 1, "myapp alive")
+                aeocha.expect_int(driver_linux.probe("myapp", "", "")).to_equal(1)
                 // the baked-in marker proves the image is OURS (built from the
                 // heredoc), not a pulled stock image.
                 marker = driver_linux.exec_capture("myapp", "cat /etc/aeo-marker", "")
@@ -57,12 +57,12 @@ main() {
 
         aeocha.it("is gone after driver down") callback {
             if _no_engine() == 1 {
-                aeocha.assert_true(1, "skipped — no container engine")
+                aeocha.expect_int(1).to_be_truthy()
             } else {
                 driver_linux.build("myapp", DF(), "")
                 driver_linux.up("myapp", driver_linux.built_tag("myapp"), "sleep 600", 0, "")
                 driver_linux.down("myapp", "")
-                aeocha.assert_eq(driver_linux.probe("myapp", "", ""), 0, "myapp gone")
+                aeocha.expect_int(driver_linux.probe("myapp", "", "")).to_equal(0)
             }
         }
     }

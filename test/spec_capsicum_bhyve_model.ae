@@ -72,7 +72,7 @@ main() {
         if capsicum.available() == 0 {
             aeocha.describe("enforcement") {
                 aeocha.it("skipped — Capsicum not available (need FreeBSD)") callback {
-                    aeocha.assert_true(1, "grant recorded; kernel enforcement needs FreeBSD")
+                    aeocha.expect_int(1).to_be_truthy()
                 }
             }
             aeocha.run_summary(fw)
@@ -116,7 +116,7 @@ main() {
                 // console was declared "rd"; even though we opened the file rw,
                 // cap_rights_limit narrowed it to R_READ. Writing must fail.
                 e = aeo_try_write(console_fd)
-                aeocha.assert_true(_ne0(e), "console write denied — 'rd' grant enforced (errno ${_i(e)})")
+                aeocha.expect_int(_ne0(e)).to_be_truthy()
             }
             aeocha.it("opening a NEW path (a disk it was NOT granted) -> DENIED") callback {
                 // The headline confined-bhyve escape: reach a disk image outside

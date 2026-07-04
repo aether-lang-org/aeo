@@ -6,7 +6,6 @@
 import aeocha
 import compose (system, container, image, within, every, without, health_interval, health_budget,
                 get_interval, get_budget, get_within_ms, get_without_ms)
-import std.string (string_from_int)
 import std.string   // bare: aeocha's inlined asserts call string.copy unqualified
 
 main() {
@@ -22,10 +21,10 @@ main() {
                     every(500ms)
                 }
             }
-            aeocha.assert_str_eq(string_from_int(get_interval("db")), "500", "every(500ms) -> 500")
-            aeocha.assert_str_eq(string_from_int(get_within_ms("db")), "30000", "within(30s) -> 30000ms")
+            aeocha.expect_int(get_interval("db")).to_equal(500)
+            aeocha.expect_int(get_within_ms("db")).to_equal(30000)
             // budget = window/interval = 30000/500 = 60 (the FluentSelenium within semantics)
-            aeocha.assert_str_eq(string_from_int(get_budget("db")), "60", "derived attempts")
+            aeocha.expect_int(get_budget("db")).to_equal(60)
         }
 
         aeocha.it("within(5s) with default 1s interval -> budget 5") callback {
@@ -35,7 +34,7 @@ main() {
                     within(5s)
                 }
             }
-            aeocha.assert_str_eq(string_from_int(get_budget("svc")), "5", "5s / 1s default = 5")
+            aeocha.expect_int(get_budget("svc")).to_equal(5)
         }
 
         aeocha.it("an explicit health_budget still WINS over within (back-compat)") callback {
@@ -47,16 +46,16 @@ main() {
                     within(99s)
                 }
             }
-            aeocha.assert_str_eq(string_from_int(get_interval("old")), "250", "int setter honored")
-            aeocha.assert_str_eq(string_from_int(get_budget("old")), "12", "explicit budget wins")
+            aeocha.expect_int(get_interval("old")).to_equal(250)
+            aeocha.expect_int(get_budget("old")).to_equal(12)
         }
 
         aeocha.it("no tuning -> the defaults (1s interval, 60 attempts)") callback {
             system("d4") {
                 bare = container("bare") { image("redis") }
             }
-            aeocha.assert_str_eq(string_from_int(get_interval("bare")), "1000", "default interval")
-            aeocha.assert_str_eq(string_from_int(get_budget("bare")), "60", "default budget")
+            aeocha.expect_int(get_interval("bare")).to_equal(1000)
+            aeocha.expect_int(get_budget("bare")).to_equal(60)
         }
 
         // The FluentSelenium FLOAT: within(d) at SYSTEM scope applies to every node
@@ -69,18 +68,18 @@ main() {
                 inherits = container("inherits") { image("redis") }     // no own -> floats
                 overrides = container("overrides") { image("redis") within(5s) }
             }
-            aeocha.assert_str_eq(string_from_int(get_within_ms("inherits")), "20000", "floated window")
-            aeocha.assert_str_eq(string_from_int(get_interval("inherits")), "250", "floated interval")
+            aeocha.expect_int(get_within_ms("inherits")).to_equal(20000)
+            aeocha.expect_int(get_interval("inherits")).to_equal(250)
             // a later sibling's own within() must NOT leak back onto an earlier one:
-            aeocha.assert_str_eq(string_from_int(get_within_ms("overrides")), "5000", "own wins")
-            aeocha.assert_str_eq(string_from_int(get_within_ms("inherits")), "20000", "no backward leak")
+            aeocha.expect_int(get_within_ms("overrides")).to_equal(5000)
+            aeocha.expect_int(get_within_ms("inherits")).to_equal(20000)
         }
 
         aeocha.it("the float is scoped per-system (doesn't leak across systems)") callback {
             system("d6a") { within(9s) a = container("a") { image("redis") } }
             system("d6b") { b = container("b") { image("redis") } }   // fresh system, no float
-            aeocha.assert_str_eq(string_from_int(get_within_ms("a")), "9000", "d6a floated")
-            aeocha.assert_str_eq(string_from_int(get_within_ms("b")), "0", "d6b unset (float reset)")
+            aeocha.expect_int(get_within_ms("a")).to_equal(9000)
+            aeocha.expect_int(get_within_ms("b")).to_be_falsy()
         }
 
         // without() — the FluentSelenium retry-until-GONE twin (teardown wait).
@@ -91,19 +90,19 @@ main() {
                 lingerable = container("lingerable") { image("redis") }
                 fast = container("fast") { image("redis") without(2s) } // own
             }
-            aeocha.assert_str_eq(string_from_int(get_without_ms("lingerable")), "10000", "floated gone-window")
-            aeocha.assert_str_eq(string_from_int(get_without_ms("fast")), "2000", "own wins")
+            aeocha.expect_int(get_without_ms("lingerable")).to_equal(10000)
+            aeocha.expect_int(get_without_ms("fast")).to_equal(2000)
             // within and without are INDEPENDENT windows on the same node.
             system("d8") {
                 both = container("both") { image("redis") within(30s) without(8s) }
             }
-            aeocha.assert_str_eq(string_from_int(get_within_ms("both")), "30000", "within independent")
-            aeocha.assert_str_eq(string_from_int(get_without_ms("both")), "8000", "without independent")
+            aeocha.expect_int(get_within_ms("both")).to_equal(30000)
+            aeocha.expect_int(get_without_ms("both")).to_equal(8000)
         }
 
         aeocha.it("no without() -> 0 (back-compat: the old state-flip teardown)") callback {
             system("d9") { plain = container("plain") { image("redis") } }
-            aeocha.assert_str_eq(string_from_int(get_without_ms("plain")), "0", "unset -> no extra wait")
+            aeocha.expect_int(get_without_ms("plain")).to_be_falsy()
         }
     }
 

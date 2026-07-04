@@ -39,18 +39,17 @@ main() {
         aeocha.describe("rendered as rctl rules for a jail subject") {
             aeocha.it("each cap becomes jail:<vm>:RES:deny=AMT") callback {
                 r = rules_for("db_vm", "jail")
-                aeocha.assert_true(_has(r, "jail:db_vm:memoryuse:deny=2G"), "memory cap")
-                aeocha.assert_true(_has(r, "jail:db_vm:pcpu:deny=150"), "cpu cap (150% = 1.5 cores)")
-                aeocha.assert_true(_has(r, "jail:db_vm:maxproc:deny=512"), "fork-bomb ceiling")
-                aeocha.assert_true(_has(r, "jail:db_vm:openfiles:deny=4096"), "fd ceiling")
+                aeocha.expect_int(_has(r, "jail:db_vm:memoryuse:deny=2G")).to_be_truthy()
+                aeocha.expect_int(_has(r, "jail:db_vm:pcpu:deny=150")).to_be_truthy()
+                aeocha.expect_int(_has(r, "jail:db_vm:maxproc:deny=512")).to_be_truthy()
+                aeocha.expect_int(_has(r, "jail:db_vm:openfiles:deny=4096")).to_be_truthy()
             }
         }
 
         aeocha.describe("the subject is parameterized (bhyve VM = a process)") {
             aeocha.it("renders for a process subject too") callback {
                 r = rules_for("db_vm", "process")
-                aeocha.assert_true(_has(r, "process:db_vm:memoryuse:deny=2G"),
-                    "same caps, process subject — for a bhyve hypervisor process")
+                aeocha.expect_int(_has(r, "process:db_vm:memoryuse:deny=2G")).to_be_truthy()
             }
         }
 
@@ -76,11 +75,11 @@ main() {
             }
             aeocha.it("apply REFUSES a user subject LOUDLY (error, not silent no-op)") callback {
                 e = apply("db_vm", "user")
-                aeocha.assert_true(_has(e, "REFUSED"), "apply returns a REFUSED error for user subject")
+                aeocha.expect_int(_has(e, "REFUSED")).to_be_truthy()
             }
             aeocha.it("jail + process subjects ARE allowed") callback {
-                aeocha.assert_true(_has(rules_for("db_vm", "jail"), "jail:db_vm:"), "jail allowed")
-                aeocha.assert_true(_has(rules_for("db_vm", "process"), "process:db_vm:"), "process allowed")
+                aeocha.expect_int(_has(rules_for("db_vm", "jail"), "jail:db_vm:")).to_be_truthy()
+                aeocha.expect_int(_has(rules_for("db_vm", "process"), "process:db_vm:")).to_be_truthy()
             }
         }
     }

@@ -43,7 +43,7 @@ main() {
 
         aeocha.it("builds + runs the service and computes 2+3=5, 40+2=42 over HTTP") callback {
             if _no_engine() == 1 {
-                aeocha.assert_true(1, "skipped — no container engine on PATH")
+                aeocha.expect_int(1).to_be_truthy()
             } else {
                 driver_linux.down(NAME(), "")
                 // build the service image from the inline Dockerfile

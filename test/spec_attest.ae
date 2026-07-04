@@ -5,7 +5,7 @@
 
 import aeocha
 import attest (is_attested, pinned_ref, verify, attest_state)
-import std.string (string_from_int, string_length)
+import std.string (string_length)
 import std.string   // bare: aeocha's inlined asserts call string.copy unqualified
 
 main() {
@@ -14,8 +14,8 @@ main() {
     aeocha.describe(fw, "attest (image attestation, pure surface)") {
 
         aeocha.it("is_attested: a pinned digest is attested; empty is not") callback {
-            aeocha.assert_str_eq(string_from_int(is_attested("sha256:abc")), "1", "pinned -> 1")
-            aeocha.assert_str_eq(string_from_int(is_attested("")), "0", "unset -> 0")
+            aeocha.expect_int(is_attested("sha256:abc")).to_be_truthy()
+            aeocha.expect_int(is_attested("")).to_be_falsy()
         }
 
         aeocha.it("pinned_ref builds image@<digest> (run-by-digest), stripping the tag") callback {
@@ -34,7 +34,7 @@ main() {
 
         aeocha.it("verify with no pinned digest is an internal error (caller guards)") callback {
             v = verify("docker.io/library/redis:alpine", "")
-            aeocha.assert_true(string_length(v) > 0, "empty pin -> error text")
+            aeocha.expect_int(string_length(v) > 0).to_be_truthy()
         }
 
         aeocha.it("attest_state names all THREE postures (the audit grep targets)") callback {

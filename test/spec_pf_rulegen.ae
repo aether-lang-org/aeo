@@ -30,39 +30,36 @@ main() {
 
         aeocha.describe("db_vm: redis answers ONE peer; a 3rd VM is blocked") {
             aeocha.it("emits a peer-restricted pass for 6379 from python_vm") callback {
-                aeocha.assert_true(_has(pf_rules_for("db_vm"),
-                    "pass in proto tcp from $python_vm to $db_vm port 6379"),
-                    "6379 allowed FROM python_vm specifically")
+                aeocha.expect_int(_has(pf_rules_for("db_vm"),
+                    "pass in proto tcp from $python_vm to $db_vm port 6379")).to_be_truthy()
             }
             aeocha.it("blocks all OTHER inbound to db_vm (the 3rd/4th VM)") callback {
-                aeocha.assert_true(_has(pf_rules_for("db_vm"),
-                    "block in proto tcp to $db_vm"),
-                    "any non-python_vm source hitting 6379 is denied")
+                aeocha.expect_int(_has(pf_rules_for("db_vm"),
+                    "block in proto tcp to $db_vm")).to_be_truthy()
             }
             aeocha.it("blocks ALL egress from db_vm (compromised redis can't exfiltrate)") callback {
-                aeocha.assert_true(_has(pf_rules_for("db_vm"),
-                    "block out proto tcp from $db_vm"), "zero outbound")
+                aeocha.expect_int(_has(pf_rules_for("db_vm"),
+                    "block out proto tcp from $db_vm")).to_be_truthy()
             }
             aeocha.it("db_vm has NO 'pass out' (deny_egress means no egress pass)") callback {
-                aeocha.assert_true(_absent(pf_rules_for("db_vm"), "pass out"),
-                    "deny_egress -> no outbound pass rule at all")
+                aeocha.expect_int(_absent(pf_rules_for("db_vm"), "pass out")).to_be_truthy()
             }
         }
 
         aeocha.describe("python_vm: may reach redis + accept 8080, nothing else") {
             aeocha.it("passes OUT to db_vm:6379") callback {
-                aeocha.assert_true(_has(pf_rules_for("python_vm"),
-                    "pass out proto tcp from $python_vm to $db_vm port 6379"), "egress to redis")
+                aeocha.expect_int(_has(pf_rules_for("python_vm"),
+                    "pass out proto tcp from $python_vm to $db_vm port 6379")).to_be_truthy()
             }
             aeocha.it("passes IN on 8080") callback {
-                aeocha.assert_true(_has(pf_rules_for("python_vm"),
-                    "pass in proto tcp to $python_vm port 8080"), "ingress 8080")
+                aeocha.expect_int(_has(pf_rules_for("python_vm"),
+                    "pass in proto tcp to $python_vm port 8080")).to_be_truthy()
             }
             aeocha.it("blocks the rest (deny-default catch-all)") callback {
-                aeocha.assert_true(_has(pf_rules_for("python_vm"),
-                    "block in proto tcp to $python_vm"), "deny rest in")
-                aeocha.assert_true(_has(pf_rules_for("python_vm"),
-                    "block out proto tcp from $python_vm"), "deny rest out")
+                aeocha.expect_int(_has(pf_rules_for("python_vm"),
+                    "block in proto tcp to $python_vm")).to_be_truthy()
+                aeocha.expect_int(_has(pf_rules_for("python_vm"),
+                    "block out proto tcp from $python_vm")).to_be_truthy()
             }
         }
     }

@@ -8,7 +8,6 @@
 
 import aeocha
 import snapshot (dataset_for, snap_name, backup_file)
-import std.string (string_from_int)
 import std.string   // bare too: inlined aeocha calls bare exports unqualified
 
 main() {

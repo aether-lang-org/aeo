@@ -77,7 +77,7 @@ main() {
 
         aeocha.describe("identity") {
             aeocha.it("names the wslc tier") callback {
-                aeocha.expect_str(name()).to_equal_str("wslc")
+                aeocha.assert_str_eq(name(), "wslc", "kind name")
             }
         }
     }

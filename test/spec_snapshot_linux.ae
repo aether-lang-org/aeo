@@ -6,7 +6,6 @@
 
 import aeocha
 import snapshot_linux (supports, snap_image, backup_file)
-import std.string (string_from_int)
 import std.string   // bare: aeocha's inlined asserts call string.copy unqualified
 
 main() {
@@ -15,13 +14,13 @@ main() {
     aeocha.describe(fw, "snapshot_linux (Linux operability, pure surface)") {
 
         aeocha.it("supports the Linux kinds; not the ZFS ones") callback {
-            aeocha.assert_str_eq(string_from_int(supports("container")), "1", "container")
-            aeocha.assert_str_eq(string_from_int(supports("docker")), "1", "docker")
-            aeocha.assert_str_eq(string_from_int(supports("kvm")), "1", "kvm")
-            aeocha.assert_str_eq(string_from_int(supports("lxc")), "1", "lxc")
+            aeocha.expect_int(supports("container")).to_be_truthy()
+            aeocha.expect_int(supports("docker")).to_be_truthy()
+            aeocha.expect_int(supports("kvm")).to_be_truthy()
+            aeocha.expect_int(supports("lxc")).to_be_truthy()
             // jail/bhyve are lib/snapshot's (ZFS) job — NOT this module's.
-            aeocha.assert_str_eq(string_from_int(supports("jail")), "0", "jail -> not here")
-            aeocha.assert_str_eq(string_from_int(supports("bhyve")), "0", "bhyve -> not here")
+            aeocha.expect_int(supports("jail")).to_be_falsy()
+            aeocha.expect_int(supports("bhyve")).to_be_falsy()
         }
 
         aeocha.it("snap_image tags a committed container aeo-snap/<node>:<tag>") callback {

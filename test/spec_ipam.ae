@@ -19,7 +19,7 @@ main() {
                 b = resolve_ip("specsys", "python_vm")
                 aeocha.assert_str_eq(a, "172.16.0.10", "db_vm -> first free (.10, after the .1 gateway)")
                 aeocha.assert_str_eq(b, "172.16.0.11", "python_vm -> next free (.11)")
-                aeocha.assert_true(_ne(a, b), "two resources get DISTINCT addresses")
+                aeocha.expect_int(_ne(a, b)).to_be_truthy()
             }
         }
 
@@ -34,8 +34,8 @@ main() {
             }
             aeocha.it("the binding is persisted to the file (survives a fresh process)") callback {
                 dump = bindings_dump("specsys")
-                aeocha.assert_true(_has(dump, "db_vm  172.16.0.10"), "db_vm binding written to ./.aeo")
-                aeocha.assert_true(_has(dump, "python_vm  172.16.0.11"), "python_vm binding written")
+                aeocha.expect_int(_has(dump, "db_vm  172.16.0.10")).to_be_truthy()
+                aeocha.expect_int(_has(dump, "python_vm  172.16.0.11")).to_be_truthy()
             }
         }
 

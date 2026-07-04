@@ -20,17 +20,17 @@ main() {
 
         aeocha.it("line_for embeds the payload + prev + a hash") callback {
             l = line_for("GENESIS", "db", "container", "attest-pass", "sha256:abc")
-            aeocha.assert_true(string_contains(l, "\"node\":\"db\"") == 1, "carries the node")
-            aeocha.assert_true(string_contains(l, "\"event\":\"attest-pass\"") == 1, "carries the event")
-            aeocha.assert_true(string_contains(l, "prev=GENESIS") == 1, "carries prev")
-            aeocha.assert_true(string_contains(l, "hash=") == 1, "carries the chain hash")
+            aeocha.expect_int(string_contains(l, "\"node\":\"db\"") == 1).to_be_truthy()
+            aeocha.expect_int(string_contains(l, "\"event\":\"attest-pass\"") == 1).to_be_truthy()
+            aeocha.expect_int(string_contains(l, "prev=GENESIS") == 1).to_be_truthy()
+            aeocha.expect_int(string_contains(l, "hash=") == 1).to_be_truthy()
         }
 
         aeocha.it("the chain LINKS — entry N's prev is entry N-1's hash") callback {
             l1 = line_for("GENESIS", "db", "container", "attest-pass", "x")
             h1 = _hash_of(l1)
             l2 = line_for(h1, "app", "container", "up", "ok")
-            aeocha.assert_true(string_contains(l2, "prev=${h1}") == 1, "l2.prev == l1.hash (chained)")
+            aeocha.expect_int(string_contains(l2, "prev=${h1}") == 1).to_be_truthy()
         }
 
         aeocha.it("a changed payload yields a different hash (tamper sensitivity)") callback {

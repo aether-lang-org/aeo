@@ -28,34 +28,34 @@ main() {
 
         aeocha.describe("the guest process reported back over its allowed channel") {
             aeocha.it("got reports (the confined GUEST delivered them from inside the VM)") callback {
-                aeocha.assert_true(_r("REPORT "), "self-report received from inside the bhyve-VM")
+                aeocha.expect_int(_r("REPORT ")).to_be_truthy()
             }
             aeocha.it("the guest process entered Capsicum capability mode") callback {
-                aeocha.assert_true(_r("IN_CAPMODE 1"), "cap_enter() inside the FreeBSD guest")
+                aeocha.expect_int(_r("IN_CAPMODE 1")).to_be_truthy()
             }
         }
 
         aeocha.describe("every escape class BLOCKED inside the VM") {
             aeocha.it("fs-read-breakout BLOCKED") callback {
-                aeocha.assert_true(_r("fs-read BLOCKED"), "open global path -> denied")
+                aeocha.expect_int(_r("fs-read BLOCKED")).to_be_truthy()
             }
             aeocha.it("fs-write-breakout BLOCKED") callback {
-                aeocha.assert_true(_r("fs-write BLOCKED"), "create file -> denied")
+                aeocha.expect_int(_r("fs-write BLOCKED")).to_be_truthy()
             }
             aeocha.it("tcpip-egress-breakout BLOCKED") callback {
-                aeocha.assert_true(_r("egress-connect BLOCKED"), "connect out -> denied")
+                aeocha.expect_int(_r("egress-connect BLOCKED")).to_be_truthy()
             }
             aeocha.it("tcpip-ingress-breakout BLOCKED") callback {
-                aeocha.assert_true(_r("ingress-bind BLOCKED"), "bind -> denied")
+                aeocha.expect_int(_r("ingress-bind BLOCKED")).to_be_truthy()
             }
             aeocha.it("NOTHING escaped") callback {
-                aeocha.assert_true(_absent_r("ESCAPED"), "no op slipped past confinement")
+                aeocha.expect_int(_absent_r("ESCAPED")).to_be_truthy()
             }
         }
 
         aeocha.describe("allowed channel is the controlled exception") {
             aeocha.it("the report channel survived cap_enter (deny-except-this)") callback {
-                aeocha.assert_true(_r("ALLOWED-CHANNEL still-open OK"), "inherited fd kept working")
+                aeocha.expect_int(_r("ALLOWED-CHANNEL still-open OK")).to_be_truthy()
             }
         }
     }

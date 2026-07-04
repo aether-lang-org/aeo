@@ -38,25 +38,23 @@ main() {
             aeocha.it("substitutes $db_vm and $python_vm with their ipam IPs") callback {
                 r = resolve(SYS(), pf_rules_for("db_vm"))
                 // peer-restricted ingress: from python_vm's IP to db_vm's IP:6379
-                aeocha.assert_true(_has(r, "pass in proto tcp from ${py_ip} to ${db_ip} port 6379"),
-                    "6379 allowed from python_vm's resolved address only")
+                aeocha.expect_int(_has(r, "pass in proto tcp from ${py_ip} to ${db_ip} port 6379")).to_be_truthy()
                 // deny-default catch-all on db_vm's resolved address
-                aeocha.assert_true(_has(r, "block in proto tcp to ${db_ip}"), "deny rest in")
-                aeocha.assert_true(_has(r, "block out proto tcp from ${db_ip}"), "zero egress (deny_egress)")
+                aeocha.expect_int(_has(r, "block in proto tcp to ${db_ip}")).to_be_truthy()
+                aeocha.expect_int(_has(r, "block out proto tcp from ${db_ip}")).to_be_truthy()
             }
             aeocha.it("leaves no $ tokens behind") callback {
                 r = resolve(SYS(), pf_rules_for("db_vm"))
-                aeocha.assert_true(_absent(r, "$"), "every $<name> token was resolved")
+                aeocha.expect_int(_absent(r, "$")).to_be_truthy()
             }
         }
 
         aeocha.describe("python_vm rules") {
             aeocha.it("egress + ingress resolve to real addresses") callback {
                 r = resolve(SYS(), pf_rules_for("python_vm"))
-                aeocha.assert_true(_has(r, "pass out proto tcp from ${py_ip} to ${db_ip} port 6379"),
-                    "egress to db_vm:6379 at its resolved IP")
-                aeocha.assert_true(_has(r, "pass in proto tcp to ${py_ip} port 8080"), "ingress 8080")
-                aeocha.assert_true(_absent(r, "$"), "no tokens left")
+                aeocha.expect_int(_has(r, "pass out proto tcp from ${py_ip} to ${db_ip} port 6379")).to_be_truthy()
+                aeocha.expect_int(_has(r, "pass in proto tcp to ${py_ip} port 8080")).to_be_truthy()
+                aeocha.expect_int(_absent(r, "$")).to_be_truthy()
             }
         }
 
