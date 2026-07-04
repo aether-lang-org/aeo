@@ -260,6 +260,20 @@ Gaps:
       design is RECURSIVE (the tree-of-nodes / aeo-agent recursion). No demo of
       jail-in-VM, VM-in-VM, or 3+ tier. (Subsumes into the general-nesting item
       above once that lands: depth is just repeated application of the exec seam.)
+- [ ] **`gpu(mode)` — device claims with CHECKED allocation semantics (see
+      fable-5-insights.md §G)**. The XDA article's sharpest point: VM passthrough
+      is EXCLUSIVE (VFIO detaches the device from host + all other consumers);
+      LXC/container device-mapping is SHARED (many consumers on one iGPU). Coin
+      `gpu("shared"|"exclusive")` (+ optional `gpu_device(pin)`; `"slice"`
+      reserved for MIG/SR-IOV) as a claim beside cpus()/memory(), rendered via
+      the grant machinery + recorded in the audit trail. Per-substrate: podman
+      `--device /dev/dri`/CDI, docker `--gpus`, wslc `--gpus` (already in its
+      run flags), lxc cgroup-allow + /dev/dri mount, kvm/bhyve VFIO/ppt
+      (exclusive only), jail devfs, bwrap --dev-bind; REFUSE at check on
+      firecracker (no device model) and `shared`-on-VM (until vGPU). Check-time
+      allocation: exclusive ∩ anything on one device = FAIL with the tier-choice
+      explanation — the article's human decision becomes a machine-checked
+      constraint. Host preflight probes the device exists.
 
 ### Lighter-tier substrates (smaller VMs + sandboxes) — future kinds
 Surveyed both boxes 2026-06-27. Below what aeo drives today (full-qemu kvm,

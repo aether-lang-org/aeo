@@ -245,6 +245,47 @@ Sub-flavors if ever needed, split by what drives the loop: queue-driven
 
 STATUS: open exploration, not decided.
 
+## G. PROPOSED: `gpu(mode)` — device claims with checked allocation semantics
+
+From the XDA article's sharpest point (the Kalle comment): **VM passthrough is
+EXCLUSIVE** (VFIO detaches the device from host + everyone else), **LXC/container
+device-mapping is SHARED** (many consumers on one iGPU simultaneously). That's an
+allocation-semantics axis that decides substrate choice — so aeo should declare
+it and CHECK it, not leave it as homelab folklore.
+
+**Grammar** (peer of cpus()/memory() as a claim; renders via the grant machinery;
+audited like confinement):
+
+    container("transcoder") { gpu("shared") }              // coexists with other shared
+    kvm_vm("training") {
+        gpu("exclusive")                                    // device LEAVES the host
+        gpu_device("pci:0000:01:00.0")                      // optional pin; default any
+    }
+
+Modes: `"shared"` (shared ∩ shared OK), `"exclusive"` (∩ anything = conflict),
+`"slice"` reserved (MIG / SR-IOV VF — exclusive-ish sub-devices, later).
+
+**Per-substrate rendering** (all real mechanisms today): podman `--device
+/dev/dri` / CDI nvidia; docker `--gpus`; **wslc `--gpus` (already in its run
+flags — seen in the CLI probe)**; lxc cgroup device-allow + /dev/dri mount (the
+Proxmox `dev0:` pattern); kvm/bhyve exclusive via VFIO/ppt; jail devfs ruleset;
+bwrap `--dev-bind`. REFUSED at check: any gpu() on firecracker (no device
+model); `shared` on VM kinds until vGPU/SR-IOV support exists (honest frontier).
+
+**The earn-its-place part — check-time allocation rules:**
+1. exclusive ∩ anything on one device → FAIL `aeo check`, with the article's
+   reasoning as the error text ("exclusive passthrough removes the device from
+   the host; move shared consumers to the container/lxc tier or pin a second
+   device"). The human tier-choice becomes a machine-checked constraint.
+2. Capability gating per kind at check, not deploy-time surprise.
+3. Host preflight probes the device exists (/dev/dri/renderD*, nvidia nodes).
+
+Obeys the naming rule: `gpu("shared")` names the CONTRACT (coexistence
+semantics); the mechanism (--device vs VFIO vs devfs) varies per substrate and
+belongs to the drivers.
+
+STATUS: proposed 2026-07-04, not built.
+
 ## What's good (for balance)
 
 - The 12 compositions share a genuinely uniform skeleton: header (what/vs-siblings/
