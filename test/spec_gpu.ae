@@ -33,30 +33,39 @@ main() {
             }
         }
 
-        // ---- flag rendering: the SHARED container/lxc DRI path ------------
-        aeocha.describe("gpu_flags — the vendor-agnostic DRI device-map") {
-            aeocha.it("shared container -> --device /dev/dri/renderD128 (NOT --gpus)") callback {
+        // ---- flag rendering: the SHARED container/lxc device-map ----------
+        // gpu_flags(nm, kind, engine, cdi_dev) — the 4th arg is the CDI selector the
+        // RUNNER resolves after probing the host (compose stays pure). "" = no CDI
+        // spec found, so fall back to the raw DRI render node.
+        aeocha.describe("gpu_flags — device-map selector (CDI-preferred, DRI fallback)") {
+            aeocha.it("no CDI spec -> raw DRI render node (--device /dev/dri/renderD128, NOT --gpus)") callback {
                 reset_nodes()
                 system("g2") { container("t") { gpu("shared") } }
-                f = gpu_flags("t", "container", "")
+                f = gpu_flags("t", "container", "", "")
                 aeocha.expect_str(f).to_equal_str("--device /dev/dri/renderD128")
             }
-            aeocha.it("a device pin overrides the default render node") callback {
+            aeocha.it("a CDI spec present -> the structured CDI selector wins") callback {
+                reset_nodes()
+                system("g2b") { container("t") { gpu("shared") } }
+                f = gpu_flags("t", "container", "", "intel.com/gpu=all")
+                aeocha.expect_str(f).to_equal_str("--device intel.com/gpu=all")
+            }
+            aeocha.it("an explicit device pin overrides the DRI default") callback {
                 reset_nodes()
                 system("g3") { container("t") { gpu("shared") gpu_device("/dev/dri/renderD129") } }
-                f = gpu_flags("t", "container", "")
+                f = gpu_flags("t", "container", "", "")
                 aeocha.expect_str(f).to_equal_str("--device /dev/dri/renderD129")
             }
-            aeocha.it("lxc shares the same DRI path") callback {
+            aeocha.it("lxc shares the same device-map path") callback {
                 reset_nodes()
                 system("g4") { lxc("l") { gpu("shared") } }
-                f = gpu_flags("l", "lxc", "")
+                f = gpu_flags("l", "lxc", "", "")
                 aeocha.expect_str(f).to_equal_str("--device /dev/dri/renderD128")
             }
             aeocha.it("no gpu() -> no flags") callback {
                 reset_nodes()
                 system("g5") { container("plain") { } }
-                aeocha.expect_str(gpu_flags("plain", "container", "")).to_equal_str("")
+                aeocha.expect_str(gpu_flags("plain", "container", "", "")).to_equal_str("")
             }
         }
 

@@ -277,8 +277,18 @@ that works on ALL of them is the DRI render-node device-map: `--device
 — proven live: the container sees `/dev/dri/renderD128` at major:minor 226,128
 (the host iGPU exactly), a plain container does not, and `podman inspect
 .Config.CreateCommand` shows aeo passed exactly `--device /dev/dri/renderD128`.
-`--gpus`/CDI remains a valid FUTURE per-engine specialization (nvidia/AMD hosts,
-gated on a CDI-present probe) but is not the portable default. Other substrates:
+CDI itself, though, is NOT vendor-toolchain-locked (a later correction): a CDI spec
+is a plain YAML in /etc/cdi naming the device + the edits to expose it. Intel ships a
+generator (cdi-specs-generator, from intel-resource-drivers-for-kubernetes) but a
+hand-written spec is identical — proven: a 41-line intel.com/gpu spec for the N100
+(examples/cdi/intel-gpu.yaml), and `podman run --device intel.com/gpu=all` then maps
+the FULL bundle (card1 + renderD128 + the by-path symlinks the Intel UMD needs).
+So aeo now PREFERS CDI when present: `gpu_flags` takes a cdi_dev the RUNNER resolves
+(`_gpu_cdi_device` probes /etc/cdi at up-time, prefers the `all` device, portable
+across intel.com/nvidia.com/amd.com/gpu), rendering `--device <vendor>.com/gpu=all`;
+absent a spec it falls back to the raw DRI render node. BOTH arms proven live on the
+N100 (CDI present → intel.com/gpu=all → full bundle; absent → renderD128 only). Still
+NOT `--gpus` (that flag fails on Intel). Other substrates:
 lxc cgroup device-allow + /dev/dri mount (the Proxmox `dev0:` pattern — same DRI
 path, wired); kvm/bhyve exclusive via VFIO/ppt (not yet built); jail devfs
 ruleset; bwrap `--dev-bind`. REFUSED at check: any gpu() on firecracker (no
@@ -298,11 +308,13 @@ semantics); the mechanism (--device vs VFIO vs devfs) varies per substrate and
 belongs to the drivers.
 
 STATUS: **BUILT + live-proven 2026-07-04.** compose: gpu()/gpu_device()/
-get_gpu_mode/get_gpu_device/gpu_flags/gpu_alloc_error; runner: up-path splices
-gpu_flags into confine, `aeo check` runs gpu_alloc_error()+_gpu_preflight();
-describe_tree shows gpu=. test/spec_gpu.ae (13). Live: shared/DRI on Intel iGPU.
-NOT yet built: the VM exclusive/VFIO render (refused-at-check today, honest); the
-`--gpus`/CDI per-engine specialization for nvidia/AMD hosts (gated on CDI probe).
+get_gpu_mode/get_gpu_device/gpu_flags(+cdi_dev)/gpu_alloc_error; runner: up-path
+probes /etc/cdi (_gpu_cdi_device), splices gpu_flags into confine, `aeo check` runs
+gpu_alloc_error()+_gpu_preflight(); describe_tree shows gpu=. test/spec_gpu.ae (14).
+Live on Intel N100: BOTH the CDI arm (intel.com/gpu=all → full card+render+by-path
+bundle) and the raw-DRI fallback (renderD128). NOT yet built: the VM exclusive/VFIO
+render (refused-at-check today, honest); a --gpus path (that flag fails on Intel, so
+it's not needed — CDI is the structured path).
 
 ## H. PROPOSED: `nested_virt()` — deny-by-default, attenuate-down-the-tree
 

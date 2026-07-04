@@ -149,8 +149,11 @@ grouped by what they declare:
 - **device claims:** `gpu("shared"|"exclusive")` (+ optional `gpu_device(pin)`) —
   names the *contract* (container/lxc SHARE a GPU; a VM takes it EXCLUSIVELY via
   VFIO), and `aeo check` enforces the allocation (exclusive ∩ anything on one
-  device fails; kind-mismatches fail). Renders to the vendor-agnostic DRI
-  device-map (`--device /dev/dri`) — proven live on a podman-6 Intel iGPU.
+  device fails; kind-mismatches fail). At `up` aeo probes `/etc/cdi` and prefers
+  the structured CDI selector (`--device intel.com/gpu=all` — the full
+  card+render+by-path bundle), falling back to the raw DRI device-map
+  (`--device /dev/dri`) when no spec is present. Both proven live on a podman-6
+  Intel N100. (See [`examples/cdi/`](./examples/cdi/) for a ready CDI spec.)
 - **VM sizing:** `cpus`, `memory`, `nic`; **image recipes:** `from`, `install`,
   `systemd_unit`, `realize_as`, …
 

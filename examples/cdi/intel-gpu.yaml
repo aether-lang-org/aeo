@@ -1,0 +1,41 @@
+# intel.yaml — a hand-written CDI spec for the Intel Alder Lake-N (N100) iGPU,
+# matching what Intel's cdi-specs-generator emits per-host. Topology probed live
+# on the CachyOS box: PCI 0000:00:02.0, card1 (226,1) + renderD128 (226,128).
+#
+# Three device names, addressable as `--device intel.com/gpu=<name>`:
+#   render — the render node only (compute/transcode: VA-API/QSV/OpenCL)
+#   card   — the primary node only
+#   all    — the full bundle (card + render + the by-path symlinks the Intel UMD
+#            uses to detect hardware properties). This is why CDI beats a raw
+#            `--device renderD128`: the UMD wants the by-path links + card node.
+cdiVersion: "0.6.0"
+kind: "intel.com/gpu"
+devices:
+  - name: "render"
+    containerEdits:
+      deviceNodes:
+        - path: "/dev/dri/renderD128"
+          hostPath: "/dev/dri/renderD128"
+          permissions: "rw"
+  - name: "card"
+    containerEdits:
+      deviceNodes:
+        - path: "/dev/dri/card1"
+          hostPath: "/dev/dri/card1"
+          permissions: "rw"
+  - name: "all"
+    containerEdits:
+      deviceNodes:
+        - path: "/dev/dri/card1"
+          hostPath: "/dev/dri/card1"
+          permissions: "rw"
+        - path: "/dev/dri/renderD128"
+          hostPath: "/dev/dri/renderD128"
+          permissions: "rw"
+      mounts:
+        - hostPath: "/dev/dri/by-path/pci-0000:00:02.0-card"
+          containerPath: "/dev/dri/by-path/pci-0000:00:02.0-card"
+          options: ["bind", "ro"]
+        - hostPath: "/dev/dri/by-path/pci-0000:00:02.0-render"
+          containerPath: "/dev/dri/by-path/pci-0000:00:02.0-render"
+          options: ["bind", "ro"]

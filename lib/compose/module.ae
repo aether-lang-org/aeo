@@ -522,34 +522,41 @@ get_gpu_mode(nm: string) -> string { return config.get("aeo.cmp.gpu.${nm}") }
 // get_gpu_device(nm) — the declared device pin, "" if any/unpinned.
 get_gpu_device(nm: string) -> string { return config.get("aeo.cmp.gpudev.${nm}") }
 
-// gpu_flags(nm, kind, engine) — render this node's gpu() claim to substrate-correct
-// run-flag TOKENS (space-separated, spliced into the container argv exactly like the
-// confine string). "" if no gpu() declared.
+// gpu_flags(nm, kind, engine, cdi_dev) — render this node's gpu() claim to
+// substrate-correct run-flag TOKENS (space-separated, spliced into the container
+// argv exactly like the confine string). "" if no gpu() declared.
 //
-// GROUND TRUTH (Intel iGPU, podman 6, CachyOS, 2026-07-04): `--gpus all` FAILS on
-// Intel — it needs a CDI spec that only the nvidia/AMD vendor toolchains generate
-// ("no known GPU vendor found in CDI specs"). The vendor-agnostic path that DOES
-// work is a direct DRI render-node device-map. So for the SHARED container/lxc tier
-// we render `--device <renderD>` (default /dev/dri/renderD128), NOT `--gpus`. A pin
-// naming a specific render node overrides the default. VM/exclusive rendering (VFIO)
-// is refused at check on substrates without a device model, so it never reaches here.
-gpu_flags(nm: string, kind: string, engine: string) -> string {
+// The SHARED container/lxc tier renders `--device <selector>`, choosing the selector
+// in PREFERENCE ORDER:
+//   1. `cdi_dev` (a CDI device name like "intel.com/gpu=all") when the caller found a
+//      CDI spec on the host — the STRUCTURED path: it brings the whole device bundle
+//      (card + render + the by-path symlinks the Intel UMD needs), portable across
+//      vendors (intel.com/gpu, nvidia.com/gpu, amd.com/gpu). Proven live on the N100.
+//   2. an explicit gpu_device(pin) the composition declared.
+//   3. the raw DRI render node "/dev/dri/renderD128" — the zero-setup fallback that
+//      works on ANY host with no CDI spec (also proven live on the N100).
+//
+// GROUND TRUTH (Intel iGPU, podman 6, 2026-07-04): `--gpus all` FAILS on Intel (it
+// hard-codes nvidia/AMD CDI auto-detect — "no known GPU vendor found in CDI specs").
+// The portable paths are BOTH `--device` forms above, NOT `--gpus`. The CDI probe is
+// host I/O, so the runner does it and passes cdi_dev in; compose stays pure. VM/
+// exclusive rendering (VFIO) is refused at check, so it never reaches here.
+gpu_flags(nm: string, kind: string, engine: string, cdi_dev: string) -> string {
     mode = get_gpu_mode(nm)
     if string_length(mode) == 0 { return "" }
-    // Container/LXC SHARED tier — DRI device-map (vendor-agnostic, proven on Intel).
-    if kind == "container" {
-        dev = get_gpu_device(nm)
-        if string_length(dev) == 0 { dev = "/dev/dri/renderD128" }
-        return "--device ${dev}"
-    }
-    if kind == "lxc" {
-        dev = get_gpu_device(nm)
-        if string_length(dev) == 0 { dev = "/dev/dri/renderD128" }
-        return "--device ${dev}"
-    }
+    if kind == "container" { return _gpu_device_flag(nm, cdi_dev) }
+    if kind == "lxc"       { return _gpu_device_flag(nm, cdi_dev) }
     // Other kinds either render via their own driver (VM VFIO, later) or are
     // refused at check. Emit nothing here; gpu_alloc_error() is the gate.
     return ""
+}
+
+// the selector-choice for the shared container/lxc tier (preference order above).
+_gpu_device_flag(nm: string, cdi_dev: string) -> string {
+    if string_length(cdi_dev) > 0 { return "--device ${cdi_dev}" }
+    dev = get_gpu_device(nm)
+    if string_length(dev) == 0 { dev = "/dev/dri/renderD128" }
+    return "--device ${dev}"
 }
 
 // gpu_alloc_error() — the CHECK-TIME allocation gate (§G's "earn its place" part).

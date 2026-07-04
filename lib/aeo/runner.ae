@@ -561,12 +561,17 @@ driver_up(nm: string, k: string) -> string {
         // so a composition's confinement is substrate-portable. A node with
         // peer-only egress lands on the internal net (can't phone home).
         confine = _confine_flags(nm, net, inet)
-        // GPU (§G): a gpu("shared") claim renders to a DRI device-map token
-        // (--device /dev/dri/renderD*), spliced into the SAME argv path as confine.
-        // exclusive/VM claims never reach here (refused at check). engine is passed
-        // so a future engine that needs --gpus/CDI can diverge; today all container
-        // engines take the vendor-agnostic --device path proven on the Intel box.
-        gflags = compose.gpu_flags(nm, k, eng)
+        // GPU (§G): a gpu("shared") claim renders to a --device token, spliced into
+        // the SAME argv path as confine. exclusive/VM claims never reach here
+        // (refused at check). We PROBE the host for a CDI spec first: if present we
+        // render the structured CDI selector (--device intel.com/gpu=all — the full
+        // card+render+by-path bundle), else fall back to the raw DRI render node.
+        // Both proven live on the N100; --gpus is NOT used (it fails on Intel).
+        cdidev = ""
+        if string_length(compose.get_gpu_mode(nm)) > 0 {
+            cdidev = _gpu_cdi_device(nm)
+        }
+        gflags = compose.gpu_flags(nm, k, eng, cdidev)
         if string_length(gflags) > 0 {
             if string_length(confine) > 0 {
                 confine = "${confine} ${gflags}"
@@ -789,6 +794,57 @@ _gpu_probe_dev(nm: string) {
     if string_contains(out, "yes") == 0 {
         println("aeo: [${nm}] gpu(\"${compose.get_gpu_mode(nm)}\") wants '${dev}' but it's absent on this host — the composition is valid; `up` it on a host with a GPU render node (this is a warning, not a failure)")
     }
+}
+
+// _gpu_cdi_device(nm) — probe the host for a CDI GPU spec and return a CDI device
+// selector (e.g. "intel.com/gpu=all") if one is present, "" otherwise. The STRUCTURED
+// GPU path: a CDI spec brings the whole device bundle (card + render + by-path), which
+// is what the Intel UMD / VA-API media apps actually want — vs the raw render-node
+// device-map. Vendor-portable (intel.com/gpu, nvidia.com/gpu, amd.com/gpu).
+//
+//   * An explicit gpu_device(pin) is the operator's choice — honor it, skip the probe
+//     (a pin may itself BE a CDI name like "intel.com/gpu=render", or a raw path).
+//   * Else scan /etc/cdi + /var/run/cdi for a "*.com/gpu" kind, prefer its `all`
+//     device, fall back to `render`. Returns "" if no spec (→ raw DRI fallback).
+// BSD hosts have no CDI — skip.
+_gpu_cdi_device(nm: string) -> string {
+    if host.family() == "bsd" { return "" }
+    if string_length(compose.get_gpu_device(nm)) > 0 { return "" }
+    av = list_new()
+    list_add(av, "-c")
+    // Emit the FIRST "<vendor>.com/gpu" kind found across the CDI dirs, then whether
+    // it declares an "all" device. Format: "<vendor.com/gpu>|<all|render>". The regex
+    // avoids an escaped dot (Aether string escaping + shell quoting is a footgun): a
+    // bare `.` matching any char is harmless for a "com/gpu" vendor kind.
+    list_add(av, "for d in /etc/cdi /var/run/cdi; do for f in \"$d\"/*.yaml \"$d\"/*.json; do [ -f \"$f\" ] || continue; k=$(grep -oE '[a-z0-9]+[.]com/gpu' \"$f\" | head -1); [ -n \"$k\" ] || continue; if grep -qE 'name:[[:space:]]*.?all' \"$f\"; then echo \"$k|all\"; else echo \"$k|render\"; fi; exit 0; done; done")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    if err != "" { return "" }
+    trimmed = _trim(out)
+    if string_length(trimmed) == 0 { return "" }
+    bar = string_index_of(trimmed, "|")
+    if bar < 0 { return "" }
+    vendor = string_substring(trimmed, 0, bar)
+    devname = string_substring(trimmed, bar + 1, string_length(trimmed))
+    return "${vendor}=${devname}"
+}
+
+// strip surrounding whitespace/newlines from a captured line.
+_trim(s: string) -> string {
+    n = string_length(s)
+    lo = 0
+    while lo < n {
+        c = string_char_at(s, lo)
+        if c != 32 { if c != 10 { if c != 13 { if c != 9 { break } } } }
+        lo = lo + 1
+    }
+    hi = n
+    while hi > lo {
+        c = string_char_at(s, hi - 1)
+        if c != 32 { if c != 10 { if c != 13 { if c != 9 { break } } } }
+        hi = hi - 1
+    }
+    return string_substring(s, lo, hi)
 }
 
 // _confine_flags(nm, net) — render this node's confinement (limit{} caps,

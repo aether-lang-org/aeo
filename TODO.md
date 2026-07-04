@@ -295,9 +295,15 @@ Gaps:
       GROUND TRUTH: `--gpus`/CDI is VENDOR-gated (nvidia/AMD toolchain) — FAILS on
       Intel ("no known GPU vendor found in CDI specs"); the DRI device-map is the
       portable path, so aeo renders `--device`, not `--gpus`. Corrected §G.
+      CDI arm ALSO BUILT + proven (2026-07-04): gpu_flags takes a cdi_dev the runner
+      resolves — _gpu_cdi_device probes /etc/cdi at up-time, prefers the `all` device,
+      renders `--device <vendor>.com/gpu=all` (full card+render+by-path bundle,
+      portable across intel/nvidia/amd), falls back to raw DRI when absent. Both arms
+      live-proven on the N100. CDI spec is a plain YAML (examples/cdi/intel-gpu.yaml),
+      NOT toolchain-locked. (Escaping footgun found+fixed: `[.]` not `\\.` in the
+      probe's embedded grep — Aether-string→sh mangles backslash-escapes.)
       NOT yet built (follow-ups): VM exclusive/VFIO render (refused-at-check today);
-      the `--gpus`/CDI per-engine specialization for nvidia/AMD hosts (gate on a
-      CDI-present probe); `"slice"` (MIG/SR-IOV); repeat gpu() for multi-device.
+      `"slice"` (MIG/SR-IOV); repeat gpu() for multi-device.
 - [ ] **`nested_virt()` — deny-by-default, attenuate-down-the-tree (see
       fable-5-insights.md §H)**. Principles of containment: capability must
       attenuate down the tree, never flow down implicitly — a node with nested
