@@ -209,6 +209,42 @@ instance. Generalizing:
    "exec seam exists + child runtime can run there" — a compose-time validation,
    loud at `aeo check`, not a deploy-time surprise.
 
+## F. OPEN: architect-vocabulary root nodes — `application()` / `service()` / `worker()`
+
+Paul's prompt (2026-07-04): `system()` is the coined root today; architects might
+want `application()` and `service()` (definite connotation: listens on a socket).
+What's the term for "runs its own loops, NO external listening interface"?
+
+**Answer: `worker`** — canonical since the Heroku/12-factor process model split
+`web` (listens) from `worker` (own loop, pulls from a queue, no inbound). .NET's
+template is literally "Worker Service"; Sidekiq/Celery use the same noun. The
+neighbors and why not: **daemon** (Unix background, but daemons often listen),
+**batch/job** (the mainframe word, but implies run-to-completion, not a standing
+loop), **controller/reconciler** (the k8s control-loop — right shape, specifically
+the state-convergence flavor), **consumer** (implies the broker), **agent**
+(taken/loaded in aeo), **headless** (no UI ≠ no socket).
+
+**The twist that makes it worth doing** — mere synonyms of `system()` would
+violate our own rule (*name what's fixed by construction*). But these connotations
+are CHECKABLE against the declared tree, and the grammar already has the
+machinery:
+
+- `service("api"){}` → asserts ≥1 node exposes/ingresses a port; a service
+  listening on nothing FAILS `aeo check`.
+- `worker("reaper"){}` → asserts NO node has expose()/ingress() — and can default
+  `deny_ingress` across the tree (egress to queue/db still per-node). The
+  architect's noun compiles to an enforceable interface posture; a worker that
+  sprouts a listener is caught at check time.
+- `system()` stays the neutral structural root.
+- Possible second step: `application()` as the umbrella containing `service{}`/
+  `worker{}` groupings (the openers already nest).
+
+Sub-flavors if ever needed, split by what drives the loop: queue-driven
+(worker/consumer), state-driven (controller/reconciler), clock-driven
+(scheduled/cron) — all ingress-free.
+
+STATUS: open exploration, not decided.
+
 ## What's good (for balance)
 
 - The 12 compositions share a genuinely uniform skeleton: header (what/vs-siblings/
