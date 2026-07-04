@@ -185,9 +185,16 @@ _batchable(nm: string) -> int {
         return 1
     }
     if k == "container" {
-        return 1
-    }
-    if k == "docker" {
+        // container liveness = a host `podman/docker ps` — batchable. EXCEPT the
+        // WSL engines (wslc/wsl_podman), whose ps is a remote `wsl -d ...` call,
+        // NOT the local host engine — those take the per-node probe path.
+        eng = compose.get_engine(nm)
+        if eng == "wslc" {
+            return 0
+        }
+        if eng == "wsl_podman" {
+            return 0
+        }
         return 1
     }
     return 0
@@ -199,32 +206,41 @@ _batchable(nm: string) -> int {
 // The engine's readiness fast-path (see _await_level).
 _alive_set(booted: ptr) -> string {
     s = " ${_batch_pidfile_alive(booted)} "
-    if _level_has_batch_kind(booted, "container") == 1 {
-        // NOTE: the call is hoisted to a local BEFORE interpolation. A string
-        // literal nested inside ${...} inside a "..." (e.g. `${f("docker")}`)
-        // mis-parses in the aether the front-door builds against — the inner
-        // "docker" is read as an undefined variable (E0300). Hoisting sidesteps it.
-        names = driver_linux.running_names("")
+    // `container` nodes are batched per ENGINE (podman/docker are separate `ps`
+    // planes; a level can hold both). Query each engine present among batchable
+    // containers. (wslc/wsl_podman aren't batchable — see _batchable — so they
+    // never reach here.) The call is hoisted to a local BEFORE interpolation: a
+    // string literal nested in ${...} inside "..." mis-parses (E0300).
+    if _level_has_engine(booted, "") == 1 {
+        names = driver_linux.running_names("")            // podman (auto)
         s = "${s}${_nl2sp(names)} "
     }
-    if _level_has_batch_kind(booted, "docker") == 1 {
+    if _level_has_engine(booted, "docker") == 1 {
         names = driver_linux.running_names("docker")
         s = "${s}${_nl2sp(names)} "
     }
     return s
 }
-
-// 1 if the level has a BOOTING, health-less node of `kind` (so its batch query is
-// worth running this tick).
-_level_has_batch_kind(booted: ptr, kind: string) -> int {
+// 1 if the level has a BOOTING, health-less `container` node resolving to `eng`
+// (""=podman/auto, "docker"). The batch-liveness engine partition (replaces the
+// old kind-keyed _level_has_batch_kind for containers, now that docker is an
+// engine not a kind). WSL engines are skipped — not host-ps batchable.
+_level_has_engine(booted: ptr, eng: string) -> int {
     m = list_size(booted)
     i = 0
     while i < m {
         bn = list_get_raw(booted, i)
         if get_state(bn) == STATE_BOOTING() {
-            if compose.get_kind(bn) == kind {
+            if compose.get_kind(bn) == "container" {
                 if string_length(compose.get_health(bn)) == 0 {
-                    return 1
+                    ne = compose.get_engine(bn)
+                    if ne != "wslc" {
+                        if ne != "wsl_podman" {
+                            if ne == eng {
+                                return 1
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -232,6 +248,7 @@ _level_has_batch_kind(booted: ptr, kind: string) -> int {
     }
     return 0
 }
+
 
 // Replace every newline in `s` with a space (so a multi-line `ps` name list joins
 // into the single space-delimited membership string).
@@ -455,19 +472,41 @@ _realize_build_steps(img: string) -> string {
 
 // ---- driver dispatch by kind (exported; pure routing) ----
 driver_up(nm: string, k: string) -> string {
-    if k == "docker" {
-        img = _container_image(nm, "docker")
-        if string_starts_err(img) == 1 {
-            return _strip_err(img)
-        }
-        return driver_linux.up(nm, img, compose.get_command(nm), compose.get_expose(nm), "docker")
-    }
     if k == "lxc" {
         // REAL LXC system container (driver_lxc), not podman. image() is the
         // download-template "dist:release" (e.g. "alpine:3.21").
         return driver_lxc.up(nm, compose.get_image(nm))
     }
     if k == "container" {
+        // ENGINE DISPATCH: `container` is the one OCI kind; get_engine(nm) picks
+        // the realizer (podman/docker auto per host, or wslc/wsl_podman on
+        // Windows). The Windows engines run through their own drivers (WSL owns
+        // its networking; no host podman nets) — route them FIRST, before the
+        // Linux podman-network + confine path below. podman/docker/"" fall
+        // through to the Linux path, with the engine passed to engine_resolve.
+        eng = compose.get_engine(nm)
+        if eng == "wslc" {
+            // Microsoft's native wslc.exe — no podman, no distro. (Confine
+            // rendering onto wslc's governance knobs is a follow-up.)
+            imgw = _container_image(nm, "")
+            if string_starts_err(imgw) == 1 {
+                return _strip_err(imgw)
+            }
+            return driver_wslc.up(nm, imgw, compose.get_command(nm), compose.get_expose(nm), compose.get_env(nm))
+        }
+        if eng == "wsl_podman" {
+            // podman INSIDE a WSL2 distro: `wsl -d <distro> -- podman ...`.
+            // wsl_distro() selects the distro ("" = WSL default).
+            imgd = _container_image(nm, "")
+            if string_starts_err(imgd) == 1 {
+                return _strip_err(imgd)
+            }
+            confinew = _confine_flags(nm, "", "")
+            if string_length(confinew) > 0 {
+                _ = audit.record(nm, k, "confine", confinew)
+            }
+            return driver_windows.up(nm, compose.get_wsl_distro(nm), imgd, compose.get_command(nm), compose.get_expose(nm), "", compose.get_env(nm), confinew)
+        }
         // NESTED container: if it lives INSIDE a VM (get_host != ""), aeo
         // reaches into that guest over ssh and builds+runs it THERE — the
         // real nested-execution path that makes `aeo up <dsl>` converge to a
@@ -525,7 +564,11 @@ driver_up(nm: string, k: string) -> string {
         if string_length(confine) > 0 {
             _ = audit.record(nm, k, "confine", confine)
         }
-        return driver_linux.up_confined(nm, img, compose.get_command(nm), compose.get_expose(nm), net, compose.get_env(nm), confine, "")
+        // engine_pref = the resolved engine ("" auto → podman→docker; "docker"
+        // pins docker). This is the fix for the old second-class docker path —
+        // docker-pinned nodes now get the SAME shared-net + env + confine
+        // treatment as podman ones, differing only in the engine binary.
+        return driver_linux.up_confined(nm, img, compose.get_command(nm), compose.get_expose(nm), net, compose.get_env(nm), confine, eng)
     }
     if k == "jail" {
         return driver_bsd.up(nm, compose.get_dataset(nm), "", compose.get_ip(nm), compose.get_command(nm))
@@ -564,34 +607,6 @@ driver_up(nm: string, k: string) -> string {
         // image() is a bundle dir (vmlinux + rootfs.ext4); cpus()/memory() size it.
         return driver_firecracker.up(nm, compose.get_image(nm), compose.get_cpus(nm), compose.get_memory(nm))
     }
-    if k == "windows" {
-        // Windows node (driver_windows): podman-through-WSL2. Same confinement +
-        // networking as a Linux container (it IS Linux podman, inside WSL); the
-        // driver just runs each verb via `wsl -d <distro> -- podman ...`. distro
-        // via wsl_distro() ("" = WSL default). No host podman networks here — the
-        // WSL distro owns its own; net/env pass through to podman unchanged.
-        img = _container_image(nm, "")
-        if string_starts_err(img) == 1 {
-            return _strip_err(img)
-        }
-        confine = _confine_flags(nm, "", "")
-        if string_length(confine) > 0 {
-            _ = audit.record(nm, k, "confine", confine)
-        }
-        return driver_windows.up(nm, compose.get_wsl_distro(nm), img, compose.get_command(nm), compose.get_expose(nm), "", compose.get_env(nm), confine)
-    }
-    if k == "wslc" {
-        // WSL Containers node (driver_wslc): Microsoft's native `wslc.exe` runs the
-        // Linux container directly on Windows — no podman, no distro prefix. Same
-        // container semantics as the linux tier; the runtime is MSFT's own. (No
-        // confine flags here yet — wslc's --network/limit surface differs from
-        // podman's; the limit/constrain rendering for wslc is a follow-up.)
-        img = _container_image(nm, "")
-        if string_starts_err(img) == 1 {
-            return _strip_err(img)
-        }
-        return driver_wslc.up(nm, img, compose.get_command(nm), compose.get_expose(nm), compose.get_env(nm))
-    }
     return "aeo: kind '${k}' has no up() driver on this host"
 }
 
@@ -611,16 +626,20 @@ driver_exec(nm: string, k: string, cmd: string) -> string {
         return driver_vm.exec_capture(nm, gip, cmd)
     }
     if k == "container" {
+        eng = compose.get_engine(nm)
+        if eng == "wslc" {
+            return driver_wslc.exec_capture(nm, cmd)
+        }
+        if eng == "wsl_podman" {
+            return driver_windows.exec_capture(nm, compose.get_wsl_distro(nm), cmd)
+        }
         host = compose.get_host(nm)
         if host != "" {
             // nested: ssh into the host VM and podman-exec the container there.
             hip = ipam.resolve_ip(compose.get_system(host), host)
             return driver_vm.exec_capture(host, hip, "podman exec ${nm} ${cmd}")
         }
-        return driver_linux.exec_capture(nm, cmd, "")
-    }
-    if k == "docker" {
-        return driver_linux.exec_capture(nm, cmd, "docker")
+        return driver_linux.exec_capture(nm, cmd, eng)   // eng "" auto, "docker" pins
     }
     if k == "lxc" {
         return driver_lxc.exec_capture(nm, cmd)
@@ -633,12 +652,6 @@ driver_exec(nm: string, k: string, cmd: string) -> string {
     }
     if k == "firecracker" {
         return driver_firecracker.exec_capture(nm, cmd)
-    }
-    if k == "windows" {
-        return driver_windows.exec_capture(nm, compose.get_wsl_distro(nm), cmd)
-    }
-    if k == "wslc" {
-        return driver_wslc.exec_capture(nm, cmd)
     }
     return ""
 }
@@ -665,13 +678,17 @@ driver_down(nm: string, k: string) -> string {
     if k == "firecracker" {
         return driver_firecracker.down(nm)
     }
-    if k == "windows" {
-        return driver_windows.down(nm, compose.get_wsl_distro(nm))
+    if k == "container" {
+        eng = compose.get_engine(nm)
+        if eng == "wslc" {
+            return driver_wslc.down(nm)
+        }
+        if eng == "wsl_podman" {
+            return driver_windows.down(nm, compose.get_wsl_distro(nm))
+        }
+        return driver_linux.down(nm, eng)   // "" auto, "docker" pins
     }
-    if k == "wslc" {
-        return driver_wslc.down(nm)
-    }
-    return driver_linux.down(nm, _engine_of(k))
+    return driver_linux.down(nm, "")
 }
 
 driver_probe(nm: string, k: string, health: string) -> int {
@@ -680,12 +697,20 @@ driver_probe(nm: string, k: string, health: string) -> int {
     // (a `status` check via agent_delegate's polling already confirmed up at
     // bring-up; re-probe through the agent, not host podman).
     if k == "container" {
+        eng = compose.get_engine(nm)
+        if eng == "wslc" {
+            return driver_wslc.probe(nm, health)
+        }
+        if eng == "wsl_podman" {
+            return driver_windows.probe(nm, compose.get_wsl_distro(nm), health)
+        }
         if _agent_path_on() == 1 {
             host = compose.get_host(nm)
             if string_length(host) > 0 {
                 return driver_vm.agent_status(host, nm, _agent_token(host), _agent_port(host))
             }
         }
+        return driver_linux.probe(nm, health, eng)   // "" auto, "docker" pins
     }
     if k == "jail" {
         return driver_bsd.probe(nm, health, "")
@@ -708,21 +733,9 @@ driver_probe(nm: string, k: string, health: string) -> int {
     if k == "firecracker" {
         return driver_firecracker.probe(nm, health, "")
     }
-    if k == "windows" {
-        return driver_windows.probe(nm, compose.get_wsl_distro(nm), health)
-    }
-    if k == "wslc" {
-        return driver_wslc.probe(nm, health)
-    }
-    return driver_linux.probe(nm, health, _engine_of(k))
+    return driver_linux.probe(nm, health, "")
 }
 
-_engine_of(k: string) -> string {
-    if k == "docker" {
-        return "docker"
-    }
-    return ""
-}
 
 // _confine_flags(nm, net) — render this node's confinement (limit{} caps,
 // constrain{} hardening, netpolicy) to a podman flag string via confine_linux.
@@ -1082,7 +1095,6 @@ _attest_state(nm: string) -> string {
 }
 _is_container(k: string) -> int {
     if k == "container" { return 1 }
-    if k == "docker"    { return 1 }
     return 0
 }
 
@@ -1574,10 +1586,11 @@ _kind_runnable(k: string, fam: string) -> int {
     if k == "lxc" {
         return _eq(fam, "linux")
     }
-    if k == "docker" {
-        return _eq(fam, "linux")
-    }
     if k == "container" {
+        // A `container` realized by a WSL engine (wslc / wsl_podman) runs on a
+        // WINDOWS host, not Linux — the driver's own available() is the real
+        // gate there, so don't linux-block it. podman/docker/"" containers need
+        // a Linux host.
         return _eq(fam, "linux")
     }
     if k == "kvm" {

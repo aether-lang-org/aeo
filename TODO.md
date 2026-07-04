@@ -218,7 +218,27 @@ Gaps:
       real. Fix: pass argv DIRECTLY to run_capture("sudo", [...]) with list_add_raw
       ptr-copy (as driver_lxc now does, like driver_vm's qemu exec). Until then,
       jail/jls/jexec via driver_bsd self-sudo would mangle their args live.
-- [ ] **`engine()` property — DESIGN DECIDED 2026-07-04 (see fable-5-insights.md §D)**.
+- [~] **`engine()` property — CORE BUILT + LIVE-PROVEN 2026-07-04; examples pending
+      (Paul migrating). See fable-5-insights.md §D.** DONE: compose `engine()` verb
+      (system-float + node override, snapshotted at decl like within/every) +
+      `get_engine()`; deleted docker/windows/wslc KIND-verbs; rerouted all runner
+      dispatch (up/exec/down/probe + batch-liveness `_level_has_engine`) to key on
+      `container` + resolved engine; deleted dead `_engine_of`/`_level_has_batch_kind`.
+      Both Windows DRIVERS kept (engine value = driver selector: wslc→driver_wslc,
+      wsl_podman→driver_windows). LIVE on bazzite (podman 5.8.2 + docker 29.5.3):
+      `engine()` float+override verified (system engine("docker") floats, node
+      engine("podman") overrides); the DOCKER-SECOND-CLASS BUG FIXED — an
+      engine-pinned container now gets `--memory 128m --pids-limit 16` + the shared
+      `aeo-<system>` network (podman inspect confirmed mem=134217728 pids=16
+      nets=aeo-engine_demo), which the old plain-up() docker path dropped. 22 spec
+      files pass, no regression. STILL TODO: (a) examples migrate docker()→
+      container(){engine("docker")} + collapse windows/wslc examples [Paul];
+      (b) host-family gate `_kind_runnable` still linux-blocks `container` — a WSL-
+      engined container needs the node's engine to skip the linux gate (driver
+      available() is the real check); (c) the mixed-engine-per-system network-plane
+      WARNING (podman vs docker nets can't resolve peers by name) not yet emitted;
+      (d) describe_tree command= surfacing for WSL-engine containers.
+      --- original design note ---
       `container()` stays the one OCI kind; new `engine("podman"|"docker"|"wslc")`
       node property with SYSTEM-SCOPE FLOAT + node override (same FluentSelenium
       float machinery as within/every). Auto default per host family: Linux →

@@ -33,7 +33,8 @@ exports (
     system,
     bhyve_vm, freebsd_vm, get_flavor, kvm_vm,
     resource,
-    container, docker, lxc, kvm, jail, bhyve, bwrap, nspawn, firecracker, windows, wslc,
+    container, lxc, kvm, jail, bhyve, bwrap, nspawn, firecracker,
+    engine, get_engine,
     check, smoke, suite, get_phase_spec_count, get_phase_spec_at,
     image, command, dockerfile, health, dataset, ip, depends, env, get_env, attest, get_attest,
     cpus, memory, nic, expose, wsl_distro,
@@ -167,14 +168,23 @@ resource(nm: string, k: string) -> string {
     config.put("aeo.cmp.floatwithin.${nm}", config.get("aeo.cmp.curwithin"))
     config.put("aeo.cmp.floatevery.${nm}", config.get("aeo.cmp.curevery"))
     config.put("aeo.cmp.floatwithout.${nm}", config.get("aeo.cmp.curwithout"))
+    // ...and the floating engine (same FluentSelenium snapshot: a system-scope
+    // engine() floats onto every container node declared after it, frozen here).
+    config.put("aeo.cmp.floatengine.${nm}", config.get("aeo.cmp.curengine"))
     return nm
 }
 
 // Kind-verb openers — the call site reads `container("db") { … }`. Each is
 // resource(nm, "<kind>"); the host-gating preflight rejects a kind the
-// host can't run. Linux: container/docker/lxc/kvm. FreeBSD: jail/bhyve.
+// host can't run. Linux: container/lxc/kvm. FreeBSD: jail/bhyve.
+//
+// `container()` is the ONE OCI app-container kind; which ENGINE realizes it
+// (podman/docker/wslc/wsl_podman) is the engine() PROPERTY, not the kind — see
+// engine()/get_engine() below. (The old docker()/wslc()/windows() kind-verbs
+// were deleted 2026-07-04: engine-on-the-kind was a category error; a node's
+// setter block is identical across OCI engines, so the engine is a parameter,
+// not a different kind. See fable-5-insights.md §D.)
 container(nm: string) -> string { return resource(nm, "container") }
-docker(nm: string)    -> string { return resource(nm, "docker") }
 lxc(nm: string)       -> string { return resource(nm, "lxc") }
 kvm(nm: string)       -> string { return resource(nm, "kvm") }
 jail(nm: string)      -> string { return resource(nm, "jail") }
@@ -182,8 +192,32 @@ bhyve(nm: string)     -> string { return resource(nm, "bhyve") }
 bwrap(nm: string)     -> string { return resource(nm, "bwrap") }
 nspawn(nm: string)    -> string { return resource(nm, "nspawn") }
 firecracker(nm: string) -> string { return resource(nm, "firecracker") }
-windows(nm: string)   -> string { return resource(nm, "windows") }
-wslc(nm: string)      -> string { return resource(nm, "wslc") }
+
+// engine(v) — pick the OCI engine that realizes a `container()` node:
+//   "podman" | "docker" | "wslc" | "wsl_podman" | "" (auto)
+// SYSTEM-SCOPE FLOAT + node override, exactly like within()/every(): called
+// bare inside a system(){} block it floats onto every subsequently-declared
+// container; called inside a container(){} block it pins that one node. "" (the
+// default) = auto per host family (Linux → podman → docker; Windows → wslc).
+// `_ctx` is the enclosing name (system or node) the closure DSL pushes.
+engine(_ctx: ptr, v: string) {
+    config.put("aeo.cmp.engine.${_ctx}", v)     // this node/system's explicit pin
+    config.put("aeo.cmp.curengine", v)          // ...and float onto later siblings
+}
+
+// get_engine(nm) — the resolved engine for node `nm`: node pin → floated
+// system default (snapshotted at decl) → "" (auto, the driver picks per host).
+get_engine(nm: string) -> string {
+    v = config.get("aeo.cmp.engine.${nm}")
+    if string_length(v) > 0 {
+        return v
+    }
+    f = config.get("aeo.cmp.floatengine.${nm}")
+    if string_length(f) > 0 {
+        return f
+    }
+    return ""
+}
 
 // --- declared verification: check() / smoke() / suite() -------------------
 //
@@ -1088,14 +1122,6 @@ _command_in_tree(kind: string) -> int {
         return 1
     }
     if kind == "nspawn" {
-        return 1
-    }
-    // windows/wslc: command() is the container payload (like the sandbox/system-
-    // container tiers), so surface it in the tree.
-    if kind == "windows" {
-        return 1
-    }
-    if kind == "wslc" {
         return 1
     }
     return 0
