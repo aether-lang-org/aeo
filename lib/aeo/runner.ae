@@ -1448,6 +1448,132 @@ run_restart() {
     }
 }
 
+// run_cutover — `aeo cutover <compose.ae> <node> [new-image]`: zero-downtime
+// blue-green swap of a single CONTAINER node. blue = the running <node>; green is
+// stood up beside it (new image from AEO_CUTOVER_IMAGE / arg, else blue's own
+// image = a rolling restart) on the shared aeo-<system> net, CONFINED identically,
+// health-gated; then the service alias (<node>) moves blue->green and blue is
+// retired. Rollback: if green fails health, green is torn down and blue keeps
+// serving. Proven mechanism (network-alias swap on podman 6).
+run_cutover() {
+    node = _envc("AEO_NODE")
+    if node == "" {
+        println("aeo: cutover needs a node (usage: aeo cutover <compose.ae> <node> [new-image])")
+        return
+    }
+    // find + kind-gate: cutover is container-only (the alias-swap mechanism).
+    n = compose.count()
+    found = 0
+    i = 0
+    while i < n {
+        if compose.name_at(i) == node {
+            found = 1
+        }
+        i = i + 1
+    }
+    if found == 0 {
+        println("aeo: no node '${node}' in this composition")
+        return
+    }
+    k = compose.get_kind(node)
+    if k != "container" {
+        println("aeo: cutover only supports container nodes (got kind='${k}')")
+        return
+    }
+    eng = compose.get_engine(node)
+    if eng == "wslc" {
+        println("aeo: cutover not supported for the wslc engine yet (host podman/docker only)")
+        return
+    }
+    if eng == "wsl_podman" {
+        println("aeo: cutover not supported for the wsl_podman engine yet (host podman/docker only)")
+        return
+    }
+
+    // green's image: AEO_CUTOVER_IMAGE if set, else blue's declared image (rolling).
+    green_img = _envc("AEO_CUTOVER_IMAGE")
+    if green_img == "" {
+        green_img = _container_image(node, eng)
+        if string_starts_err(green_img) == 1 {
+            println("aeo: ${_strip_err(green_img)}")
+            return
+        }
+    }
+    green = "${node}-green"
+    net = "aeo-${compose.get_system(node)}"
+    inet = "aeo-${compose.get_system(node)}-int"
+    confine = _confine_flags(node, net, inet)
+
+    println("aeo: cutover ${node} -> green (${green}) image=${green_img}")
+
+    // ATTEST the green image BEFORE it serves (the security invariant: a cutover
+    // must not briefly serve an un-attested node). If blue pinned attest(), green
+    // must match too; a mismatch refuses the cutover, blue keeps serving.
+    pin = compose.get_attest(node)
+    if attest.is_attested(pin) == 1 {
+        averr = attest.verify(green_img, pin)
+        if averr != "" {
+            _ = audit.record(green, k, "attest-refuse", pin)
+            println("aeo: cutover REFUSED — green image ${averr}")
+            return
+        }
+        _ = audit.record(green, k, "attest-pass", pin)
+        green_img = attest.pinned_ref(green_img, pin)
+    }
+
+    // ensure the shared nets exist (idempotent), then stand green up CONFINED.
+    _ = driver_linux.network_ensure(net, eng)
+    _ = driver_linux.network_ensure_internal(inet, eng)
+    if string_length(confine) > 0 {
+        _ = audit.record(green, k, "confine", confine)   // green booted WITH the posture
+    }
+    ge = driver_linux.up_green(green, green_img, compose.get_command(node), net, compose.get_env(node), confine, eng)
+    if ge != "" {
+        println("aeo: cutover ABORTED — green did not start: ${ge}")
+        driver_linux.down(green, eng)
+        return
+    }
+
+    // HEALTH-GATE green before the cut (poll its own name up to the node's window).
+    health = compose.get_health(node)
+    if _cutover_health_wait(green, health, eng) == 0 {
+        println("aeo: cutover ROLLBACK — green failed health; retiring green, blue keeps serving")
+        driver_linux.down(green, eng)
+        return
+    }
+    println("  green healthy — cutting the '${node}' alias over")
+
+    // THE CUT: move the service alias (the node's declared name) blue->green,
+    // then blue no longer answers it.
+    me = driver_linux.alias_move(net, node, green, node, eng)
+    if me != "" {
+        println("aeo: cutover FAILED at the alias swap: ${me} — rolling back green")
+        driver_linux.down(green, eng)
+        return
+    }
+    _ = audit.record(node, k, "cutover", "alias '${node}' blue->green (${green})")
+
+    // retire blue (the old version). green now serves under the node's name.
+    driver_linux.down(node, eng)
+    println("aeo: cutover complete — '${node}' now served by green (${green}); blue retired")
+}
+
+// Poll green on its own container name until healthy or the node's up_within window
+// elapses. 1 if healthy, 0 on timeout. Uses the same driver probe as bring-up.
+_cutover_health_wait(green: string, health: string, eng: string) -> int {
+    budget = 30000
+    waited = 0
+    tick = 1000
+    while waited < budget {
+        if driver_linux.probe(green, health, eng) == 1 {
+            return 1
+        }
+        sleep(tick)
+        waited = waited + tick
+    }
+    return 0
+}
+
 // env read with config-bridge fallback (matches _tag's pattern). Guards the
 // getenv-returns-null footgun: os_getenv returns null (not "") when unset, and
 // null != "" — so normalize a zero-length result to "".
@@ -1779,6 +1905,10 @@ main() {
     }
     if cmd == "exec" {
         run_exec()
+        return
+    }
+    if cmd == "cutover" {
+        run_cutover()
         return
     }
     if cmd == "restart" {

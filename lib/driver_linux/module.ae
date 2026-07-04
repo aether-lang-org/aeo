@@ -26,8 +26,9 @@ import std.fs (write_atomic)
 
 exports (
     name, engine_resolve,
-    up, up_net, up_confined, network_ensure, network_ensure_internal, down, probe, exec_capture, build, build_entrypoint, built_tag,
+    up, up_net, up_confined, up_green, alias_move, network_ensure, network_ensure_internal, down, probe, exec_capture, build, build_entrypoint, built_tag,
     ps_running_argv, ps_all_running_argv, running_names, run_argv, run_argv_net, run_argv_confined, stop_argv, rm_argv, exec_health_argv,
+    net_disconnect_argv, net_connect_alias_argv,
     build_argv
 )
 
@@ -257,6 +258,71 @@ rm_argv(res_name: string) -> ptr {
     return av
 }
 
+// --- blue-green cutover: network-alias swap primitives ---------------------
+//
+// The zero-downtime cutover mechanism (proven live on podman 6): a service alias
+// on the shared net names the LIVE version. blue holds it; green is staged beside
+// blue on the SAME bridge net; then the alias moves to green and blue's is dropped
+// — a client resolving http://<alias> switches blue->green with no address change.
+//
+// PODMAN-6 GOTCHAS baked in here (learned live): (1) both must be on a BRIDGE net
+// from creation — a container defaulting to podman-6's `pasta` net can't be
+// `network connect`'d; up_confined already joins the shared net, so that holds.
+// (2) re-aliasing an already-connected container needs disconnect THEN connect
+// --alias (podman refuses a second connect).
+
+// `<engine> network disconnect NET NAME`
+net_disconnect_argv(net: string, res_name: string) -> ptr {
+    av = list_new()
+    list_add(av, "network")
+    list_add(av, "disconnect")
+    list_add(av, net)
+    list_add(av, res_name)
+    return av
+}
+
+// `<engine> network connect --alias ALIAS NET NAME`
+net_connect_alias_argv(net: string, res_name: string, alias: string) -> ptr {
+    av = list_new()
+    list_add(av, "network")
+    list_add(av, "connect")
+    list_add(av, "--alias")
+    list_add(av, alias)
+    list_add(av, net)
+    list_add(av, res_name)
+    return av
+}
+
+// alias_move(net, from_name, to_name, alias, engine_pref) — atomically-ish move the
+// service `alias` on `net` from `from_name` (blue) to `to_name` (green): give green
+// the alias (disconnect+reconnect-with-alias, per gotcha 2), then drop blue from the
+// net so only green answers `alias`. Both must already be on `net`. Returns "" on
+// success. The cutover instant is when green gains the alias.
+alias_move(net: string, from_name: string, to_name: string, alias: string, engine_pref: string) -> string {
+    eng = engine_resolve(engine_pref)
+    if eng == "" {
+        return "aeo: no container engine for alias move on '${net}'"
+    }
+    // green: disconnect then reconnect WITH the alias.
+    dav = net_disconnect_argv(net, to_name)
+    _do, _ds, _de = run_capture(eng, dav, null)
+    list_free(dav)
+    cav = net_connect_alias_argv(net, to_name, alias)
+    out, status, err = run_capture(eng, cav, null)
+    list_free(cav)
+    if err != "" {
+        return "aeo: cutover connect-alias failed for '${to_name}': ${err}"
+    }
+    if status != 0 {
+        return "aeo: cutover connect-alias failed for '${to_name}' (exit ${status}): ${out}"
+    }
+    // blue: drop it from the net so `alias` now resolves ONLY to green.
+    bdav = net_disconnect_argv(net, from_name)
+    _bo, _bs, _be = run_capture(eng, bdav, null)
+    list_free(bdav)
+    return ""
+}
+
 // `<engine> exec NAME /bin/sh -c "HEALTH"` — run the health command
 // INSIDE the container; exit 0 == healthy.
 exec_health_argv(res_name: string, health: string) -> ptr {
@@ -306,6 +372,38 @@ up_confined(res_name: string, image: string, cmd: string, expose: int, net: stri
     }
     if status != 0 {
         return "aeo: '${eng} run' failed for '${res_name}' (exit ${status}): ${out}"
+    }
+    return ""
+}
+
+// up_green — stand the GREEN container up beside blue for a cutover: same image/
+// confinement, joined to the SAME shared `net` (so the alias swap works), but with
+// NO service alias yet (green earns the alias only at the cut) and NO host port
+// publish (blue still owns :expose until retired). `green_name` is the distinct
+// container name (e.g. "<node>-green"). Returns "" on success. The confinement is
+// passed through unchanged — green must come up CONFINED before it can serve (the
+// blue-green security invariant).
+up_green(green_name: string, image: string, cmd: string, net: string, env: string, confine: string, engine_pref: string) -> string {
+    eng = engine_resolve(engine_pref)
+    if eng == "" {
+        return "aeo: no container engine found (need podman or docker on PATH)"
+    }
+    if image == "" {
+        return "aeo: green '${green_name}' has no image() set"
+    }
+    if probe(green_name, "", engine_pref) == 1 {
+        return ""
+    }
+    // expose=0: blue owns the published host port; green joins the net for the
+    // in-cluster alias cut only.
+    av = run_argv_confined(green_name, image, cmd, 0, net, env, confine)
+    out, status, err = run_capture(eng, av, null)
+    list_free(av)
+    if err != "" {
+        return "aeo: green spawn failed for '${green_name}': ${err}"
+    }
+    if status != 0 {
+        return "aeo: green '${eng} run' failed for '${green_name}' (exit ${status}): ${out}"
     }
     return ""
 }

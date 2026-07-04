@@ -1,0 +1,44 @@
+// spec_cutover.ae — the blue-green cutover argv-swap primitives (lib/driver_linux).
+//
+// The zero-downtime cutover mechanism (proven live on podman 6) is a network-alias
+// swap. The pure, unit-testable core is the two argv builders that move the service
+// alias: net_disconnect_argv + net_connect_alias_argv. This locks their shape so the
+// swap can't silently drift. The live up_green/alias_move exec paths are proved on a
+// real podman host (the cutover live test), not here.
+//
+//   sh test/run-spec.sh test/spec_cutover.ae
+
+import aeocha
+import driver_linux (net_disconnect_argv, net_connect_alias_argv)
+import std.string
+
+main() {
+    fw = aeocha.init()
+    aeocha.describe(fw, "lib/driver_linux — blue-green cutover argv") {
+
+        aeocha.describe("net_disconnect_argv") {
+            aeocha.it("builds `network disconnect NET NAME`") callback {
+                av = net_disconnect_argv("aeo-web", "web")
+                aeocha.expect_int(list_size(av)).to_equal(4)
+                aeocha.expect_str(list_get_raw(av, 0)).to_equal_str("network")
+                aeocha.expect_str(list_get_raw(av, 1)).to_equal_str("disconnect")
+                aeocha.expect_str(list_get_raw(av, 2)).to_equal_str("aeo-web")
+                aeocha.expect_str(list_get_raw(av, 3)).to_equal_str("web")
+            }
+        }
+
+        aeocha.describe("net_connect_alias_argv (the cutover instant)") {
+            aeocha.it("builds `network connect --alias ALIAS NET NAME`") callback {
+                av = net_connect_alias_argv("aeo-web", "web-green", "web")
+                aeocha.expect_int(list_size(av)).to_equal(6)
+                aeocha.expect_str(list_get_raw(av, 0)).to_equal_str("network")
+                aeocha.expect_str(list_get_raw(av, 1)).to_equal_str("connect")
+                aeocha.expect_str(list_get_raw(av, 2)).to_equal_str("--alias")
+                aeocha.expect_str(list_get_raw(av, 3)).to_equal_str("web")       // the SERVICE alias
+                aeocha.expect_str(list_get_raw(av, 4)).to_equal_str("aeo-web")   // the net
+                aeocha.expect_str(list_get_raw(av, 5)).to_equal_str("web-green") // green owns it now
+            }
+        }
+    }
+    aeocha.run_summary(fw)
+}

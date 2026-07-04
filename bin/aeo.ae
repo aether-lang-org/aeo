@@ -81,6 +81,15 @@ main() {
             exec_node = aether_args_get(3)   // reuse the node slot
         }
     }
+    // cutover: aeo cutover <compose.ae> <node> [new-image]  (node=arg3, image=arg4)
+    if cmd == "cutover" {
+        if argc >= 4 {
+            exec_node = aether_args_get(3)          // the blue node, via the node slot
+        }
+        if argc >= 5 {
+            exec_cmd = aether_args_get(4)           // reuse the cmd slot for the new image
+        }
+    }
     // backup: aeo backup <compose.ae> <tag> [dir]   (tag=arg3 already; dir=arg4)
     // prune:  aeo prune  <compose.ae> [keep]         (keep=arg3 already as `tag`)
     backup_dir = ""
@@ -97,14 +106,14 @@ main() {
     }
 
     if compose_path == "" {
-        _diag("usage: aeo [up|down|status|check|smoke|suite|dry-run|snapshot|rollback|exec|restart|backup|prune|audit] <compose.ae> [tag|node cmd...]")
+        _diag("usage: aeo [up|down|status|check|smoke|suite|dry-run|snapshot|rollback|exec|restart|cutover|backup|prune|audit] <compose.ae> [tag|node cmd...]")
         exit(2)
     }
     // check/smoke/suite are the declared-verification phases (the composition's
     // check()/smoke()/suite() spec refs): check = specs only, no deploy; smoke =
     // deploy + specs, leave standing; suite = deploy + specs, tear down.
     if _known_cmd(cmd) == 0 {
-        _diag("aeo: unknown subcommand '${cmd}' (want up|down|status|check|smoke|suite|dry-run|snapshot|rollback|exec|restart|backup|prune|audit)")
+        _diag("aeo: unknown subcommand '${cmd}' (want up|down|status|check|smoke|suite|dry-run|snapshot|rollback|exec|restart|cutover|backup|prune|audit)")
         exit(2)
     }
 
@@ -205,6 +214,13 @@ main() {
     if cmd == "restart" {
         _ = _setenv("AEO_NODE", exec_node)
     }
+    // cutover: the blue node + the optional new image (via the reused cmd slot).
+    if cmd == "cutover" {
+        _ = _setenv("AEO_NODE", exec_node)
+        if exec_cmd != "" {
+            _ = _setenv("AEO_CUTOVER_IMAGE", exec_cmd)
+        }
+    }
     // backup: AEO_TAG (the tag arg, already set above) + the output dir.
     if cmd == "backup" {
         if backup_dir != "" {
@@ -253,6 +269,7 @@ _known_cmd(c: string) -> int {
     if c == "rollback" { return 1 }
     if c == "exec" { return 1 }
     if c == "restart" { return 1 }
+    if c == "cutover" { return 1 }
     if c == "backup" { return 1 }
     if c == "prune" { return 1 }
     if c == "audit" { return 1 }
