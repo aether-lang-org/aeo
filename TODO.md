@@ -370,11 +370,26 @@ wired yet; mapped here as candidate kinds. Ordered by how cleanly they'd land:
       real vmlinux + /dev/kvm boots). Example: examples/silly_addition_firecracker.ae.
       LIVE boot needs a KVM host: run test/smoke_firecracker.ae where /dev/kvm +
       firecracker + a bundle exist (it SKIPs otherwise; Docker-on-macOS has no
-      /dev/kvm). KNOWN GAPS / follow-ups: (1) exec_capture is a no-op — a microVM
-      has no host-side exec; reaching the guest needs ssh/vsock over a tap (the
-      driver_vm ssh shape). (2) No networking yet (bare boot; a tap/CNI for guest
-      egress is next). (3) Artifact provisioning — image() must point at a
-      prebuilt vmlinux+rootfs bundle today.
+      /dev/kvm). LIVE-CONFIRMED 2026-07-04 on bazzite (Paul installed firecracker
+      v1.16.1 to ~/.local/bin; kernel vmlinux-6.1.102 + ubuntu-22.04.ext4 rootfs from
+      the firecracker-ci S3 bucket staged at ~/fc-bundles/{db,app}, pointed via
+      AEO_FC_BUNDLEDIR): `aeo suite examples/silly_addition_firecracker.ae` completed
+      the full phase (up→spec 1 passing→teardown), and the db microVM's log shows a
+      REAL Linux boot (systemd 'Reached target Local File Systems', udev, etc.). So
+      firecracker is a proven live substrate now. KNOWN GAPS / follow-ups: (1)
+      exec_capture is a no-op — a microVM has no host-side exec; reaching the guest
+      needs ssh/vsock over a tap (the driver_vm ssh shape). (2) No networking yet
+      (bare boot; a tap/CNI for guest egress is next). (3) Artifact provisioning —
+      image() must point at a prebuilt vmlinux+rootfs bundle today. (4) NEW from the
+      live run — a LIVENESS RACE: aeo's pidfile probe ran BEFORE driver_firecracker
+      wrote the pidfile (`cat: /tmp/aeo-fc-*.pid: No such file` during bring-up), yet
+      the batch-liveness path promoted the nodes to `up` anyway; and the CI rootfs is
+      EPHEMERAL (boots to login, no long-lived payload, so the firecracker process
+      exits — unlike the podman sleep-600 demos). Fix: driver should write the pidfile
+      BEFORE returning from up() (or the poller must tolerate a not-yet-written pid as
+      "still booting", not "up"); and firecracker demos need a rootfs with an
+      init-held workload to persist. The suite spec only re-asserts the data model
+      (no in-guest probe per gap #1), so it passed regardless — honest.
 - [ ] **microsandbox (`msb`) — fast local microVMs for UNTRUSTED workloads**
       (github.com/superradcompany/microsandbox, Apache-2.0, libkrun+smoltcp).
       An almost-tailor-made fit for aeo's *purpose* ("orchestrated trees that
