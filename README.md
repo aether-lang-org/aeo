@@ -146,6 +146,11 @@ grouped by what they declare:
   substrate-portable confinement.
 - **supply chain:** `attest("sha256:…")` — pin a node's expected image digest;
   aeo verifies it before boot and refuses on mismatch.
+- **device claims:** `gpu("shared"|"exclusive")` (+ optional `gpu_device(pin)`) —
+  names the *contract* (container/lxc SHARE a GPU; a VM takes it EXCLUSIVELY via
+  VFIO), and `aeo check` enforces the allocation (exclusive ∩ anything on one
+  device fails; kind-mismatches fail). Renders to the vendor-agnostic DRI
+  device-map (`--device /dev/dri`) — proven live on a podman-6 Intel iGPU.
 - **VM sizing:** `cpus`, `memory`, `nic`; **image recipes:** `from`, `install`,
   `systemd_unit`, `realize_as`, …
 
@@ -261,7 +266,7 @@ lib/resource/         the actor↔main state bridge
 lib/driver_windows/  lib/driver_wslc/   Windows OCI engines (podman-in-WSL2 / MSFT's native wslc.exe)
 examples/             the substrate grid — twelve `db ◄ app` compositions (see examples/README.md)
 examples/checks/      the per-example check()/smoke()/suite() aeocha specs
-test/                 ~27 specs (fluent-aeocha style): driver/confinement/attest/audit/lifecycle + real-jail
+test/                 ~29 specs (fluent-aeocha style): driver/confinement/attest/audit/lifecycle/gpu + real-jail
 ```
 
 ## What aeo is NOT

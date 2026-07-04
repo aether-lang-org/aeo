@@ -265,15 +265,25 @@ audited like confinement):
 Modes: `"shared"` (shared ∩ shared OK), `"exclusive"` (∩ anything = conflict),
 `"slice"` reserved (MIG / SR-IOV VF — exclusive-ish sub-devices, later).
 
-**Per-substrate rendering** (all real mechanisms today): podman `--gpus`
-(**podman 6.0, ~2026-06, made `--gpus` work with AMD GPUs too — so a single
-`--gpus` renders `gpu("shared")` uniformly on podman, not just the DRI mount;
-bazzite is AMD, testable here**) or `--device /dev/dri` / CDI nvidia on older
-podman; docker `--gpus`; **wslc `--gpus` (already in its run flags — seen in the
-CLI probe)**; lxc cgroup device-allow + /dev/dri mount (the Proxmox `dev0:`
-pattern); kvm/bhyve exclusive via VFIO/ppt; jail devfs ruleset; bwrap
-`--dev-bind`. REFUSED at check: any gpu() on firecracker (no device model);
-`shared` on VM kinds until vGPU/SR-IOV support exists (honest frontier).
+**Per-substrate rendering.** GROUND-TRUTH CORRECTION (live, 2026-07-04, Intel
+Alder Lake-N iGPU, podman 6, CachyOS): the earlier note that podman 6's `--gpus`
+"renders `gpu('shared')` uniformly" is WRONG for Intel. `podman run --gpus all`
+FAILS there — `Error: getting CDI device names: ... no known GPU vendor found in
+CDI specs`. `--gpus` on podman 6 is a CDI front-end, and CDI specs are generated
+by the **nvidia/AMD vendor toolchains** (nvidia-ctk, amd) — Intel iGPUs get none
+by default. So `--gpus` is vendor-gated, not universal. The VENDOR-AGNOSTIC path
+that works on ALL of them is the DRI render-node device-map: `--device
+/dev/dri/renderD128`. **aeo renders `gpu("shared")` to `--device`, not `--gpus`**
+— proven live: the container sees `/dev/dri/renderD128` at major:minor 226,128
+(the host iGPU exactly), a plain container does not, and `podman inspect
+.Config.CreateCommand` shows aeo passed exactly `--device /dev/dri/renderD128`.
+`--gpus`/CDI remains a valid FUTURE per-engine specialization (nvidia/AMD hosts,
+gated on a CDI-present probe) but is not the portable default. Other substrates:
+lxc cgroup device-allow + /dev/dri mount (the Proxmox `dev0:` pattern — same DRI
+path, wired); kvm/bhyve exclusive via VFIO/ppt (not yet built); jail devfs
+ruleset; bwrap `--dev-bind`. REFUSED at check: any gpu() on firecracker (no
+device model); `shared` on VM kinds and `exclusive` on container/lxc kinds
+(kind/mode mismatch); `shared` on VM until vGPU/SR-IOV exists (honest frontier).
 
 **The earn-its-place part — check-time allocation rules:**
 1. exclusive ∩ anything on one device → FAIL `aeo check`, with the article's
@@ -287,7 +297,12 @@ Obeys the naming rule: `gpu("shared")` names the CONTRACT (coexistence
 semantics); the mechanism (--device vs VFIO vs devfs) varies per substrate and
 belongs to the drivers.
 
-STATUS: proposed 2026-07-04, not built.
+STATUS: **BUILT + live-proven 2026-07-04.** compose: gpu()/gpu_device()/
+get_gpu_mode/get_gpu_device/gpu_flags/gpu_alloc_error; runner: up-path splices
+gpu_flags into confine, `aeo check` runs gpu_alloc_error()+_gpu_preflight();
+describe_tree shows gpu=. test/spec_gpu.ae (13). Live: shared/DRI on Intel iGPU.
+NOT yet built: the VM exclusive/VFIO render (refused-at-check today, honest); the
+`--gpus`/CDI per-engine specialization for nvidia/AMD hosts (gated on CDI probe).
 
 ## H. PROPOSED: `nested_virt()` — deny-by-default, attenuate-down-the-tree
 

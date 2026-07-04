@@ -282,20 +282,22 @@ Gaps:
       design is RECURSIVE (the tree-of-nodes / aeo-agent recursion). No demo of
       jail-in-VM, VM-in-VM, or 3+ tier. (Subsumes into the general-nesting item
       above once that lands: depth is just repeated application of the exec seam.)
-- [ ] **`gpu(mode)` — device claims with CHECKED allocation semantics (see
-      fable-5-insights.md §G)**. The XDA article's sharpest point: VM passthrough
-      is EXCLUSIVE (VFIO detaches the device from host + all other consumers);
-      LXC/container device-mapping is SHARED (many consumers on one iGPU). Coin
-      `gpu("shared"|"exclusive")` (+ optional `gpu_device(pin)`; `"slice"`
-      reserved for MIG/SR-IOV) as a claim beside cpus()/memory(), rendered via
-      the grant machinery + recorded in the audit trail. Per-substrate: podman
-      `--device /dev/dri`/CDI, docker `--gpus`, wslc `--gpus` (already in its
-      run flags), lxc cgroup-allow + /dev/dri mount, kvm/bhyve VFIO/ppt
-      (exclusive only), jail devfs, bwrap --dev-bind; REFUSE at check on
-      firecracker (no device model) and `shared`-on-VM (until vGPU). Check-time
-      allocation: exclusive ∩ anything on one device = FAIL with the tier-choice
-      explanation — the article's human decision becomes a machine-checked
-      constraint. Host preflight probes the device exists.
+- [x] **`gpu(mode)` — device claims with CHECKED allocation semantics (see
+      fable-5-insights.md §G)** — BUILT + live-proven 2026-07-04 (Intel iGPU,
+      podman 6, CachyOS). `gpu("shared"|"exclusive")` + optional `gpu_device(pin)`
+      as a claim; gpu_flags renders SHARED container/lxc to `--device /dev/dri`;
+      gpu_alloc_error() is the check-time gate (kind-gating + exclusive-conflict
+      per device within a system, with the tier-choice reasoning as the error);
+      up-path splices the flag into confine + audit-records it; `aeo check` runs
+      the gate + a host DRI-preflight; describe_tree shows gpu=. test/spec_gpu.ae
+      (13). LIVE: container sees /dev/dri/renderD128 @ 226,128 (host iGPU exactly),
+      plain container does not, inspect .CreateCommand confirms the flag.
+      GROUND TRUTH: `--gpus`/CDI is VENDOR-gated (nvidia/AMD toolchain) — FAILS on
+      Intel ("no known GPU vendor found in CDI specs"); the DRI device-map is the
+      portable path, so aeo renders `--device`, not `--gpus`. Corrected §G.
+      NOT yet built (follow-ups): VM exclusive/VFIO render (refused-at-check today);
+      the `--gpus`/CDI per-engine specialization for nvidia/AMD hosts (gate on a
+      CDI-present probe); `"slice"` (MIG/SR-IOV); repeat gpu() for multi-device.
 - [ ] **`nested_virt()` — deny-by-default, attenuate-down-the-tree (see
       fable-5-insights.md §H)**. Principles of containment: capability must
       attenuate down the tree, never flow down implicitly — a node with nested
@@ -452,9 +454,13 @@ wired yet; mapped here as candidate kinds. Ordered by how cleanly they'd land:
         - **Version lockstep** — podman 6 demands Buildah 1.44 / Skopeo 1.23 /
           Netavark+Aardvark 2.0. aeo doesn't bundle these, but the attest follow-up
           (cosign/skopeo signature path) must use the matching versions.
-        - **--gpus now covers AMD** — firms up the gpu() proposal (fable-5-insights
-          §G): one `--gpus` renders gpu(\"shared\") uniformly on podman 6, and bazzite
-          is AMD → testable. (Cross-ref the gpu() TODO item.)
+        - **--gpus is VENDOR-gated, NOT universal** (CORRECTED 2026-07-04 by live
+          probe): podman 6's `--gpus` is a CDI front-end; CDI specs come from the
+          nvidia/AMD vendor toolchains, so `--gpus all` FAILS on Intel iGPUs ("no
+          known GPU vendor found in CDI specs"). The portable path is the DRI
+          device-map (`--device /dev/dri`), which is what gpu("shared") renders.
+          `--gpus`/CDI stays a future per-engine specialization for nvidia/AMD
+          hosts (gate on a CDI-present probe). (gpu() item above: BUILT + proven.)
         - Box status: bazzite host 5.8.2, WSL2 guest 5.7.0. PODMAN-6 BOX NOW LIVE:
           CachyOS @192.168.0.160 (Arch, gcc 16.1.1, podman 6.0.0, cgroups v2, Intel
           iGPU) — throwaway, reimaging to FreeBSD after. LIVE-PROVEN there 2026-07-04:
