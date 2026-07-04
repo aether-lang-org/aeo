@@ -914,7 +914,16 @@ _enforce_limits(nm: string) {
         return
     }
     if host.family() != "bsd" {
-        println("aeo: [${nm}] limit{} declared but rctl is FreeBSD-only — NOT enforced on this host")
+        // On Linux, a container/wslc node's limit{} caps were ALREADY applied at
+        // bring-up via cgroups (driver_linux.up_confined -> --memory/--pids-limit,
+        // or the WSL engines' equivalents) — NOT via rctl. So this rctl pass is a
+        // no-op for them, and must NOT claim "NOT enforced" (the cgroup enforcement
+        // is real — podman inspect proves mem/pids caps). Only a NON-container
+        // Linux kind (which has no cgroup limit path) is genuinely unenforced here.
+        if _is_container(compose.get_kind(nm)) == 1 {
+            return
+        }
+        println("aeo: [${nm}] limit{} declared but not enforced for kind='${compose.get_kind(nm)}' on a linux host (rctl is FreeBSD-only; cgroup caps apply to container kinds only)")
         return
     }
     k = compose.get_kind(nm)
