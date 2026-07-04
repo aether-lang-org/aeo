@@ -27,23 +27,23 @@ main() {
 
         aeocha.describe("mem_mib — memory string -> Firecracker mem_size_mib (int MiB)") {
             aeocha.it("parses M/G suffixes, bare numbers, and the empty default") callback {
-                aeocha.assert_eq(mem_mib("512M"), 512, "512M")
-                aeocha.assert_eq(mem_mib("1G"), 1024, "1G -> 1024 MiB")
-                aeocha.assert_eq(mem_mib("256"), 256, "bare -> MiB")
-                aeocha.assert_eq(mem_mib(""), 128, "empty -> 128 floor")
-                aeocha.assert_eq(mem_mib("2g"), 2048, "lowercase g")
+                aeocha.expect_int(mem_mib("512M")).to_equal(512)
+                aeocha.expect_int(mem_mib("1G")).to_equal(1024)
+                aeocha.expect_int(mem_mib("256")).to_equal(256)
+                aeocha.expect_int(mem_mib("")).to_equal(128)
+                aeocha.expect_int(mem_mib("2g")).to_equal(2048)
             }
         }
 
         aeocha.describe("config_json — the Firecracker config-file (schema proven vs real fc)") {
             aeocha.it("carries boot-source, the root drive, and machine-config") callback {
                 got = config_json("/srv/mvm/vmlinux", "/srv/mvm/rootfs.ext4", 2, 256)
-                aeocha.assert_true(string_contains(got, "\"kernel_image_path\": \"/srv/mvm/vmlinux\"") == 1, "kernel path")
-                aeocha.assert_true(string_contains(got, "\"path_on_host\": \"/srv/mvm/rootfs.ext4\"") == 1, "rootfs path")
-                aeocha.assert_true(string_contains(got, "\"is_root_device\": true") == 1, "root device")
-                aeocha.assert_true(string_contains(got, "\"vcpu_count\": 2") == 1, "vcpus")
-                aeocha.assert_true(string_contains(got, "\"mem_size_mib\": 256") == 1, "mem MiB")
-                aeocha.assert_true(string_contains(got, "console=ttyS0") == 1, "serial console cmdline")
+                aeocha.expect_int(string_contains(got, "\"kernel_image_path\": \"/srv/mvm/vmlinux\"") == 1).to_be_truthy()
+                aeocha.expect_int(string_contains(got, "\"path_on_host\": \"/srv/mvm/rootfs.ext4\"") == 1).to_be_truthy()
+                aeocha.expect_int(string_contains(got, "\"is_root_device\": true") == 1).to_be_truthy()
+                aeocha.expect_int(string_contains(got, "\"vcpu_count\": 2") == 1).to_be_truthy()
+                aeocha.expect_int(string_contains(got, "\"mem_size_mib\": 256") == 1).to_be_truthy()
+                aeocha.expect_int(string_contains(got, "console=ttyS0") == 1).to_be_truthy()
             }
         }
     }
