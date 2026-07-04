@@ -457,6 +457,51 @@ wired yet; mapped here as candidate kinds. Ordered by how cleanly they'd land:
           is AMD → testable. (Cross-ref the gpu() TODO item.)
         - Box status: bazzite host 5.8.2, WSL2 guest 5.7.0 — upgrade one to 6 to
           exercise pasta-forwarder + AMD --gpus + the cgroups-v2 preflight live.
+- [ ] **`lib/persist` — one seam, adhere to each substrate's native supervisor for
+      HOLD-ALIVE.** Motivated by the firecracker fix (§ Firecracker gap #4): a bare
+      bg-child of the short-lived aeo front-door is SIGHUP-reaped when aeo's session
+      scope tears down. driver_vm (kvm) and driver_firecracker BOTH independently
+      solved this with `systemd-run --user`; that logic is now duplicated and
+      Linux-only. Factor it into ONE seam:
+        - **Contract**: `persist_launch(unit_name, argv, opts) -> err` = "start this
+          so it SURVIVES my exit"; `persist_stop(unit_name)`, `persist_active(unit_name)
+          -> int`. Drivers call the seam; they don't hand-roll systemd-run/setsid.
+        - **Per-substrate backends** (adhere to the native supervisor, NOT a bespoke
+          resident):
+            - Linux/systemd → `systemd-run --user --unit=… --collect` (Type=simple),
+              `systemctl --user is-active/stop`. (What kvm + firecracker do today.)
+            - Linux/podman containers → optionally QUADLET (.container units) so
+              systemd itself supervises + restarts + boot-survives (podman 6 improved
+              Quadlet); see the Quadlet note in fable-5-insights (the systemd-native
+              container answer). A `aeo-<system>.target` Wants= each node's unit = the
+              whole tree as one systemctl handle.
+            - **FreeBSD → rc.d (boot-survive) + `daemon(8) -r -P pidfile` (keep-alive/
+              restart)**; jails via jail.conf / `service jail` / BastilleBSD (the
+              jail-tree supervisor). NB the ASYMMETRY that motivates keeping
+              reconciliation in aeo (below): rc.d does NOT restart-on-crash and
+              daemon(8) restarts a PROCESS not a node-to-declared-state.
+            - Windows → a Windows service / Task Scheduler entry (the wsl_podman /
+              future windows-agent hold-alive).
+            - non-systemd Linux → setsid+nohup+pidfile fallback (today's firecracker
+              fallback path).
+        - **CRITICAL split — delegate hold-alive, KEEP reconciliation in aeo.** The
+          native supervisors are uneven at reconcile-to-declared-state (systemd
+          Restart= is crude; FreeBSD rc.d can't restart-on-crash at all). So the seam
+          owns ONLY "keep the process alive across my exit"; re-attest / re-confine /
+          re-join-network / restart-to-declared-state stays aeo's, uniform across
+          substrates (the resident/agent or a future reconcile pass). This is why the
+          answer is NOT a bespoke root daemon (aeo-host) reimplementing systemd, and
+          NOT "adhere to systemd" alone (leaves FreeBSD's weaker init a gap) — it's
+          "adhere to each OS's supervisor for HOLD, own RECONCILE portably." See the
+          "what holds the tree between aeo runs" discussion (2026-07-04).
+        - Scope guard: hold-alive + is-active + stop only — NOT a process babysitter
+          with its own policy engine. The drivers already know their lifecycle; this
+          just makes "survive the launcher" a single, per-OS-correct primitive.
+      Sequencing: de-dups driver_vm + driver_firecracker NOW (both use systemd-run
+      --user); the Quadlet/target and FreeBSD daemon(8) backends land as those tiers
+      need persistence. Related: aeo-agent's init-aware TSR item (systemd/OpenRC/
+      sysvinit — memory `aeo-agent-tsr-init-systems`) is the AGENT's version of the
+      same "adhere to the native init" idea; keep them consistent.
 - [ ] **A secrets engine — encrypted-throughout, never plaintext in state/logs**
       (transfer from Pulumi's model; the one idea from their talk that's a real
       aeo gap). Today aeo has attestation + a tamper-evident audit trail but NO
