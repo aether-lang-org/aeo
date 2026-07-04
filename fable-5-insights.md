@@ -402,6 +402,64 @@ cranker/serves_via (the follow-up discussion).
 
 STATUS: idea sweep, none built; cranker follow-up owed.
 
+## J. CRANKER FOLLOW-UP (2026-07-04): two-part registration — the injected channel
+
+Paul's framing: cranker lets a child register with a parent router to receive web
+traffic as part of a cluster; principles of containment ordinarily forbid a child
+finding/dialing a parent's port-listener — but a channel can be EXPLICITLY
+INJECTED into the child by the grammar, making an effective TWO-PART registration.
+
+**Confirmed from the repos (mu-cranker-router + cranker-connector READMEs):**
+registration IS over WebSockets (wss://; connector config = router URL(s) via DNS
+or fixed, withRoute("path-prefix"), local target URI); the router holds TWO
+listeners (public HTTPS + a separate registration WSS server); HTTP semantics
+maintained over the tunnel (framing detail not on-page; V1 idle-socket-pool /
+V3 multiplex is from prior knowledge, unconfirmed); the live websocket IS the
+liveness signal; graceful drain built in (stop(timeout) deregisters, waits
+in-flight); and REGISTRATION AUTH IS BYO — the README asks operators to bolt on
+firewall/mTLS/basic-token protection. That bolt-on is exactly what the
+composition should supply first-class.
+
+**The two-part registration** (the agent's addressing doctrine — "the contained
+never told me where it lives; I assigned it" — applied to the data plane):
+
+Part 1, declaration time (aeo acts; child passive):
+  1. mint a per-child registration secret (agent_auth.mint_secret — exists);
+  2. provision the EXPECTATION on the router: route ↔ HMAC binding ("accept a
+     connector for /api bearing this; nothing else for /api");
+  3. inject into the child at launch: AEO_SERVE_URL/ROUTE/TOKEN — assigned,
+     never discovered;
+  4. render the netpolicy: child egress-allow to EXACTLY edge:registration-port,
+     deny-all else stands — the channel is a declared flow punched through
+     confinement, not a hole in it.
+Part 2, runtime: connector dials wss out, presents token+route; router verifies
+against the provisioned expectation; mismatch → refused + audited. Route hijack
+structurally impossible: you can only register what was granted.
+
+**Grammar:**
+    router("edge") { ingress(443) registrations(8008) }
+    worker("app") {
+        container("app") { image("…") }
+        serves_via("edge", "/api")
+    }
+Checks: serves_via must target a router(); the node must have NO ingress() (the
+point — error otherwise); same route on N nodes = the load-balanced set
+(deliberate, cranker's cluster behavior); serves_via may name a router SET (HA —
+"one or more routers" confirmed).
+
+**Falls out for free:** a probe path that never touches the node (the router's
+registration table as health source — connection-is-liveness, confirmed);
+`aeo drain` = the confirmed stop(timeout) semantics (deregister → in-flight →
+halt; down_within = drain timeout); the §I cutover slider's mechanism (v1+v2
+register the same route, router weights between registration groups); and the
+agent/connector answer — same dial-out shape + courier doctrine, DELIBERATELY
+different secrets/endpoints (control vs data plane must not share compromise),
+with the agent COURIERING the connector credential: the delegate message carries
+the serves_via grant down. One courier ride, two channels.
+
+STATUS: design discussion recorded; not built. Framing-protocol details (V1
+pool / V3 multiplex) to confirm before implementing.
+
 ## What's good (for balance)
 
 - The 12 compositions share a genuinely uniform skeleton: header (what/vs-siblings/
