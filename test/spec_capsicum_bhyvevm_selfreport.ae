@@ -15,7 +15,7 @@
 
 import aeocha
 import std.string
-import std.os (run_capture, getenv)
+import std.os (run_capture)
 import std.list
 import std.config
 
@@ -65,7 +65,9 @@ main() {
 
 _run_harness() -> string {
     av = list_new()
-    list_add(av, string.concat(_aeohome(), "/test/capharness_freebsd.py"))
+    // run-spec.sh stages the harnesses to /tmp before running (cp test/cap*.py
+    // /tmp/), so run the staged copy — matching the jail_selfreport sibling.
+    list_add(av, "/tmp/capharness_freebsd.py")
     out, status, err = run_capture("/usr/local/bin/python3", av, null)
     list_free(av)
     if string.length(out) == 0 {
