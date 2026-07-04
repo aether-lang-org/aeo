@@ -274,6 +274,20 @@ Gaps:
       allocation: exclusive ∩ anything on one device = FAIL with the tier-choice
       explanation — the article's human decision becomes a machine-checked
       constraint. Host preflight probes the device exists.
+- [ ] **`nested_virt()` — deny-by-default, attenuate-down-the-tree (see
+      fable-5-insights.md §H)**. Principles of containment: capability must
+      attenuate down the tree, never flow down implicitly — a node with nested
+      virt can spawn sub-VMs aeo can't see (breaks tree-is-truth; the
+      deny_egress twin for compute capability). Explicit per-node grant, NO
+      float-down (each level re-declares). Deny = ACTIVE masking even when the
+      substrate leaks it: `-cpu host,-vmx,-svm` for child VMs; no /dev/kvm map +
+      cgroup device-deny for containers/lxc; `[wsl2] nestedVirtualization=false`
+      for the WSL tier. Check-time CHAIN validation (host nested=1 → VM vmx →
+      container /dev/kvm; break anywhere = loud fail — the ladder we hand-debugged
+      on bazzite for the Win11→WSL2→podman 3-deep proof). Refused on
+      firecracker/jail (ungrantable, by construction). Grants audited. Doctrinal
+      point: a node needing children should DECLARE them (agent delegate path),
+      not freelance with raw /dev/kvm — deny-default forces sprawl into the tree.
 
 ### Lighter-tier substrates (smaller VMs + sandboxes) — future kinds
 Surveyed both boxes 2026-06-27. Below what aeo drives today (full-qemu kvm,

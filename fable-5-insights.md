@@ -286,6 +286,45 @@ belongs to the drivers.
 
 STATUS: proposed 2026-07-04, not built.
 
+## H. PROPOSED: `nested_virt()` — deny-by-default, attenuate-down-the-tree
+
+Paul's prompt (2026-07-04): turn nested virtualization OFF for child nodes even
+when the parent ordinarily has it — principles of containment.
+
+**Doctrine:** capability must ATTENUATE down the containment tree; it never flows
+down implicitly. A node with nested virt can stand up its own hypervisor —
+sub-VMs aeo can't see — breaking tree-is-truth, dodging structural limit{}
+accounting, and riding the historically buggy nested-VMX path. It's the
+compute-capability twin of deny_egress: a pure workload never needs it. And a
+node that legitimately needs children should DECLARE them in the composition
+(the aeo-agent delegate path), not get raw /dev/kvm to freelance — deny-default
+forces sprawl INTO the tree, where it's orchestrated/confined/audited.
+
+**Grammar:** `nested_virt()` — an explicit per-node grant. Semantics:
+1. **Deny = ACTIVE masking, not passive absence** — even when the substrate
+   default leaks it (host-passthrough CPU exposes vmx/svm): `-cpu host,-vmx,-svm`
+   on child VMs; no /dev/kvm mapping + cgroup device-deny (c 10:232) for
+   containers/lxc; `[wsl2] nestedVirtualization=false` for the WSL tier.
+2. **No float-down** — unlike health_retry, the grant does NOT inherit; every
+   level re-declares. Attenuation by default, amplification never.
+3. **Check-time CHAIN validation** — can't grant what the ancestry lacks: host
+   kernel nested=1 → VM has vmx → container maps /dev/kvm; a break anywhere
+   fails `aeo check` with the chain spelled out. (Live scar tissue: the
+   bazzite → Win11 → WSL2 → podman 3-deep chain needed each layer enabled by
+   hand; the guest's "wsl: Nested virtualization is not supported" was a masked
+   layer observed in the wild.)
+4. **Refused where ungrantable** — nested_virt() on firecracker (no device
+   model) or jail = check error, honest.
+5. **Audited** — a virt grant is a security event in the hash chain, like
+   attest/confine.
+
+For containers the grant IS a device grant (/dev/kvm is a kernel object —
+grant_fd vocabulary, same family as gpu()); the contract name stays
+mechanism-free per the naming rule (the mechanism — CPU-flag mask vs device map
+vs wslconfig — varies per substrate and belongs to the drivers).
+
+STATUS: proposed 2026-07-04, not built.
+
 ## What's good (for balance)
 
 - The 12 compositions share a genuinely uniform skeleton: header (what/vs-siblings/
