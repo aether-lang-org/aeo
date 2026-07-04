@@ -117,16 +117,22 @@ jobs, env)`): the openers (`container`, `jail`, …) and the block setters
 starting `app`; `aeo down` stops `app` before the `db` it depends on. The
 operator writes the tree once; direction is aeo's job.
 
-Kind verbs: `container` / `docker` / `lxc` / `kvm_vm` / `bwrap` / `nspawn` /
-`firecracker` (Linux), `jail` / `bhyve_vm` / `freebsd_vm` (FreeBSD). `bwrap` is
-the lightest tier — an unprivileged bubblewrap sandbox (no root, no host setup);
-`nspawn` is a systemd-nspawn system container (the systemd-native LXC peer);
-`firecracker` is a minimal-device-model microVM (the "smaller VM" peer of full
-KVM). Block setters (one arg per call — Aether is fixed-arity), grouped by what
-they declare:
+Kind verbs: `container` / `lxc` / `kvm_vm` / `bwrap` / `nspawn` / `firecracker`
+(Linux), `jail` / `bhyve_vm` / `freebsd_vm` (FreeBSD). `container` is the one OCI
+app-container kind; which **engine** realizes it is the `engine()` property, not a
+separate kind — `engine("podman"|"docker"|"wslc"|"wsl_podman")`, system-scope
+float + per-node override, auto-resolving per host (Linux → podman → docker;
+Windows → wslc / podman-in-WSL). So a Linux container and a Windows-hosted one are
+the *same* declaration, differing by one engine string. `bwrap` is the lightest
+tier — an unprivileged bubblewrap sandbox (no root, no host setup); `nspawn` is a
+systemd-nspawn system container (the systemd-native LXC peer); `firecracker` is a
+minimal-device-model microVM (the "smaller VM" peer of full KVM, live-proven boot
++ persist + teardown). Block setters (one arg per call — Aether is fixed-arity),
+grouped by what they declare:
 
 - **identity / lifecycle:** `image`, `command`, `entrypoint`, `dockerfile`,
-  `health`, `depends`, `dataset`, `ip`, `env`, `expose`
+  `health`, `depends`, `dataset`, `ip`, `env`, `expose`, `engine` (which OCI
+  engine realizes a `container`; floats system-scope, auto per host)
 - **health timing** (FluentSelenium-style duration literals), grouped in a
   `health_retry() { … }` block: `up_within(30s)` = retry-until-up window,
   `every(500ms)` = probe interval, `down_within(10s)` = retry-until-*gone* on
@@ -145,9 +151,11 @@ they declare:
 `depends` accepts either a handle (`depends(db)`) or a name string
 (`depends("db")`) — handles are typo-checked, the string form is there for
 references you don't have a binding for. (`resource(name, kind) { ... }` remains
-as a general escape hatch.) See [`examples/`](./examples/) for seven
+as a general escape hatch.) See [`examples/`](./examples/) for twelve
 compositions with the same `db ◄ app` shape across every substrate — the
-substrate grid (read one, diff against another).
+substrate grid (read one, diff against another). Each example is a **pure
+declaration** that names its own `check()`/`smoke()`/`suite()` verification specs;
+`aeo <phase> <example>.ae` executes it.
 
 ## Running it
 
@@ -249,8 +257,10 @@ lib/snapshot/  lib/snapshot_linux/   lifecycle ops: ZFS (jail/bhyve) + podman/qe
 lib/host/             host-profile probe + capsicum/casper gating
 lib/ipam/  lib/images/  IP allocation + the golden-image recipe/realizer
 lib/resource/         the actor↔main state bridge
-examples/             the substrate grid — seven `db ◄ app` compositions (see examples/README.md)
-test/                 ~20 specs: driver/confinement/attest/audit/lifecycle + the real-jail test
+lib/driver_windows/  lib/driver_wslc/   Windows OCI engines (podman-in-WSL2 / MSFT's native wslc.exe)
+examples/             the substrate grid — twelve `db ◄ app` compositions (see examples/README.md)
+examples/checks/      the per-example check()/smoke()/suite() aeocha specs
+test/                 ~27 specs (fluent-aeocha style): driver/confinement/attest/audit/lifecycle + real-jail
 ```
 
 ## What aeo is NOT
