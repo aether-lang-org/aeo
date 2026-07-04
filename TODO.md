@@ -463,10 +463,18 @@ wired yet; mapped here as candidate kinds. Ordered by how cleanly they'd land:
           caps), and a fork-bomb inside it was REFUSED ("sh: can't fork: Resource
           temporarily unavailable") — the behavioral containment proof on the
           podman-6/v2 substrate; clean `aeo down`. So the confinement path is
-          podman-6-safe. STILL TO DO on this box while it lasts: cgroups-v2 PREFLIGHT
-          probe (fail loud on v1+podman6); the netavark/nftables deny_egress+internal
-          re-verify; the --gpus/DRI gpu() path (Intel iGPU, /dev/dri/renderD128
-          present); pasta forwarder (passt pulled in as a podman dep). Toolchain
+          podman-6-safe. NETPOLICY RE-VERIFIED on podman 6 / netavark (2026-07-04):
+          deny_egress -> db-netmode=none (db->internet DENIED behaviorally),
+          egress->db -> app on the --internal net (app->internet DENIED). So the
+          per-flow netpolicy (§5) SURVIVES podman 6's iptables->nftables/netavark
+          transition — the container-confinement axis holds on the new stack. (Test
+          artifact: the `nslookup db` check fell through to ISP DNS = NXDOMAIN, not a
+          confinement failure — app IS on the internal net; the internet-deny asserts
+          are the load-bearing ones and passed.) STILL TO DO on this box while it
+          lasts: cgroups-v2 PREFLIGHT probe (fail loud on v1+podman6); the --gpus/DRI
+          gpu() path (Intel iGPU, /dev/dri/renderD128 present, needs gpu() built
+          first); pasta forwarder (passt pulled in; needs the containers.conf drop-in
+          wired). Toolchain
           getting-started failures captured in docs/getting-started-cachyos-hardening.md
           (gcc-16 -Werror const-strstr, make-install-wipes-build, fish-shell).
         - COSMETIC BUG seen on podman 6 (and bazzite): a Linux container with limit{}
