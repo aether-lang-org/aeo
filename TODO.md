@@ -218,14 +218,46 @@ Gaps:
       real. Fix: pass argv DIRECTLY to run_capture("sudo", [...]) with list_add_raw
       ptr-copy (as driver_lxc now does, like driver_vm's qemu exec). Until then,
       jail/jls/jexec via driver_bsd self-sudo would mangle their args live.
-- [ ] **`docker` kind** — thin: same as container but pins the docker engine. No
-      demo; arguably container covers it. Low priority.
+- [ ] **`engine()` property — DESIGN DECIDED 2026-07-04 (see fable-5-insights.md §D)**.
+      `container()` stays the one OCI kind; new `engine("podman"|"docker"|"wslc")`
+      node property with SYSTEM-SCOPE FLOAT + node override (same FluentSelenium
+      float machinery as within/every). Auto default per host family: Linux →
+      podman → docker; Windows → wslc → podman-through-WSL. `engine()` does NOT
+      admit lxc (fails the swap test: image namespace, expose, env, init-vs-command
+      — a kind, not an engine). Deprecate `docker()`/`wslc()` kind-verbs to aliases;
+      DISSOLVE the `windows` kind (container-on-Windows = host-family engine
+      resolution; the windows/wslc examples collapse into "containers.ae on a
+      Windows host"). FIXES A REAL BUG en route: the `docker` kind's dispatch is
+      second-class today — plain `up()`, silently losing the shared aeo-<system>
+      net, env() pairs, and ALL limit{}/constrain{} rendering that `container`
+      gets via up_confined(). Also: warn loudly when ONE system mixes engines —
+      podman and docker networks are separate planes; cross-engine peers can't
+      resolve by name (motivating scenario: one Debian host, three systems on
+      docker/podman/lxc respectively).
 - [ ] **`freebsd_vm`** — a bhyve VM with a FreeBSD GUEST (flavor "freebsd"); the
       bhyve demos run Linux guests. A real cell (FreeBSD-native VM / jails-in-VM),
       trivially close to the bhyve demo. No demo yet.
+- [ ] **GENERAL container nesting — the Proxmox docker-in-LXC pattern (see
+      fable-5-insights.md §E)**. Homelab ground truth (XDA Jul-2025 + many
+      others): OCI-engine-inside-LXC is mainstream — cheap on weak hardware, and
+      LXCs can SHARE a GPU/PCIe device across consumers where VM passthrough is
+      exclusive. aeo already has the seam: every host-capable kind exposes
+      exec_capture (ssh / lxc-attach / systemd-run --machine / jexec) — nested
+      bring-up IS "the child engine's commands through the host's exec seam"; the
+      VM-only guest_container_up is just one instance. Work: (1) make `lxc()`/
+      `nspawn()` block-host openers (set curhost) so
+      `lxc("dockerbox"){ container("web"){ engine("docker") } }` declares the
+      pattern; (2) route nested bring-up by the HOST's kind, generalizing
+      guest_container_up over driver_exec; (3) resident aeo-agent-in-LXC (the
+      containment-correct delegate path, same as agent-in-VM); (4) record per-host
+      prereqs honestly (lxc nesting=1; privileged for NFS/CIFS volumes; engine
+      installed in the guest userland — the "seed installs podman" story);
+      (5) compose-time nesting-matrix validation: host-kind × child-kind cells
+      gated on "exec seam + child runtime can run there", loud at `aeo check`.
 - [ ] **Nesting depth** — the demo grid is flat (1-level: container-in-VM). aeo's
       design is RECURSIVE (the tree-of-nodes / aeo-agent recursion). No demo of
-      jail-in-VM, VM-in-VM, or 3+ tier.
+      jail-in-VM, VM-in-VM, or 3+ tier. (Subsumes into the general-nesting item
+      above once that lands: depth is just repeated application of the exec seam.)
 
 ### Lighter-tier substrates (smaller VMs + sandboxes) — future kinds
 Surveyed both boxes 2026-06-27. Below what aeo drives today (full-qemu kvm,
