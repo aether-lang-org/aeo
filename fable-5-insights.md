@@ -457,8 +457,32 @@ different secrets/endpoints (control vs data plane must not share compromise),
 with the agent COURIERING the connector credential: the delegate message carries
 the serves_via grant down. One courier ride, two channels.
 
-STATUS: design discussion recorded; not built. Framing-protocol details (V1
-pool / V3 multiplex) to confirm before implementing.
+**RESPONSIBILITY ASSIGNED (Paul, 2026-07-04): the aeo-agent sets up the active
+cranking.** Not just couriering the credential — the resident agent IS the
+connector host. Consequences this pins down:
+
+1. **Sidecar, not library** — stock cranker's connector is a Java library the
+   app embeds; agent-hosted cranking means the WORKLOAD IS UNMODIFIED (it just
+   serves localhost). The agent, already resident and already trusted, opens
+   and maintains the wss registration pool beside it.
+2. **Control plane bootstraps data plane** — the delegate message over the
+   authenticated agent channel carries the serves_via grant (route + router
+   endpoint + minted token); the agent then stands up the data channel.
+   Attenuation preserved: the agent can only crank what the composition
+   declared.
+3. **Attest gains a data-plane axis** — the agent's self-attest answers "am I
+   registered at edge for /api and NOTHING else?" — drift between declared and
+   actual routes is an attest failure, from inside the boundary.
+4. **Ordered teardown built in** — halt verb → agent drains FIRST (deregister,
+   wait in-flight per the confirmed stop(timeout) semantics) → then stops the
+   workload. down_within = the drain window.
+5. **Supervision** — re-registration on router restart, pool replenishment,
+   and registration liveness folded into the agent's status reporting: the
+   parent learns "up AND serving" through one channel.
+
+STATUS: design discussion recorded; aeo-agent = connector host decided; not
+built. Framing-protocol details (V1 pool / V3 multiplex) to confirm before
+implementing.
 
 ## What's good (for balance)
 
