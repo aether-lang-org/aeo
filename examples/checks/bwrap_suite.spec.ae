@@ -18,7 +18,7 @@ import std.os
 import compose (system, bwrap)
 import compose (command, health, depends)
 import compose (get_command, get_depends, describe_tree)
-import std.string (string_length, string_concat)
+import std.string (string_concat)
 import std.string   // bare: inlined aeocha calls bare exports unqualified
 
 // Re-declare the composition (own process, no inherited tree) — same as the model.
@@ -48,12 +48,12 @@ main() {
                 "system silly_addition_bwrap:\n",
                 "  bwrap db [command=sleep 600]\n"),
                 "  bwrap app [command=sleep 600] -> db")
-            aeocha.assert_str_eq(describe_tree(), want, "resolved bwrap tree snapshot")
+            aeocha.expect_str(describe_tree()).to_equal_str(want)
         }
         aeocha.it("both run a long-lived sleep; app depends on db") callback {
-            aeocha.assert_str_eq(get_command("db"), "sleep 600", "db command")
-            aeocha.assert_str_eq(get_command("app"), "sleep 600", "app command")
-            aeocha.assert_str_eq(get_depends("app"), "db", "app ◄ db")
+            aeocha.expect_str(get_command("db")).to_equal_str("sleep 600")
+            aeocha.expect_str(get_command("app")).to_equal_str("sleep 600")
+            aeocha.expect_str(get_depends("app")).to_equal_str("db")
         }
     }
     aeocha.run_summary(fw)

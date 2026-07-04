@@ -56,11 +56,11 @@ main() {
                 "system silly_addition_firecracker:\n",
                 "  firecracker db [image=${bdb}]\n"),
                 "  firecracker app [image=${bapp}] -> db")
-            aeocha.assert_str_eq(describe_tree(), want, "resolved microVM tree snapshot")
+            aeocha.expect_str(describe_tree()).to_equal_str(want)
         }
         aeocha.it("both are firecracker microVMs; app depends on db") callback {
-            aeocha.assert_str_eq(get_image("db"), _bundle("db"), "db bundle")
-            aeocha.assert_str_eq(get_depends("app"), "db", "app ◄ db")
+            aeocha.expect_str(get_image("db")).to_equal_str(_bundle("db"))
+            aeocha.expect_str(get_depends("app")).to_equal_str("db")
         }
     }
 

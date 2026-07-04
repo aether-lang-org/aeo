@@ -35,11 +35,11 @@ main() {
 
         aeocha.describe("identity + lifecycle paths") {
             aeocha.it("name is bwrap") callback {
-                aeocha.assert_str_eq(name(), "bwrap", "kind name")
+                aeocha.expect_str(name()).to_equal_str("bwrap")
             }
             aeocha.it("pidfile/log are per-node under /tmp") callback {
-                aeocha.assert_str_eq(pidfile_for("db"), "/tmp/aeo-bwrap-db.pid", "pidfile")
-                aeocha.assert_str_eq(logfile_for("db"), "/tmp/aeo-bwrap-db.log", "logfile")
+                aeocha.expect_str(pidfile_for("db")).to_equal_str("/tmp/aeo-bwrap-db.pid")
+                aeocha.expect_str(logfile_for("db")).to_equal_str("/tmp/aeo-bwrap-db.log")
             }
         }
 
@@ -47,7 +47,7 @@ main() {
             aeocha.it("unshares all, binds host userland read-only, fresh proc/dev/tmp") callback {
                 got = _join(sandbox_argv("", "echo hi"))
                 want = "--unshare-all --new-session --ro-bind /usr /usr --ro-bind-try /bin /bin --ro-bind-try /sbin /sbin --ro-bind-try /lib /lib --ro-bind-try /lib64 /lib64 --ro-bind-try /etc /etc --proc /proc --dev /dev --tmpfs /tmp -- /bin/sh -c echo hi"
-                aeocha.assert_str_eq(got, want, "host-userland sandbox")
+                aeocha.expect_str(got).to_equal_str(want)
             }
         }
 
@@ -55,24 +55,23 @@ main() {
             aeocha.it("binds the rootfs dir as / instead of the host userland") callback {
                 got = _join(sandbox_argv("/opt/rootfs", "/sbin/init"))
                 want = "--unshare-all --new-session --bind /opt/rootfs / --proc /proc --dev /dev --tmpfs /tmp -- /bin/sh -c /sbin/init"
-                aeocha.assert_str_eq(got, want, "rootfs sandbox")
+                aeocha.expect_str(got).to_equal_str(want)
             }
         }
 
         aeocha.describe("_shq — POSIX single-quote escaping (sh -c safety)") {
             aeocha.it("wraps a plain token in single quotes") callback {
-                aeocha.assert_str_eq(_shq("echo"), "'echo'", "plain")
+                aeocha.expect_str(_shq("echo")).to_equal_str("'echo'")
             }
             aeocha.it("a token with spaces stays one shell word") callback {
-                aeocha.assert_str_eq(_shq("echo hi"), "'echo hi'", "spaces")
+                aeocha.expect_str(_shq("echo hi")).to_equal_str("'echo hi'")
             }
             aeocha.it("an embedded single quote becomes the '\\'' idiom") callback {
                 // input: it's   ->   'it'\''s'
-                aeocha.assert_str_eq(_shq("it's"), "'it'\\''s'", "embedded quote")
+                aeocha.expect_str(_shq("it's")).to_equal_str("'it'\\''s'")
             }
             aeocha.it("shell metacharacters are inert inside the quotes") callback {
-                aeocha.assert_str_eq(_shq("rm -rf / ; echo $HOME `id`"),
-                    "'rm -rf / ; echo $HOME `id`'", "metachars neutralised")
+                aeocha.expect_str(_shq("rm -rf / ; echo $HOME `id`")).to_equal_str("'rm -rf / ; echo $HOME `id`'")
             }
         }
     }

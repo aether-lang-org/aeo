@@ -24,15 +24,15 @@ main() {
         }
 
         aeocha.it("snap_image tags a committed container aeo-snap/<node>:<tag>") callback {
-            aeocha.assert_str_eq(snap_image("db", "v1"), "aeo-snap/db:v1", "db@v1")
-            aeocha.assert_str_eq(snap_image("app", "nightly"), "aeo-snap/app:nightly", "app@nightly")
+            aeocha.expect_str(snap_image("db", "v1")).to_equal_str("aeo-snap/db:v1")
+            aeocha.expect_str(snap_image("app", "nightly")).to_equal_str("aeo-snap/app:nightly")
         }
 
         aeocha.it("backup_file uses the right extension per kind") callback {
             // kvm: a qcow2 copy (carries internal snapshots). else: a tar (save).
-            aeocha.assert_str_eq(backup_file("/b", "db", "v1", "kvm"), "/b/db-v1.qcow2", "kvm -> .qcow2")
-            aeocha.assert_str_eq(backup_file("/b", "db", "v1", "container"), "/b/db-v1.tar", "container -> .tar")
-            aeocha.assert_str_eq(backup_file("/b", "x", "t", "lxc"), "/b/x-t.tar", "lxc -> .tar")
+            aeocha.expect_str(backup_file("/b", "db", "v1", "kvm")).to_equal_str("/b/db-v1.qcow2")
+            aeocha.expect_str(backup_file("/b", "db", "v1", "container")).to_equal_str("/b/db-v1.tar")
+            aeocha.expect_str(backup_file("/b", "x", "t", "lxc")).to_equal_str("/b/x-t.tar")
         }
     }
 

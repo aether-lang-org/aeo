@@ -75,10 +75,10 @@ main() {
                 "system silly_addition_kvm:\n",
                 "  kvm db_vm [image=${d}]\n"),
                 "  kvm app_vm [image=${a}] -> db_vm")
-            aeocha.assert_str_eq(describe_tree(), want, "resolved kvm tree snapshot")
+            aeocha.expect_str(describe_tree()).to_equal_str(want)
         }
         aeocha.it("app_vm depends on db_vm (ordering edge)") callback {
-            aeocha.assert_str_eq(get_depends("app_vm"), "db_vm", "app_vm ◄ db_vm")
+            aeocha.expect_str(get_depends("app_vm")).to_equal_str("db_vm")
         }
     }
 

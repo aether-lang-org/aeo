@@ -87,7 +87,7 @@ main() {
         aeocha.describe("enter() — confine the process") {
             aeocha.it("cap_enter() succeeds; now in capability mode") callback {
                 rc = capsicum.enter()
-                aeocha.assert_str_eq(_i(rc), _i(capsicum.CAP_OK), "enter() == CAP_OK")
+                aeocha.expect_int(rc).to_equal(capsicum.CAP_OK)   // enter() succeeded
                 aeocha.expect_int(capsicum.in_mode()).to_be_truthy()
             }
         }
@@ -173,5 +173,4 @@ main() {
     aeocha.run_summary(fw)
 }
 
-_i(n: int) -> string { return string.from_int(n) }
 _ne0(n: int) -> int { if n == 0 { return 0 } return 1 }

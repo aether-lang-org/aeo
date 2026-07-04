@@ -17,8 +17,8 @@ main() {
                 reset_bindings("specsys")
                 a = resolve_ip("specsys", "db_vm")
                 b = resolve_ip("specsys", "python_vm")
-                aeocha.assert_str_eq(a, "172.16.0.10", "db_vm -> first free (.10, after the .1 gateway)")
-                aeocha.assert_str_eq(b, "172.16.0.11", "python_vm -> next free (.11)")
+                aeocha.expect_str(a).to_equal_str("172.16.0.10")
+                aeocha.expect_str(b).to_equal_str("172.16.0.11")
                 aeocha.expect_int(_ne(a, b)).to_be_truthy()
             }
         }
@@ -29,8 +29,8 @@ main() {
                 first  = resolve_ip("specsys", "db_vm")
                 again  = resolve_ip("specsys", "db_vm")
                 again2 = resolve_ip("specsys", "db_vm")
-                aeocha.assert_str_eq(again,  first, "2nd run: same IP")
-                aeocha.assert_str_eq(again2, first, "3rd run: STILL same IP")
+                aeocha.expect_str(again).to_equal_str(first)
+                aeocha.expect_str(again2).to_equal_str(first)
             }
             aeocha.it("the binding is persisted to the file (survives a fresh process)") callback {
                 dump = bindings_dump("specsys")
@@ -42,9 +42,9 @@ main() {
         aeocha.describe("RESET: the explicit 'fresh IPs' gesture") {
             aeocha.it("reset clears the bindings; next resolve re-allocates") callback {
                 reset_bindings("specsys")
-                aeocha.assert_str_eq(bindings_dump("specsys"), "", "bindings cleared")
+                aeocha.expect_str(bindings_dump("specsys")).to_equal_str("")
                 fresh = resolve_ip("specsys", "db_vm")
-                aeocha.assert_str_eq(fresh, "172.16.0.10", "re-allocates from the bottom after reset")
+                aeocha.expect_str(fresh).to_equal_str("172.16.0.10")
             }
         }
     }

@@ -25,17 +25,17 @@ main() {
         aeocha.describe("encode/parse round-trip") {
             aeocha.it("a delegate line re-parses intact") callback {
                 line = encode_delegate("courier-secret", "inner")
-                aeocha.assert_str_eq(verb_of(line), "delegate", "verb = delegate")
-                aeocha.assert_str_eq(token_of(line), "courier-secret", "token survives")
-                aeocha.assert_str_eq(arg1_of(line), "inner", "child node survives")
+                aeocha.expect_str(verb_of(line)).to_equal_str("delegate")
+                aeocha.expect_str(token_of(line)).to_equal_str("courier-secret")
+                aeocha.expect_str(arg1_of(line)).to_equal_str("inner")
             }
 
             aeocha.it("delegate is distinct from boot (parent recurses, not self-boots)") callback {
                 d = encode_delegate("t", "child")
                 b = encode_boot("t", "child")
-                aeocha.assert_str_eq(verb_of(d), "delegate", "delegate verb")
-                aeocha.assert_str_eq(verb_of(b), "boot", "boot verb")
-                aeocha.assert_str_eq(arg1_of(d), arg1_of(b), "same node, different verb")
+                aeocha.expect_str(verb_of(d)).to_equal_str("delegate")
+                aeocha.expect_str(verb_of(b)).to_equal_str("boot")
+                aeocha.expect_str(arg1_of(d)).to_equal_str(arg1_of(b))
             }
         }
     }

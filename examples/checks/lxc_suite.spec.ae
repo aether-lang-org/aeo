@@ -58,9 +58,9 @@ main() {
                 "system silly_addition_lxc:\n",
                 "  lxc db [image=${img}]\n"),
                 "  lxc app [image=${img}] -> db")
-            aeocha.assert_str_eq(describe_tree(), want, "resolved lxc tree snapshot")
-            aeocha.assert_str_eq(get_image("db"), _image(), "db image (dist:release)")
-            aeocha.assert_str_eq(get_depends("app"), "db", "app ◄ db")
+            aeocha.expect_str(describe_tree()).to_equal_str(want)
+            aeocha.expect_str(get_image("db")).to_equal_str(_image())
+            aeocha.expect_str(get_depends("app")).to_equal_str("db")
         }
     }
 

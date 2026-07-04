@@ -60,20 +60,16 @@ main() {
                 "system silly_addition_jails:\n",
                 "  jail db [dataset=zroot/jails/db]\n"),
                 "  jail app [dataset=zroot/jails/app] -> db")
-            aeocha.assert_str_eq(describe_tree(), want, "resolved jail tree snapshot")
-            aeocha.assert_str_eq(get_depends("app"), "db", "app depends on db")
+            aeocha.expect_str(describe_tree()).to_equal_str(want)
+            aeocha.expect_str(get_depends("app")).to_equal_str("db")
         }
 
         aeocha.it("each jail's rctl caps are in force (exhaustion-DoS guard)") callback {
             // The exhaustion-containment axis aeo enforces at `aeo up`. The live
             // jail boundary (jexec ls / sees only the jail root) is proven by the
             // driver_bsd itest, not reproducible from this spec process.
-            aeocha.assert_str_eq(get_rctl("db"),
-                "memoryuse=512M, maxproc=32",
-                "db: 512M + 32 procs (fork-bomb ceiling)")
-            aeocha.assert_str_eq(get_rctl("app"),
-                "memoryuse=1G, maxproc=128",
-                "app: 1G + 128 procs")
+            aeocha.expect_str(get_rctl("db")).to_equal_str("memoryuse=512M, maxproc=32")
+            aeocha.expect_str(get_rctl("app")).to_equal_str("memoryuse=1G, maxproc=128")
         }
     }
 

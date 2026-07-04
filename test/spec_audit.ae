@@ -14,8 +14,7 @@ main() {
     aeocha.describe(fw, "audit (tamper-evident trail, pure chain logic)") {
 
         aeocha.it("_sha is real sha256 (known vector)") callback {
-            aeocha.assert_str_eq(_sha("hello"),
-                "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824", "sha256(hello)")
+            aeocha.expect_str(_sha("hello")).to_equal_str("2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
         }
 
         aeocha.it("line_for embeds the payload + prev + a hash") callback {
@@ -39,11 +38,11 @@ main() {
             same = "1"
             if string_length(a) != string_length(b) { same = "0" }
             else { if string_contains(a, b) == 0 { same = "0" } }
-            aeocha.assert_str_eq(same, "0", "different payload -> different hash")
+            aeocha.expect_str(same).to_equal_str("0")
         }
 
         aeocha.it("_jq escapes quotes (the JSON payload is safe)") callback {
-            aeocha.assert_str_eq(_jq("a\"b"), "a\\\"b", "quote escaped")
+            aeocha.expect_str(_jq("a\"b")).to_equal_str("a\\\"b")
         }
     }
 

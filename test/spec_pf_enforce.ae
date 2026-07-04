@@ -60,9 +60,9 @@ main() {
 
         aeocha.describe("per-VM anchor isolation") {
             aeocha.it("each VM loads into its OWN anchor (aeo/<vm>, distinct path)") callback {
-                aeocha.assert_str_eq(anchor_name("db_vm"), "aeo/db_vm", "db_vm anchor")
-                aeocha.assert_str_eq(anchor_name("python_vm"), "aeo/python_vm", "python_vm anchor")
-                aeocha.assert_str_eq(anchor_path("db_vm"), "/etc/pf.anchors/aeo-db_vm", "db_vm anchor file")
+                aeocha.expect_str(anchor_name("db_vm")).to_equal_str("aeo/db_vm")
+                aeocha.expect_str(anchor_name("python_vm")).to_equal_str("aeo/python_vm")
+                aeocha.expect_str(anchor_path("db_vm")).to_equal_str("/etc/pf.anchors/aeo-db_vm")
             }
         }
     }

@@ -17,44 +17,36 @@ main() {
 
         aeocha.describe("dataset_for resolves a node's dataset by kind") {
             aeocha.it("a jail uses its DECLARED dataset") callback {
-                aeocha.assert_str_eq(dataset_for("db", "jail", "zroot/jails/db"),
-                    "zroot/jails/db", "jail -> the dataset() it declared")
+                aeocha.expect_str(dataset_for("db", "jail", "zroot/jails/db")).to_equal_str("zroot/jails/db")
             }
             aeocha.it("a bhyve VM derives zroot/vm/<name> by convention") callback {
-                aeocha.assert_str_eq(dataset_for("db_vm", "bhyve", ""),
-                    "zroot/vm/db_vm", "bhyve -> /zroot/vm/<name> (vm-bhyve layout)")
+                aeocha.expect_str(dataset_for("db_vm", "bhyve", "")).to_equal_str("zroot/vm/db_vm")
             }
             aeocha.it("a dataset-less kind (container) returns empty (nothing to snap)") callback {
-                aeocha.assert_str_eq(dataset_for("app", "container", ""),
-                    "", "container has no aeo-managed dataset")
+                aeocha.expect_str(dataset_for("app", "container", "")).to_equal_str("")
             }
         }
 
         aeocha.describe("snap_name builds the zfs snapshot identifier") {
             aeocha.it("forms <dataset>@<tag>") callback {
-                aeocha.assert_str_eq(snap_name("zroot/jails/db", "before-upgrade"),
-                    "zroot/jails/db@before-upgrade", "the @tag snapshot id")
+                aeocha.expect_str(snap_name("zroot/jails/db", "before-upgrade")).to_equal_str("zroot/jails/db@before-upgrade")
             }
             aeocha.it("composes with dataset_for end-to-end (jail)") callback {
                 ds = dataset_for("db", "jail", "zroot/jails/db")
-                aeocha.assert_str_eq(snap_name(ds, "v1"),
-                    "zroot/jails/db@v1", "jail db, tag v1")
+                aeocha.expect_str(snap_name(ds, "v1")).to_equal_str("zroot/jails/db@v1")
             }
             aeocha.it("composes for a bhyve VM too") callback {
                 ds = dataset_for("python_vm", "bhyve", "")
-                aeocha.assert_str_eq(snap_name(ds, "clean"),
-                    "zroot/vm/python_vm@clean", "vm python_vm, tag clean")
+                aeocha.expect_str(snap_name(ds, "clean")).to_equal_str("zroot/vm/python_vm@clean")
             }
         }
 
         aeocha.describe("backup_file names the zfs-send artifact") {
             aeocha.it("forms <dir>/<node>-<tag>.zfs") callback {
-                aeocha.assert_str_eq(backup_file("/backups", "db", "nightly"),
-                    "/backups/db-nightly.zfs", "the portable backup stream path")
+                aeocha.expect_str(backup_file("/backups", "db", "nightly")).to_equal_str("/backups/db-nightly.zfs")
             }
             aeocha.it("each node gets its own file under the dir") callback {
-                aeocha.assert_str_eq(backup_file("/b", "app", "v1"),
-                    "/b/app-v1.zfs", "app's artifact, distinct from db's")
+                aeocha.expect_str(backup_file("/b", "app", "v1")).to_equal_str("/b/app-v1.zfs")
             }
         }
     }

@@ -40,18 +40,18 @@ main() {
             } else {
                 // build
                 berr = driver_linux.build("myapp", DF(), "")
-                aeocha.assert_str_eq(berr, "", "build succeeds")
+                aeocha.expect_str(berr).to_equal_str("")
                 tag = driver_linux.built_tag("myapp")
                 // run + alive
                 uerr = driver_linux.up("myapp", tag, "sleep 600", 0, "")
-                aeocha.assert_str_eq(uerr, "", "run succeeds")
+                aeocha.expect_str(uerr).to_equal_str("")
                 aeocha.expect_int(driver_linux.probe("myapp", "", "")).to_equal(1)
                 // the baked-in marker proves the image is OURS (built from the
                 // heredoc), not a pulled stock image.
                 marker = driver_linux.exec_capture("myapp", "cat /etc/aeo-marker", "")
-                aeocha.assert_str_eq(marker, "aeo-built-this", "baked-in marker")
+                aeocha.expect_str(marker).to_equal_str("aeo-built-this")
                 // and it still computes
-                aeocha.assert_str_eq(driver_linux.exec_capture("myapp", "echo $((2+2))", ""), "4", "2+2=4")
+                aeocha.expect_str(driver_linux.exec_capture("myapp", "echo $((2+2))", "")).to_equal_str("4")
             }
         }
 

@@ -36,14 +36,14 @@ main() {
                 a = recv_one("")
                 b = recv_one("")
                 c = recv_one("")
-                aeocha.assert_str_eq(a, "boot tok n1", "1st out = 1st in")
-                aeocha.assert_str_eq(b, "halt tok n2", "2nd out = 2nd in")
-                aeocha.assert_str_eq(c, "probe tok n3", "3rd out = 3rd in")
+                aeocha.expect_str(a).to_equal_str("boot tok n1")
+                aeocha.expect_str(b).to_equal_str("halt tok n2")
+                aeocha.expect_str(c).to_equal_str("probe tok n3")
             }
 
             aeocha.it("recv_one returns \"\" once drained") callback {
                 d = recv_one("")
-                aeocha.assert_str_eq(d, "", "empty queue -> empty string")
+                aeocha.expect_str(d).to_equal_str("")
                 aeocha.expect_int(queue_pending()).to_be_falsy()
             }
         }
@@ -56,10 +56,10 @@ main() {
                 line = encode_boot("s3cret", "db_vm")
                 queue_push(line)
                 got = recv_one("")
-                aeocha.assert_str_eq(got, "boot s3cret db_vm", "line intact (no dangling)")
-                aeocha.assert_str_eq(verb_of(got), "boot", "verb parses")
-                aeocha.assert_str_eq(token_of(got), "s3cret", "token parses")
-                aeocha.assert_str_eq(arg1_of(got), "db_vm", "node parses")
+                aeocha.expect_str(got).to_equal_str("boot s3cret db_vm")
+                aeocha.expect_str(verb_of(got)).to_equal_str("boot")
+                aeocha.expect_str(token_of(got)).to_equal_str("s3cret")
+                aeocha.expect_str(arg1_of(got)).to_equal_str("db_vm")
             }
         }
 

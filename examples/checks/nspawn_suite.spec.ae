@@ -64,11 +64,11 @@ main() {
                 "system silly_addition_nspawn:\n",
                 "  nspawn db [command=sleep 600, image=${rdb}]\n"),
                 "  nspawn app [command=sleep 600, image=${rapp}] -> db")
-            aeocha.assert_str_eq(describe_tree(), want, "resolved nspawn tree snapshot")
+            aeocha.expect_str(describe_tree()).to_equal_str(want)
         }
         aeocha.it("both run a long-lived payload; app depends on db") callback {
-            aeocha.assert_str_eq(get_command("db"), "sleep 600", "db payload")
-            aeocha.assert_str_eq(get_depends("app"), "db", "app ◄ db")
+            aeocha.expect_str(get_command("db")).to_equal_str("sleep 600")
+            aeocha.expect_str(get_depends("app")).to_equal_str("db")
         }
     }
 

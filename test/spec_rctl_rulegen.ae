@@ -30,9 +30,7 @@ main() {
 
         aeocha.describe("the caps are recorded") {
             aeocha.it("get_rctl accumulates every limit_* setter") callback {
-                aeocha.assert_str_eq(get_rctl("db_vm"),
-                    "memoryuse=2G, pcpu=150, maxproc=512, openfiles=4096",
-                    "all four caps recorded in order")
+                aeocha.expect_str(get_rctl("db_vm")).to_equal_str("memoryuse=2G, pcpu=150, maxproc=512, openfiles=4096")
             }
         }
 
@@ -56,7 +54,7 @@ main() {
         aeocha.describe("a node with no limits") {
             aeocha.it("renders nothing (no caps -> no rules)") callback {
                 r = rules_for("unlimited_vm", "jail")
-                aeocha.assert_str_eq(r, "", "no limit{} -> empty ruleset")
+                aeocha.expect_str(r).to_equal_str("")
             }
         }
 
@@ -67,11 +65,11 @@ main() {
         aeocha.describe("never-cap-the-orchestrator guard") {
             aeocha.it("rules_for REFUSES a user subject (empty, not a user: rule)") callback {
                 r = rules_for("db_vm", "user")
-                aeocha.assert_str_eq(r, "", "user subject -> no rules emitted")
+                aeocha.expect_str(r).to_equal_str("")
             }
             aeocha.it("rules_for REFUSES loginclass too") callback {
                 r = rules_for("db_vm", "loginclass")
-                aeocha.assert_str_eq(r, "", "loginclass subject -> no rules")
+                aeocha.expect_str(r).to_equal_str("")
             }
             aeocha.it("apply REFUSES a user subject LOUDLY (error, not silent no-op)") callback {
                 e = apply("db_vm", "user")

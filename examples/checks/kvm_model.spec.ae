@@ -75,17 +75,17 @@ main() {
                 "system silly_addition_kvm:\n",
                 "  kvm db_vm [image=${d}]\n"),
                 "  kvm app_vm [image=${a}] -> db_vm")
-            aeocha.assert_str_eq(describe_tree(), want, "resolved kvm tree snapshot")
+            aeocha.expect_str(describe_tree()).to_equal_str(want)
         }
         aeocha.it("each VM names its image + size; NIC tracks AEO_*_NIC") callback {
-            aeocha.assert_str_eq(get_image("db_vm"), _db_image(), "db_vm image")
-            aeocha.assert_str_eq(string_from_int(get_cpus("db_vm")), "2", "db_vm cpus")
-            aeocha.assert_str_eq(get_memory("db_vm"), "2G", "db_vm memory")
-            aeocha.assert_str_eq(get_nic("db_vm"), _nic("AEO_DB_NIC"), "db_vm nic (env or user-mode)")
-            aeocha.assert_str_eq(get_nic("app_vm"), _nic("AEO_APP_NIC"), "app_vm nic (its own)")
+            aeocha.expect_str(get_image("db_vm")).to_equal_str(_db_image())
+            aeocha.expect_str(string_from_int(get_cpus("db_vm"))).to_equal_str("2")
+            aeocha.expect_str(get_memory("db_vm")).to_equal_str("2G")
+            aeocha.expect_str(get_nic("db_vm")).to_equal_str(_nic("AEO_DB_NIC"))
+            aeocha.expect_str(get_nic("app_vm")).to_equal_str(_nic("AEO_APP_NIC"))
         }
         aeocha.it("app_vm depends on db_vm (ordering edge)") callback {
-            aeocha.assert_str_eq(get_depends("app_vm"), "db_vm", "app_vm ◄ db_vm")
+            aeocha.expect_str(get_depends("app_vm")).to_equal_str("db_vm")
         }
     }
 

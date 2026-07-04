@@ -60,9 +60,9 @@ main() {
                 "system silly_addition_wslc:\n",
                 "  container db [image=${img}]\n"),
                 "  container app [image=${img}] -> db")
-            aeocha.assert_str_eq(describe_tree(), want, "resolved container tree snapshot")
-            aeocha.assert_str_eq(get_command("db"), "sleep 600", "db payload")
-            aeocha.assert_str_eq(get_depends("app"), "db", "app ◄ db")
+            aeocha.expect_str(describe_tree()).to_equal_str(want)
+            aeocha.expect_str(get_command("db")).to_equal_str("sleep 600")
+            aeocha.expect_str(get_depends("app")).to_equal_str("db")
         }
     }
 

@@ -34,8 +34,8 @@ main() {
 
         aeocha.describe("identity") {
             aeocha.it("name is nspawn; the unit is per-node") callback {
-                aeocha.assert_str_eq(name(), "nspawn", "kind name")
-                aeocha.assert_str_eq(unit_name("db"), "aeo-nspawn-db", "transient unit")
+                aeocha.expect_str(name()).to_equal_str("nspawn")
+                aeocha.expect_str(unit_name("db")).to_equal_str("aeo-nspawn-db")
             }
         }
 
@@ -43,26 +43,25 @@ main() {
             aeocha.it("no command -> --boot the rootfs's own init (system container)") callback {
                 got = _join(run_argv("db", "/var/lib/machines/db", ""))
                 want = "--unit=aeo-nspawn-db --collect --quiet /usr/bin/systemd-nspawn --machine=db --directory=/var/lib/machines/db --boot"
-                aeocha.assert_str_eq(got, want, "boot mode")
+                aeocha.expect_str(got).to_equal_str(want)
             }
             aeocha.it("command set -> run it as the payload via --as-pid2") callback {
                 got = _join(run_argv("app", "/srv/rootfs", "sleep 600"))
                 want = "--unit=aeo-nspawn-app --collect --quiet /usr/bin/systemd-nspawn --machine=app --directory=/srv/rootfs --as-pid2 /bin/sh -c sleep 600"
-                aeocha.assert_str_eq(got, want, "payload mode")
+                aeocha.expect_str(got).to_equal_str(want)
             }
         }
 
         aeocha.describe("lifecycle argv — probe / exec / down") {
             aeocha.it("is_active_argv queries the transient unit") callback {
-                aeocha.assert_str_eq(_join(is_active_argv("db")), "is-active aeo-nspawn-db", "systemctl is-active")
+                aeocha.expect_str(_join(is_active_argv("db"))).to_equal_str("is-active aeo-nspawn-db")
             }
             aeocha.it("exec_argv pipes a command INTO the live machine") callback {
-                aeocha.assert_str_eq(_join(exec_argv("db", "cat /etc/os-release")),
-                    "--machine=db --pipe --quiet --collect /bin/sh -c cat /etc/os-release", "systemd-run --machine")
+                aeocha.expect_str(_join(exec_argv("db", "cat /etc/os-release"))).to_equal_str("--machine=db --pipe --quiet --collect /bin/sh -c cat /etc/os-release")
             }
             aeocha.it("terminate + stop tear the machine + unit down") callback {
-                aeocha.assert_str_eq(_join(terminate_argv("db")), "terminate db", "machinectl terminate")
-                aeocha.assert_str_eq(_join(stop_argv("db")), "stop aeo-nspawn-db", "systemctl stop")
+                aeocha.expect_str(_join(terminate_argv("db"))).to_equal_str("terminate db")
+                aeocha.expect_str(_join(stop_argv("db"))).to_equal_str("stop aeo-nspawn-db")
             }
         }
     }

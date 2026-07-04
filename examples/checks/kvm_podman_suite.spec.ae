@@ -89,12 +89,12 @@ main() {
             ln4 = "  kvm app_vm [image=${a}]\n"
             ln5 = "    container app [image=localhost/aeo-examples/silly-add:latest, expose=8080] -> db"
             want = string_concat(string_concat(string_concat(ln1, ln2), string_concat(ln3, ln4)), ln5)
-            aeocha.assert_str_eq(describe_tree(), want, "resolved kvm+podman tree snapshot")
+            aeocha.expect_str(describe_tree()).to_equal_str(want)
         }
         aeocha.it("each container is nested inside its own VM; app depends on db") callback {
-            aeocha.assert_str_eq(get_host("db"), "db_vm", "db lives inside db_vm")
-            aeocha.assert_str_eq(get_host("app"), "app_vm", "app lives inside app_vm")
-            aeocha.assert_str_eq(get_depends("app"), "db", "app ◄ db (cross-VM by name)")
+            aeocha.expect_str(get_host("db")).to_equal_str("db_vm")
+            aeocha.expect_str(get_host("app")).to_equal_str("app_vm")
+            aeocha.expect_str(get_depends("app")).to_equal_str("db")
         }
     }
 

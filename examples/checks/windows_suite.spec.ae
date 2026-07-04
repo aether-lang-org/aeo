@@ -67,13 +67,13 @@ main() {
                 "system silly_addition_windows:\n",
                 "  container db [image=${img}]\n"),
                 "  container app [image=${img}] -> db")
-            aeocha.assert_str_eq(describe_tree(), want, "resolved container tree snapshot")
+            aeocha.expect_str(describe_tree()).to_equal_str(want)
         }
         aeocha.it("both run a long-lived payload; app depends on db") callback {
             // live containment (each container under its OWN hostname inside WSL) is
             // proven by the windows/WSL itest driver, not from this separate process.
-            aeocha.assert_str_eq(get_command("db"), "sleep 600", "db payload")
-            aeocha.assert_str_eq(get_depends("app"), "db", "app ◄ db")
+            aeocha.expect_str(get_command("db")).to_equal_str("sleep 600")
+            aeocha.expect_str(get_depends("app")).to_equal_str("db")
         }
     }
 

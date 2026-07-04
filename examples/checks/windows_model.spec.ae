@@ -68,15 +68,15 @@ main() {
                 "system silly_addition_windows:\n",
                 "  container db [image=${img}]\n"),
                 "  container app [image=${img}] -> db")
-            aeocha.assert_str_eq(describe_tree(), want, "resolved container tree snapshot")
+            aeocha.expect_str(describe_tree()).to_equal_str(want)
         }
         aeocha.it("both run a long-lived payload; app depends on db") callback {
-            aeocha.assert_str_eq(get_command("db"), "sleep 600", "db payload")
-            aeocha.assert_str_eq(get_depends("app"), "db", "app ◄ db")
+            aeocha.expect_str(get_command("db")).to_equal_str("sleep 600")
+            aeocha.expect_str(get_depends("app")).to_equal_str("db")
         }
         aeocha.it("the wsl_podman engine floats onto both nodes") callback {
-            aeocha.assert_str_eq(get_engine("db"), "wsl_podman", "db engine")
-            aeocha.assert_str_eq(get_engine("app"), "wsl_podman", "app engine (floated)")
+            aeocha.expect_str(get_engine("db")).to_equal_str("wsl_podman")
+            aeocha.expect_str(get_engine("app")).to_equal_str("wsl_podman")
         }
     }
 

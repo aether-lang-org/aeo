@@ -54,13 +54,13 @@ main() {
                 "system silly_addition_containers:\n",
                 "  container db [image=docker.io/library/redis:alpine, expose=6379]\n"),
                 "  container app [image=localhost/aeo-examples/silly-add:latest, expose=8080] -> db")
-            aeocha.assert_str_eq(describe_tree(), want, "resolved container tree snapshot")
+            aeocha.expect_str(describe_tree()).to_equal_str(want)
         }
         aeocha.it("db is redis on 6379; app exposes 8080 + depends on db") callback {
-            aeocha.assert_str_eq(get_image("db"), "docker.io/library/redis:alpine", "db image")
-            aeocha.assert_str_eq(string_from_int(get_expose("db")), "6379", "db port")
-            aeocha.assert_str_eq(string_from_int(get_expose("app")), "8080", "app port")
-            aeocha.assert_str_eq(get_depends("app"), "db", "app ◄ db")
+            aeocha.expect_str(get_image("db")).to_equal_str("docker.io/library/redis:alpine")
+            aeocha.expect_str(string_from_int(get_expose("db"))).to_equal_str("6379")
+            aeocha.expect_str(string_from_int(get_expose("app"))).to_equal_str("8080")
+            aeocha.expect_str(get_depends("app")).to_equal_str("db")
         }
     }
 

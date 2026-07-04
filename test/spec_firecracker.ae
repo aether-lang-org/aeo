@@ -17,11 +17,11 @@ main() {
 
         aeocha.describe("identity + artifact layout") {
             aeocha.it("name is firecracker; image() is a bundle dir") callback {
-                aeocha.assert_str_eq(name(), "firecracker", "kind name")
-                aeocha.assert_str_eq(kernel_path("/srv/mvm"), "/srv/mvm/vmlinux", "kernel in bundle")
-                aeocha.assert_str_eq(rootfs_path("/srv/mvm"), "/srv/mvm/rootfs.ext4", "rootfs in bundle")
-                aeocha.assert_str_eq(pidfile_for("db"), "/tmp/aeo-fc-db.pid", "pidfile")
-                aeocha.assert_str_eq(sockfile_for("db"), "/tmp/aeo-fc-db.sock", "api socket")
+                aeocha.expect_str(name()).to_equal_str("firecracker")
+                aeocha.expect_str(kernel_path("/srv/mvm")).to_equal_str("/srv/mvm/vmlinux")
+                aeocha.expect_str(rootfs_path("/srv/mvm")).to_equal_str("/srv/mvm/rootfs.ext4")
+                aeocha.expect_str(pidfile_for("db")).to_equal_str("/tmp/aeo-fc-db.pid")
+                aeocha.expect_str(sockfile_for("db")).to_equal_str("/tmp/aeo-fc-db.sock")
             }
         }
 

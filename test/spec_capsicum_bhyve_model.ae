@@ -63,9 +63,7 @@ main() {
         // The DSL grant string the rest of the spec must honor.
         aeocha.describe("the DSL records the grant set") {
             aeocha.it("db_vm's constraints name disk(rd,wr) + console(rd)") callback {
-                aeocha.assert_str_eq(get_constraints("db_vm"),
-                    "disk(/tmp/aeo-cap-disk)=rd,wr, console(/tmp/aeo-cap-console)=rd",
-                    "the grant set aeo would confine bhyve to")
+                aeocha.expect_str(get_constraints("db_vm")).to_equal_str("disk(/tmp/aeo-cap-disk)=rd,wr, console(/tmp/aeo-cap-console)=rd")
             }
         }
 
@@ -91,23 +89,23 @@ main() {
         aeocha.describe("cap_enter — bhyve drops into capability mode") {
             aeocha.it("confined, holding only the granted fds") callback {
                 rc = capsicum.enter()
-                aeocha.assert_str_eq(_i(rc), _i(capsicum.CAP_OK), "enter() ok")
-                aeocha.assert_str_eq(_i(capsicum.in_mode()), "1", "in capability mode")
+                aeocha.expect_str(_i(rc)).to_equal_str(_i(capsicum.CAP_OK))
+                aeocha.expect_str(_i(capsicum.in_mode())).to_equal_str("1")
             }
         }
 
         aeocha.describe("granted operations still work (least-privilege, not all-deny)") {
             aeocha.it("disk fd (rd,wr) CAN write") callback {
                 e = aeo_try_write(disk_fd)
-                aeocha.assert_str_eq(_i(e), "0", "disk write allowed — the rd,wr grant is honored")
+                aeocha.expect_str(_i(e)).to_equal_str("0")
             }
             aeocha.it("disk fd (rd,wr) CAN read") callback {
                 e = aeo_try_read(disk_fd)
-                aeocha.assert_str_eq(_i(e), "0", "disk read allowed")
+                aeocha.expect_str(_i(e)).to_equal_str("0")
             }
             aeocha.it("console fd (rd) CAN read") callback {
                 e = aeo_try_read(console_fd)
-                aeocha.assert_str_eq(_i(e), "0", "console read allowed")
+                aeocha.expect_str(_i(e)).to_equal_str("0")
             }
         }
 
@@ -122,7 +120,7 @@ main() {
                 // The headline confined-bhyve escape: reach a disk image outside
                 // its grant set.
                 fd = aeo_open_fd("/tmp/aeo-cap-OTHER", 0)
-                aeocha.assert_str_eq(_i(fd), "-1", "bhyve can't open an un-granted disk in cap mode")
+                aeocha.expect_str(_i(fd)).to_equal_str("-1")
             }
         }
     }

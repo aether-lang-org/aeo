@@ -69,7 +69,7 @@ main() {
 
         aeocha.describe("identity") {
             aeocha.it("names the windows tier") callback {
-                aeocha.assert_str_eq(name(), "windows", "kind name")
+                aeocha.expect_str(name()).to_equal_str("windows")
             }
         }
     }
