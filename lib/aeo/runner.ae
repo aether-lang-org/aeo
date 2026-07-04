@@ -1539,9 +1539,15 @@ _preflight() -> string {
         // guest's). Top-level (non-nested) resources gate against the host.
         host = compose.get_host(nm)
         if host == "" {
-            runnable = _kind_runnable(k, fam)
-            if runnable == 0 {
-                return "aeo: resource '${nm}' kind '${k}' cannot run on a ${fam} host"
+            // A `container` realized by a WSL engine (wslc / wsl_podman) runs on a
+            // WINDOWS host, not Linux — the family gate (which linux-blocks
+            // `container`) would wrongly reject it. Skip the family gate for those;
+            // the driver's own available() is the real check at up-time.
+            if _wsl_engined(nm, k) == 0 {
+                runnable = _kind_runnable(k, fam)
+                if runnable == 0 {
+                    return "aeo: resource '${nm}' kind '${k}' cannot run on a ${fam} host"
+                }
             }
         }
         // A depends() target that was never declared would leave this
@@ -1574,8 +1580,71 @@ _declared(target: string) -> int {
     return 0
 }
 
-// Which host family each kind requires. jail/bhyve → bsd; lxc/docker/
-// container/kvm → linux. Unknown kinds are rejected.
+// Emit a non-fatal warning for any system that mixes podman-plane and docker-plane
+// container nodes. podman and docker maintain SEPARATE networks — peers on
+// different engines in the same system can't resolve each other by name (only via
+// published host ports). WSL engines (wslc/wsl_podman) own their own nets and don't
+// participate in the host system network, so they're not part of this check.
+_warn_mixed_engines() {
+    sc = compose.syscount()
+    si = 0
+    while si < sc {
+        sys = compose.sysname_at(si)
+        has_podman = 0
+        has_docker = 0
+        n = compose.count()
+        i = 0
+        while i < n {
+            nm = compose.name_at(i)
+            if compose.get_system(nm) == sys {
+                if compose.get_kind(nm) == "container" {
+                    if compose.get_host(nm) == "" {          // host-level only
+                        eng = compose.get_engine(nm)
+                        if eng == "docker" {
+                            has_docker = 1
+                        } else {
+                            if eng == "" {
+                                has_podman = 1
+                            } else {
+                                if eng == "podman" {
+                                    has_podman = 1
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            i = i + 1
+        }
+        if has_podman == 1 {
+            if has_docker == 1 {
+                println("aeo: WARNING system '${sys}' mixes podman + docker container engines — separate network planes; peers CANNOT resolve each other by name (published host ports only). Pin one engine per system for name resolution.")
+            }
+        }
+        si = si + 1
+    }
+}
+
+// 1 if `nm` is a `container` node realized by a WSL engine (wslc / wsl_podman) —
+// which runs on a Windows host, so it must bypass the linux family gate (its real
+// gate is the driver's available()). All other nodes → 0 (gate normally).
+_wsl_engined(nm: string, k: string) -> int {
+    if k != "container" {
+        return 0
+    }
+    eng = compose.get_engine(nm)
+    if eng == "wslc" {
+        return 1
+    }
+    if eng == "wsl_podman" {
+        return 1
+    }
+    return 0
+}
+
+// Which host family each kind requires. jail/bhyve → bsd; lxc/container/kvm →
+// linux (a WSL-engined container is exempted in _preflight). Unknown kinds
+// rejected.
 _kind_runnable(k: string, fam: string) -> int {
     if k == "jail" {
         return _eq(fam, "bsd")
@@ -1726,6 +1795,11 @@ main() {
         println(gate)
         exit(2)
     }
+    // Non-fatal WARNING: a system that mixes container engines (e.g. podman + docker
+    // nodes in one system) can't resolve peers by NAME across them — podman and
+    // docker networks are separate planes. Surface it loudly; don't block (the
+    // operator may intend published-port bridging).
+    _warn_mixed_engines()
 
     if cmd == "dry-run" {
         println(profile())

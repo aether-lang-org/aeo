@@ -231,13 +231,15 @@ Gaps:
       engine-pinned container now gets `--memory 128m --pids-limit 16` + the shared
       `aeo-<system>` network (podman inspect confirmed mem=134217728 pids=16
       nets=aeo-engine_demo), which the old plain-up() docker path dropped. 22 spec
-      files pass, no regression. STILL TODO: (a) examples migrate docker()→
-      container(){engine("docker")} + collapse windows/wslc examples [Paul];
-      (b) host-family gate `_kind_runnable` still linux-blocks `container` — a WSL-
-      engined container needs the node's engine to skip the linux gate (driver
-      available() is the real check); (c) the mixed-engine-per-system network-plane
-      WARNING (podman vs docker nets can't resolve peers by name) not yet emitted;
-      (d) describe_tree command= surfacing for WSL-engine containers.
+      files pass, no regression. STILL TODO: (a) DONE 2026-07-04 (5d9ecb1):
+      windows/wslc examples + their 4 specs migrated to container(){engine(...)} via
+      a system-scope float; all 12 examples aeo-check green (windows/wslc 3 passing
+      each w/ a new get_engine float assertion); (b) host-family gate
+      `_kind_runnable` still linux-blocks `container` — a WSL-engined container
+      needs the node's engine to skip the linux gate (driver available() is the real
+      check); (c) the mixed-engine-per-system network-plane WARNING (podman vs docker
+      nets can't resolve peers by name) not yet emitted; (d) describe_tree engine=
+      surfacing (snapshots are engine-agnostic — get_engine() asserts cover it).
       --- original design note ---
       `container()` stays the one OCI kind; new `engine("podman"|"docker"|"wslc")`
       node property with SYSTEM-SCOPE FLOAT + node override (same FluentSelenium
