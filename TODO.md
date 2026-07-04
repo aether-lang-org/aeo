@@ -455,8 +455,25 @@ wired yet; mapped here as candidate kinds. Ordered by how cleanly they'd land:
         - **--gpus now covers AMD** — firms up the gpu() proposal (fable-5-insights
           §G): one `--gpus` renders gpu(\"shared\") uniformly on podman 6, and bazzite
           is AMD → testable. (Cross-ref the gpu() TODO item.)
-        - Box status: bazzite host 5.8.2, WSL2 guest 5.7.0 — upgrade one to 6 to
-          exercise pasta-forwarder + AMD --gpus + the cgroups-v2 preflight live.
+        - Box status: bazzite host 5.8.2, WSL2 guest 5.7.0. PODMAN-6 BOX NOW LIVE:
+          CachyOS @192.168.0.160 (Arch, gcc 16.1.1, podman 6.0.0, cgroups v2, Intel
+          iGPU) — throwaway, reimaging to FreeBSD after. LIVE-PROVEN there 2026-07-04:
+          `aeo up` on podman 6 (engine auto->podman) deployed a limit{} container,
+          `podman inspect` confirmed mem=134217728 pids=16 (limit{} -> real cgroups-v2
+          caps), and a fork-bomb inside it was REFUSED ("sh: can't fork: Resource
+          temporarily unavailable") — the behavioral containment proof on the
+          podman-6/v2 substrate; clean `aeo down`. So the confinement path is
+          podman-6-safe. STILL TO DO on this box while it lasts: cgroups-v2 PREFLIGHT
+          probe (fail loud on v1+podman6); the netavark/nftables deny_egress+internal
+          re-verify; the --gpus/DRI gpu() path (Intel iGPU, /dev/dri/renderD128
+          present); pasta forwarder (passt pulled in as a podman dep). Toolchain
+          getting-started failures captured in docs/getting-started-cachyos-hardening.md
+          (gcc-16 -Werror const-strstr, make-install-wipes-build, fish-shell).
+        - COSMETIC BUG seen on podman 6 (and bazzite): a Linux container with limit{}
+          logs "limit{} declared but rctl is FreeBSD-only — NOT enforced on this host"
+          even though the cgroup caps ARE applied (inspect proves it). The message is
+          about the FreeBSD rctl path and misfires on Linux — fix the runner to only
+          emit it for the FreeBSD/rctl case.
 - [ ] **`lib/persist` — one seam, adhere to each substrate's native supervisor for
       HOLD-ALIVE.** Motivated by the firecracker fix (§ Firecracker gap #4): a bare
       bg-child of the short-lived aeo front-door is SIGHUP-reaped when aeo's session
