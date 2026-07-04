@@ -17,7 +17,7 @@
 
 import aeocha
 import driver_wslc (name, run_argv, list_json_argv, stop_argv, remove_argv, exec_argv)
-import std.string (string_from_int)
+import std.string
 import std.string   // bare form: inlined aeocha calls bare `copy` unqualified
 
 main() {
@@ -29,55 +29,55 @@ main() {
             aeocha.it("builds `run -d --name N -p H:C -e K=V IMG /bin/sh -c CMD`") callback {
                 av = run_argv("db", "docker.io/library/alpine:latest", "sleep 600", 8080, "K=V")
                 // run, -d, --name, db, -p, 8080:8080, -e, K=V, IMG, /bin/sh, -c, sleep 600 = 12
-                aeocha.assert_str_eq(string_from_int(list_size(av)), "12", "12 tokens")
-                aeocha.assert_str_eq(list_get_raw(av, 0), "run", "run")
-                aeocha.assert_str_eq(list_get_raw(av, 1), "-d", "detached")
-                aeocha.assert_str_eq(list_get_raw(av, 2), "--name", "name flag")
-                aeocha.assert_str_eq(list_get_raw(av, 3), "db", "name")
-                aeocha.assert_str_eq(list_get_raw(av, 4), "-p", "publish flag")
-                aeocha.assert_str_eq(list_get_raw(av, 5), "8080:8080", "port map")
-                aeocha.assert_str_eq(list_get_raw(av, 6), "-e", "env flag")
-                aeocha.assert_str_eq(list_get_raw(av, 7), "K=V", "env pair")
-                aeocha.assert_str_eq(list_get_raw(av, 8), "docker.io/library/alpine:latest", "image")
-                aeocha.assert_str_eq(list_get_raw(av, 11), "sleep 600", "command")
+                aeocha.expect_int(list_size(av)).to_equal(12)
+                aeocha.expect_str(list_get_raw(av, 0)).to_equal_str("run")
+                aeocha.expect_str(list_get_raw(av, 1)).to_equal_str("-d")
+                aeocha.expect_str(list_get_raw(av, 2)).to_equal_str("--name")
+                aeocha.expect_str(list_get_raw(av, 3)).to_equal_str("db")
+                aeocha.expect_str(list_get_raw(av, 4)).to_equal_str("-p")
+                aeocha.expect_str(list_get_raw(av, 5)).to_equal_str("8080:8080")
+                aeocha.expect_str(list_get_raw(av, 6)).to_equal_str("-e")
+                aeocha.expect_str(list_get_raw(av, 7)).to_equal_str("K=V")
+                aeocha.expect_str(list_get_raw(av, 8)).to_equal_str("docker.io/library/alpine:latest")
+                aeocha.expect_str(list_get_raw(av, 11)).to_equal_str("sleep 600")
             }
             aeocha.it("omits -p and -e when unset; no command -> no /bin/sh") callback {
                 av = run_argv("bare", "alpine", "", 0, "")
                 // run, -d, --name, bare, alpine = 5 tokens
-                aeocha.assert_str_eq(string_from_int(list_size(av)), "5", "5 tokens (no -p/-e/cmd)")
-                aeocha.assert_str_eq(list_get_raw(av, 4), "alpine", "image last")
+                aeocha.expect_int(list_size(av)).to_equal(5)
+                aeocha.expect_str(list_get_raw(av, 4)).to_equal_str("alpine")
             }
         }
 
         aeocha.describe("probe query") {
             aeocha.it("list_json_argv = `list --filter name=N --format json`") callback {
                 av = list_json_argv("web")
-                aeocha.assert_str_eq(string_from_int(list_size(av)), "5", "5 tokens")
-                aeocha.assert_str_eq(list_get_raw(av, 0), "list", "list")
-                aeocha.assert_str_eq(list_get_raw(av, 1), "--filter", "filter flag")
-                aeocha.assert_str_eq(list_get_raw(av, 2), "name=web", "name filter")
-                aeocha.assert_str_eq(list_get_raw(av, 3), "--format", "format flag")
-                aeocha.assert_str_eq(list_get_raw(av, 4), "json", "json format")
+                aeocha.expect_int(list_size(av)).to_equal(5)
+                aeocha.expect_str(list_get_raw(av, 0)).to_equal_str("list")
+                aeocha.expect_str(list_get_raw(av, 1)).to_equal_str("--filter")
+                aeocha.expect_str(list_get_raw(av, 2)).to_equal_str("name=web")
+                aeocha.expect_str(list_get_raw(av, 3)).to_equal_str("--format")
+                aeocha.expect_str(list_get_raw(av, 4)).to_equal_str("json")
             }
         }
 
         aeocha.describe("teardown verbs (wslc uses `container remove`, not `rm`)") {
             aeocha.it("stop_argv = `container stop N`") callback {
                 av = stop_argv("db")
-                aeocha.assert_str_eq(string_from_int(list_size(av)), "3", "3 tokens")
-                aeocha.assert_str_eq(list_get_raw(av, 0), "container", "container")
-                aeocha.assert_str_eq(list_get_raw(av, 1), "stop", "stop")
-                aeocha.assert_str_eq(list_get_raw(av, 2), "db", "name")
+                aeocha.expect_int(list_size(av)).to_equal(3)
+                aeocha.expect_str(list_get_raw(av, 0)).to_equal_str("container")
+                aeocha.expect_str(list_get_raw(av, 1)).to_equal_str("stop")
+                aeocha.expect_str(list_get_raw(av, 2)).to_equal_str("db")
             }
             aeocha.it("remove_argv = `container remove N` (NOT rm)") callback {
                 av = remove_argv("db")
-                aeocha.assert_str_eq(list_get_raw(av, 1), "remove", "remove (not rm)")
+                aeocha.expect_str(list_get_raw(av, 1)).to_equal_str("remove")
             }
         }
 
         aeocha.describe("identity") {
             aeocha.it("names the wslc tier") callback {
-                aeocha.assert_str_eq(name(), "wslc", "kind name")
+                aeocha.expect_str(name()).to_equal_str("wslc")
             }
         }
     }

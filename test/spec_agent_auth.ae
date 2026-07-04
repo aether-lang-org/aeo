@@ -16,7 +16,7 @@
 
 import aeocha
 import agent_auth (mint_secret, verify, mac)
-import std.string (string_length, string_from_int)
+import std.string (string_length)
 import std.string   // bare form: inlined aeocha calls bare `copy` unqualified
 
 main() {
@@ -27,28 +27,30 @@ main() {
         aeocha.describe("mint") {
             aeocha.it("mints a non-empty secret") callback {
                 s = mint_secret()
-                aeocha.assert_str_eq(string_from_int(_nonempty(s)), "1", "secret is non-empty")
+                aeocha.expect_int(string_length(s)).to_be_gt(0)
             }
             aeocha.it("two mints differ (it's actually random)") callback {
                 a = mint_secret()
                 b = mint_secret()
-                aeocha.assert_str_eq(string_from_int(_streq(a, b)), "0", "distinct secrets")
+                // no fluent str-inequality matcher (StrSubject.not_ isn't wired) —
+                // assert the equality PREDICATE is false: distinct secrets.
+                aeocha.expect_int(_eq(a, b)).to_be_falsy()
             }
         }
 
         aeocha.describe("verify (constant-time)") {
             aeocha.it("accepts the matching secret") callback {
                 s = mint_secret()
-                aeocha.assert_str_eq(string_from_int(verify(s, s)), "1", "match -> allow")
+                aeocha.expect_int(verify(s, s)).to_be_truthy()      // match -> allow
             }
             aeocha.it("rejects a wrong secret") callback {
                 s = mint_secret()
                 w = mint_secret()
-                aeocha.assert_str_eq(string_from_int(verify(s, w)), "0", "mismatch -> deny")
+                aeocha.expect_int(verify(s, w)).to_be_falsy()       // mismatch -> deny
             }
             aeocha.it("is fail-closed: empty configured secret denies all") callback {
-                aeocha.assert_str_eq(string_from_int(verify("", "anything")), "0", "no key -> deny")
-                aeocha.assert_str_eq(string_from_int(verify("", "")), "0", "empty vs empty -> deny")
+                aeocha.expect_int(verify("", "anything")).to_be_falsy()  // no key -> deny
+                aeocha.expect_int(verify("", "")).to_be_falsy()          // empty vs empty -> deny
             }
         }
 
@@ -56,7 +58,7 @@ main() {
             aeocha.it("is stable for the same secret") callback {
                 m1 = mac("courier-key-xyz")
                 m2 = mac("courier-key-xyz")
-                aeocha.assert_str_eq(m1, m2, "same secret -> same MAC")
+                aeocha.expect_str(m1).to_equal_str(m2)              // same secret -> same MAC
             }
         }
     }
@@ -64,12 +66,8 @@ main() {
     aeocha.run_summary(fw)
 }
 
-// helpers (aeocha asserts on strings; turn predicates into "0"/"1")
-_nonempty(s: string) -> int {
-    if string_length(s) > 0 { return 1 }
-    return 0
-}
-_streq(a: string, b: string) -> int {
+// 1 if the two strings are equal (aeocha has no fluent str-inequality yet).
+_eq(a: string, b: string) -> int {
     if a == b { return 1 }
     return 0
 }

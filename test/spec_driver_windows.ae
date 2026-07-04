@@ -19,7 +19,7 @@
 import aeocha
 import driver_windows (name, wsl_argv)
 import driver_linux (ps_running_argv)
-import std.string (string_from_int)
+import std.string
 import std.string   // bare form: inlined aeocha calls bare `copy` unqualified
 
 main() {
@@ -34,13 +34,13 @@ main() {
                 list_add_raw(inner, "-a")
                 av = wsl_argv("Ubuntu", inner)
                 // [-d, Ubuntu, --, podman, ps, -a] = 6 tokens
-                aeocha.assert_str_eq(string_from_int(list_size(av)), "6", "6 tokens")
-                aeocha.assert_str_eq(list_get_raw(av, 0), "-d", "flag")
-                aeocha.assert_str_eq(list_get_raw(av, 1), "Ubuntu", "distro")
-                aeocha.assert_str_eq(list_get_raw(av, 2), "--", "terminator")
-                aeocha.assert_str_eq(list_get_raw(av, 3), "podman", "engine")
-                aeocha.assert_str_eq(list_get_raw(av, 4), "ps", "inner[0]")
-                aeocha.assert_str_eq(list_get_raw(av, 5), "-a", "inner[1]")
+                aeocha.expect_int(list_size(av)).to_equal(6)
+                aeocha.expect_str(list_get_raw(av, 0)).to_equal_str("-d")
+                aeocha.expect_str(list_get_raw(av, 1)).to_equal_str("Ubuntu")
+                aeocha.expect_str(list_get_raw(av, 2)).to_equal_str("--")
+                aeocha.expect_str(list_get_raw(av, 3)).to_equal_str("podman")
+                aeocha.expect_str(list_get_raw(av, 4)).to_equal_str("ps")
+                aeocha.expect_str(list_get_raw(av, 5)).to_equal_str("-a")
             }
 
             aeocha.it("omits -d for the default distro (empty)") callback {
@@ -48,10 +48,10 @@ main() {
                 list_add_raw(inner, "ps")
                 av = wsl_argv("", inner)
                 // [--, podman, ps] = 3 tokens, no -d
-                aeocha.assert_str_eq(string_from_int(list_size(av)), "3", "3 tokens")
-                aeocha.assert_str_eq(list_get_raw(av, 0), "--", "terminator first (no -d)")
-                aeocha.assert_str_eq(list_get_raw(av, 1), "podman", "engine")
-                aeocha.assert_str_eq(list_get_raw(av, 2), "ps", "inner[0]")
+                aeocha.expect_int(list_size(av)).to_equal(3)
+                aeocha.expect_str(list_get_raw(av, 0)).to_equal_str("--")
+                aeocha.expect_str(list_get_raw(av, 1)).to_equal_str("podman")
+                aeocha.expect_str(list_get_raw(av, 2)).to_equal_str("ps")
             }
 
             aeocha.it("splices a real driver_linux ps builder verbatim") callback {
@@ -60,16 +60,16 @@ main() {
                 inner = ps_running_argv("web")
                 av = wsl_argv("Ubuntu", inner)
                 // 4 wsl-prefix tokens (-d Ubuntu -- podman) + 7 inner = 11
-                aeocha.assert_str_eq(string_from_int(list_size(av)), "11", "11 tokens total")
-                aeocha.assert_str_eq(list_get_raw(av, 3), "podman", "podman at 3")
-                aeocha.assert_str_eq(list_get_raw(av, 4), "ps", "ps subcommand spliced")
-                aeocha.assert_str_eq(list_get_raw(av, 6), "name=^web$", "name filter preserved")
+                aeocha.expect_int(list_size(av)).to_equal(11)
+                aeocha.expect_str(list_get_raw(av, 3)).to_equal_str("podman")
+                aeocha.expect_str(list_get_raw(av, 4)).to_equal_str("ps")
+                aeocha.expect_str(list_get_raw(av, 6)).to_equal_str("name=^web$")
             }
         }
 
         aeocha.describe("identity") {
             aeocha.it("names the windows tier") callback {
-                aeocha.assert_str_eq(name(), "windows", "kind name")
+                aeocha.expect_str(name()).to_equal_str("windows")
             }
         }
     }
