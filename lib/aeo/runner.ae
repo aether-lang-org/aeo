@@ -561,6 +561,20 @@ driver_up(nm: string, k: string) -> string {
         // so a composition's confinement is substrate-portable. A node with
         // peer-only egress lands on the internal net (can't phone home).
         confine = _confine_flags(nm, net, inet)
+        // GPU (§G): a gpu("shared") claim renders to a DRI device-map token
+        // (--device /dev/dri/renderD*), spliced into the SAME argv path as confine.
+        // exclusive/VM claims never reach here (refused at check). engine is passed
+        // so a future engine that needs --gpus/CDI can diverge; today all container
+        // engines take the vendor-agnostic --device path proven on the Intel box.
+        gflags = compose.gpu_flags(nm, k, eng)
+        if string_length(gflags) > 0 {
+            if string_length(confine) > 0 {
+                confine = "${confine} ${gflags}"
+            } else {
+                confine = gflags
+            }
+            _ = audit.record(nm, k, "gpu", gflags)
+        }
         // FORENSICS: record the posture this node booted WITH (the audit trail —
         // what was confined/attested is then provable after the fact).
         if string_length(confine) > 0 {
@@ -738,6 +752,44 @@ driver_probe(nm: string, k: string, health: string) -> int {
     return driver_linux.probe(nm, health, "")
 }
 
+
+// _gpu_preflight() — for each container/lxc node with a gpu() claim, probe that its
+// DRI render node actually EXISTS on this host. Non-fatal: a missing node means "not
+// the host to `up` on", not "the composition is wrong" — so CI on a GPU-less runner
+// still validates shape. VM/exclusive claims skip (their device model is checked at
+// deploy). BSD hosts skip (no /dev/dri). Prints one warning per absent device.
+_gpu_preflight() {
+    if host.family() == "bsd" { return }
+    n = compose.count()
+    i = 0
+    while i < n {
+        nm = compose.name_at(i)
+        mode = compose.get_gpu_mode(nm)
+        if string_length(mode) > 0 {
+            k = compose.get_kind(nm)
+            if k == "container" {
+                _gpu_probe_dev(nm)
+            }
+            if k == "lxc" {
+                _gpu_probe_dev(nm)
+            }
+        }
+        i = i + 1
+    }
+}
+
+_gpu_probe_dev(nm: string) {
+    dev = compose.get_gpu_device(nm)
+    if string_length(dev) == 0 { dev = "/dev/dri/renderD128" }
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "test -e '${dev}' && echo yes || echo no")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    if string_contains(out, "yes") == 0 {
+        println("aeo: [${nm}] gpu(\"${compose.get_gpu_mode(nm)}\") wants '${dev}' but it's absent on this host — the composition is valid; `up` it on a host with a GPU render node (this is a warning, not a failure)")
+    }
+}
 
 // _confine_flags(nm, net) — render this node's confinement (limit{} caps,
 // constrain{} hardening, netpolicy) to a podman flag string via confine_linux.
@@ -1888,6 +1940,20 @@ main() {
     // assertions run anywhere (before the host gate), like status. Exit non-zero if
     // any spec fails, so `aeo check <file>` is a CI-usable pre-flight.
     if cmd == "check" {
+        // GPU allocation gate (§G): a data-model check (exclusive-conflict, kind
+        // gating) — runs anywhere, before the host gate, like the specs. A bad
+        // claim fails `aeo check` with the reasoning as the error text, so the
+        // human tier-choice becomes a machine-checked constraint.
+        gerr = compose.gpu_alloc_error()
+        if gerr != "" {
+            println(gerr)
+            exit(1)
+        }
+        // Host preflight: if any container gpu() claim needs a DRI render node,
+        // warn (not fail) when it's absent — the data model is sound; the host may
+        // simply be the wrong one to `up` on. Non-fatal so CI on a GPU-less runner
+        // still validates the composition's SHAPE.
+        _gpu_preflight()
         rc = _run_phase_specs("check")
         exit(rc)
     }

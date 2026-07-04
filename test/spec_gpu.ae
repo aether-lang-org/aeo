@@ -1,0 +1,133 @@
+// spec_gpu.ae — the gpu() device-claim grammar (§G): flag rendering + the
+// check-time allocation gate. Config-IS-code: we declare the SAME compositions aeo
+// would, then read back the rendered run-flags and the allocation verdict.
+//
+// GROUND TRUTH baked in (Intel iGPU, podman 6, CachyOS, 2026-07-04): `--gpus all`
+// FAILS on Intel (no CDI vendor spec); the vendor-agnostic path that works is a DRI
+// render-node device-map. So gpu("shared") on a container renders `--device
+// /dev/dri/renderD128`, NOT `--gpus`. The live "container sees the GPU" proof runs
+// on that box; this locks the pure data-model so it can't drift.
+//
+//   sh test/run-spec.sh test/spec_gpu.ae
+
+import aeocha
+import compose (system, container, lxc, kvm_vm, firecracker, gpu, gpu_device, memory, get_gpu_mode, get_gpu_device, gpu_flags, gpu_alloc_error, describe_tree, reset_nodes)
+import std.string
+
+main() {
+    fw = aeocha.init()
+
+    aeocha.describe(fw, "gpu() — device claims with checked allocation (§G)") {
+
+        // ---- the declaration records the contract -------------------------
+        aeocha.describe("the DSL records the claim") {
+            aeocha.it("gpu(mode) + gpu_device(pin) store on the node") callback {
+                reset_nodes()
+                system("g1") {
+                    container("transcoder") { gpu("shared") }
+                    container("pinned")     { gpu("shared") gpu_device("/dev/dri/renderD129") }
+                }
+                aeocha.expect_str(get_gpu_mode("transcoder")).to_equal_str("shared")
+                aeocha.expect_str(get_gpu_device("transcoder")).to_equal_str("")
+                aeocha.expect_str(get_gpu_device("pinned")).to_equal_str("/dev/dri/renderD129")
+            }
+        }
+
+        // ---- flag rendering: the SHARED container/lxc DRI path ------------
+        aeocha.describe("gpu_flags — the vendor-agnostic DRI device-map") {
+            aeocha.it("shared container -> --device /dev/dri/renderD128 (NOT --gpus)") callback {
+                reset_nodes()
+                system("g2") { container("t") { gpu("shared") } }
+                f = gpu_flags("t", "container", "")
+                aeocha.expect_str(f).to_equal_str("--device /dev/dri/renderD128")
+            }
+            aeocha.it("a device pin overrides the default render node") callback {
+                reset_nodes()
+                system("g3") { container("t") { gpu("shared") gpu_device("/dev/dri/renderD129") } }
+                f = gpu_flags("t", "container", "")
+                aeocha.expect_str(f).to_equal_str("--device /dev/dri/renderD129")
+            }
+            aeocha.it("lxc shares the same DRI path") callback {
+                reset_nodes()
+                system("g4") { lxc("l") { gpu("shared") } }
+                f = gpu_flags("l", "lxc", "")
+                aeocha.expect_str(f).to_equal_str("--device /dev/dri/renderD128")
+            }
+            aeocha.it("no gpu() -> no flags") callback {
+                reset_nodes()
+                system("g5") { container("plain") { } }
+                aeocha.expect_str(gpu_flags("plain", "container", "")).to_equal_str("")
+            }
+        }
+
+        // ---- the allocation gate: what earns gpu() its place --------------
+        aeocha.describe("gpu_alloc_error — check-time allocation rules") {
+
+            aeocha.it("a lone shared claim is allowed") callback {
+                reset_nodes()
+                system("ok1") { container("t") { gpu("shared") } }
+                aeocha.expect_str(gpu_alloc_error()).to_equal_str("")
+            }
+
+            aeocha.it("two shared claims coexist (shared n shared OK)") callback {
+                reset_nodes()
+                system("ok2") {
+                    container("a") { gpu("shared") }
+                    container("b") { gpu("shared") }
+                }
+                aeocha.expect_str(gpu_alloc_error()).to_equal_str("")
+            }
+
+            aeocha.it("shared on a VM is refused (a VM takes the GPU exclusively)") callback {
+                reset_nodes()
+                system("bad1") { kvm_vm("vm") { memory("2G") gpu("shared") } }
+                aeocha.expect_str(gpu_alloc_error()).to_contain("gpu(\"shared\") on kind='kvm'")
+            }
+
+            aeocha.it("exclusive on a container is refused (VFIO is a VM mechanism)") callback {
+                reset_nodes()
+                system("bad2") { container("c") { gpu("exclusive") } }
+                aeocha.expect_str(gpu_alloc_error()).to_contain("gpu(\"exclusive\") on kind='container'")
+            }
+
+            aeocha.it("any gpu() on firecracker is refused (no device model)") callback {
+                reset_nodes()
+                system("bad3") { firecracker("mvm") { gpu("shared") } }
+                aeocha.expect_str(gpu_alloc_error()).to_contain("has no device model")
+            }
+
+            aeocha.it("exclusive VM conflicts with a shared container on the SAME (unpinned) device") callback {
+                reset_nodes()
+                system("bad4") {
+                    kvm_vm("trainer")   { memory("2G") gpu("exclusive") }
+                    container("transc") { gpu("shared") }
+                }
+                aeocha.expect_str(gpu_alloc_error()).to_contain("exclusive passthrough removes the device")
+            }
+
+            aeocha.it("no conflict when the exclusive VM pins a SEPARATE device") callback {
+                reset_nodes()
+                system("ok3") {
+                    kvm_vm("trainer")   { memory("2G") gpu("exclusive") gpu_device("pci:0000:01:00.0") }
+                    container("transc") { gpu("shared") gpu_device("/dev/dri/renderD128") }
+                }
+                aeocha.expect_str(gpu_alloc_error()).to_equal_str("")
+            }
+        }
+
+        // ---- the tree shows the claim ------------------------------------
+        aeocha.describe("describe_tree surfaces the contract") {
+            aeocha.it("shows gpu=shared / gpu=exclusive@pin") callback {
+                reset_nodes()
+                system("tree") {
+                    container("t") { gpu("shared") }
+                    kvm_vm("v")    { memory("2G") gpu("exclusive") gpu_device("pci:0000:01:00.0") }
+                }
+                tr = describe_tree()
+                aeocha.expect_str(tr).to_contain("gpu=shared")
+                aeocha.expect_str(tr).to_contain("gpu=exclusive@pci:0000:01:00.0")
+            }
+        }
+    }
+    aeocha.run_summary(fw)
+}

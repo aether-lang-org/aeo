@@ -38,10 +38,11 @@ exports (
     check, smoke, suite, get_phase_spec_count, get_phase_spec_at,
     image, command, dockerfile, health, dataset, ip, depends, env, get_env, attest, get_attest,
     cpus, memory, nic, expose, wsl_distro,
+    gpu, gpu_device, get_gpu_mode, get_gpu_device, gpu_flags, gpu_alloc_error,
     guest_image, network, ssh_key,
     health_interval, health_budget, within, every, without, get_within_ms, get_without_ms,
     health_retry, up_within, down_within,
-    count, name_at, get_system, get_host,
+    count, name_at, get_system, get_host, reset_nodes,
     syscount, sysname_at,
     entrypoint, base,
     get_kind, get_image, get_dockerfile, get_entrypoint, get_base, get_command, get_health, get_dataset, get_ip,
@@ -498,6 +499,152 @@ nic(_ctx: ptr, v: string)     { config.put("aeo.cmp.nic.${_ctx}", v) }
 // ("" = WSL's default distro). The driver_windows seam: the Linux under Windows.
 wsl_distro(_ctx: ptr, v: string) { config.put("aeo.cmp.wsldistro.${_ctx}", v) }
 
+// gpu(mode) — a device claim with CHECKED allocation semantics (§G). `mode` names
+// the CONTRACT, not the mechanism:
+//   "shared"    — coexists with other shared consumers on one device (the
+//                 container/lxc DRI device-map path: many transcoders, one iGPU).
+//   "exclusive" — the device LEAVES the host for this node (VM VFIO passthrough:
+//                 detaches from host + every other consumer). Conflicts with ANY
+//                 other claim on the same device — enforced at `aeo check`.
+// The mechanism (--device /dev/dri vs VFIO vs devfs) varies per substrate and
+// belongs to the drivers; gpu() only records the contract. See gpu_flags().
+gpu(_ctx: ptr, mode: string) { config.put("aeo.cmp.gpu.${_ctx}", mode) }
+
+// gpu_device(pin) — optionally pin WHICH device the claim binds. For containers a
+// DRI render-node path ("/dev/dri/renderD128"); for VMs a PCI address
+// ("pci:0000:01:00.0"). Default "" = any/the-only device. The pin is what lets the
+// exclusive-conflict check distinguish "two claims, one device" from "two devices".
+gpu_device(_ctx: ptr, pin: string) { config.put("aeo.cmp.gpudev.${_ctx}", pin) }
+
+// get_gpu_mode(nm) — the declared contract ("shared"/"exclusive"), "" if none.
+get_gpu_mode(nm: string) -> string { return config.get("aeo.cmp.gpu.${nm}") }
+
+// get_gpu_device(nm) — the declared device pin, "" if any/unpinned.
+get_gpu_device(nm: string) -> string { return config.get("aeo.cmp.gpudev.${nm}") }
+
+// gpu_flags(nm, kind, engine) — render this node's gpu() claim to substrate-correct
+// run-flag TOKENS (space-separated, spliced into the container argv exactly like the
+// confine string). "" if no gpu() declared.
+//
+// GROUND TRUTH (Intel iGPU, podman 6, CachyOS, 2026-07-04): `--gpus all` FAILS on
+// Intel — it needs a CDI spec that only the nvidia/AMD vendor toolchains generate
+// ("no known GPU vendor found in CDI specs"). The vendor-agnostic path that DOES
+// work is a direct DRI render-node device-map. So for the SHARED container/lxc tier
+// we render `--device <renderD>` (default /dev/dri/renderD128), NOT `--gpus`. A pin
+// naming a specific render node overrides the default. VM/exclusive rendering (VFIO)
+// is refused at check on substrates without a device model, so it never reaches here.
+gpu_flags(nm: string, kind: string, engine: string) -> string {
+    mode = get_gpu_mode(nm)
+    if string_length(mode) == 0 { return "" }
+    // Container/LXC SHARED tier — DRI device-map (vendor-agnostic, proven on Intel).
+    if kind == "container" {
+        dev = get_gpu_device(nm)
+        if string_length(dev) == 0 { dev = "/dev/dri/renderD128" }
+        return "--device ${dev}"
+    }
+    if kind == "lxc" {
+        dev = get_gpu_device(nm)
+        if string_length(dev) == 0 { dev = "/dev/dri/renderD128" }
+        return "--device ${dev}"
+    }
+    // Other kinds either render via their own driver (VM VFIO, later) or are
+    // refused at check. Emit nothing here; gpu_alloc_error() is the gate.
+    return ""
+}
+
+// gpu_alloc_error() — the CHECK-TIME allocation gate (§G's "earn its place" part).
+// Returns "" if every gpu() claim is satisfiable, else a human error string naming
+// the offending node(s). Three rules, in the order a human would hit them:
+//   1. KIND GATING — a claim on a kind with no device model is a declaration error.
+//      firecracker has no device model at all → any gpu() refused. VM kinds
+//      (kvm/bhyve) can only take "exclusive" (VFIO); "shared" on a VM is refused
+//      until vGPU/SR-IOV exists (the honest frontier — don't pretend).
+//   2. EXCLUSIVE CONFLICT — exclusive passthrough removes the device from the host,
+//      so it cannot coexist with ANY other claim on the SAME device. Two claims
+//      collide when they name the same device pin, OR either is unpinned (an
+//      unpinned claim means "the only/any device", which overlaps everything).
+//   3. (host preflight — /dev/dri exists — lives in the runner; it needs the host,
+//      not the data model.)
+gpu_alloc_error() -> string {
+    n = count()
+    // Pass 1: per-node kind gating.
+    i = 0
+    while i < n {
+        nm = name_at(i)
+        mode = get_gpu_mode(nm)
+        if string_length(mode) > 0 {
+            k = get_kind(nm)
+            if k == "firecracker" {
+                return "aeo check: [${nm}] gpu(\"${mode}\") on kind='firecracker' — a microVM has no device model; move the GPU workload to a container/lxc (shared) or kvm/bhyve (exclusive) tier"
+            }
+            if _is_vm_kind(k) == 1 {
+                if mode == "shared" {
+                    return "aeo check: [${nm}] gpu(\"shared\") on kind='${k}' — a VM takes a GPU EXCLUSIVELY (VFIO detaches it from the host); shared coexistence needs the container/lxc tier, or declare gpu(\"exclusive\") here"
+                }
+            } else {
+                if mode == "exclusive" {
+                    return "aeo check: [${nm}] gpu(\"exclusive\") on kind='${k}' — exclusive VFIO passthrough is a VM mechanism; a container/lxc shares the device (declare gpu(\"shared\")) or move this node to a kvm/bhyve tier"
+                }
+            }
+        }
+        i = i + 1
+    }
+    // Pass 2: exclusive-conflict across every claim pair on the same device
+    // WITHIN one system (a GPU device is host/system-scoped; two systems are two
+    // deployments and never share a device claim).
+    i = 0
+    while i < n {
+        nm = name_at(i)
+        mi = get_gpu_mode(nm)
+        if string_length(mi) > 0 {
+            j = i + 1
+            while j < n {
+                om = name_at(j)
+                mj = get_gpu_mode(om)
+                if string_length(mj) > 0 {
+                    if get_system(nm) == get_system(om) {
+                        if _gpu_same_device(nm, om) == 1 {
+                            if mi == "exclusive" {
+                                return _gpu_conflict_msg(nm, om)
+                            }
+                            if mj == "exclusive" {
+                                return _gpu_conflict_msg(om, nm)
+                            }
+                        }
+                    }
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    return ""
+}
+
+// two claims touch the SAME device: same explicit pin, OR either is unpinned
+// (unpinned = "the only/any device", which overlaps every other claim).
+_gpu_same_device(a: string, b: string) -> int {
+    da = get_gpu_device(a)
+    db = get_gpu_device(b)
+    if string_length(da) == 0 { return 1 }
+    if string_length(db) == 0 { return 1 }
+    if da == db { return 1 }
+    return 0
+}
+
+_gpu_conflict_msg(excl: string, other: string) -> string {
+    return "aeo check: [${excl}] gpu(\"exclusive\") conflicts with [${other}]'s claim on the same device — exclusive passthrough removes the device from the host, so no other node can use it; pin a second device with gpu_device(...) or move [${other}] to a separate GPU"
+}
+
+// _is_vm_kind — the kinds whose GPU claim is VFIO-exclusive (device leaves host).
+_is_vm_kind(k: string) -> int {
+    if k == "kvm" { return 1 }
+    if k == "kvm_vm" { return 1 }
+    if k == "bhyve" { return 1 }
+    if k == "bhyve_vm" { return 1 }
+    return 0
+}
+
 // VM guest provisioning (bhyve via vm-bhyve) — config IS code, down into
 // the VM. Declared on the bhyve_vm block; the driver realizes them as a
 // `vm create -i <image> -C -k <key> -n <netconfig>` if the VM doesn't yet
@@ -676,6 +823,28 @@ get_within_ms(nm: string) -> int {
 
 count() -> int {
     return _count()
+}
+
+// reset_nodes() — zero the node roster (count -> 0) so a fresh set of declarations
+// starts from an empty tree. Iteration is by slot (name_at(0..count)), so stale
+// per-node config beyond the new count is simply never read. For TEST isolation:
+// specs that declare several independent compositions in one process call this
+// between them so cross-composition state (e.g. the gpu allocation gate, which
+// scans every node) doesn't bleed. Not used on the real single-declaration path.
+reset_nodes() {
+    // Clear each current node's kind key FIRST: resource() keys its "append a new
+    // slot" decision on kind=="", so a stale kind would make a re-declared name
+    // silently skip the roster (present in config, absent from name_at) — breaking
+    // describe_tree and every slot-iterating reader. Walk-and-clear, then zero.
+    n = _count()
+    i = 0
+    while i < n {
+        nm = config.get("aeo.cmp.name.${i}")
+        config.put("aeo.cmp.kind.${nm}", "")
+        i = i + 1
+    }
+    config.put("aeo.cmp.count", "0")
+    config.put("aeo.cmp.syscount", "0")
 }
 
 _count() -> int {
@@ -1091,6 +1260,17 @@ _details(nm: string) -> string {
     ex = get_expose(nm)
     if ex > 0 {
         det = _join(det, "expose=${string_from_int(ex)}")
+    }
+    // gpu() claim — mode plus an optional device pin (§G). The contract, not the
+    // mechanism: "gpu=shared" / "gpu=exclusive@pci:0000:01:00.0".
+    gm = get_gpu_mode(nm)
+    if string_length(gm) > 0 {
+        gd = get_gpu_device(nm)
+        if string_length(gd) > 0 {
+            det = _join(det, "gpu=${gm}@${gd}")
+        } else {
+            det = _join(det, "gpu=${gm}")
+        }
     }
     // Capsicum (proposal): a VM with its own constrain(vm){} block is confined
     // (phase 2). The constraints live directly on the VM — no separate block.
