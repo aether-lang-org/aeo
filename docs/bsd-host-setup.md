@@ -1,14 +1,32 @@
 # GhostBSD/FreeBSD host setup for aeo (bhyve substrate)
 
-Everything needed to turn a fresh GhostBSD/FreeBSD 15 box into an aeo bhyve
+Everything needed to turn a fresh GhostBSD/FreeBSD box into an aeo bhyve
 host. This is the authoritative env-setup record — keep it current as the
 setup evolves.
 
-Box: `paul@192.168.0.57` — GhostBSD on **FreeBSD 15.0-RELEASE-p2**,
-**AMD Ryzen 7 5800U** (Zen 3), ZFS root (`zroot`), wired NIC `re0`
-(192.168.0.57), `wlan0` no-carrier.
+> ### Re-imaging to a new box / GhostBSD version? Re-check these (NIC + version drift)
+> This doc was written for the .57 box (FreeBSD 15, NIC `re0`). Two other boxes have
+> since been used, and the specifics DRIFT per install — before following the steps
+> below, confirm the current values and substitute them:
+> - **Uplink NIC name** — `re0` on .57, but `em0` on the .204 NUC (2026-07-05). Find
+>   it with `netstat -rn -f inet | awk '/^default/{print $NF}'` (or `route -n get default`);
+>   every pf ssh-rail rule and `nat on <NIC>` must use the REAL name.
+> - **FreeBSD version** — `freebsd-version`; the AMD Ryzen guest-boot fix (§5) and pf
+>   path (`/sbin/pfctl`) were version-specific once; re-verify on a new base.
+> - **ipfw** — GhostBSD enables it by default; it must be off the guest bridge path
+>   (see the ⚠️ box in the pf-anchor section). This is the fix that took the pf
+>   containment axis from red to green — do not skip it on a fresh install.
+> - **rctl** — `kern.racct.enable=1` needs `/boot/loader.conf` + a reboot (§ rctl).
+> - **ssh access on a fresh GhostBSD** — desktop installs often offer only
+>   `keyboard-interactive` (not `password`) auth and may firewall inbound; enable sshd
+>   + install your pubkey early (see memory `ghostbsd-freebsd14-box`).
 
-Versions in use: bhyve from base (15.0), `vm-bhyve 1.7.3`,
+Reference box (this doc's original): `paul@192.168.0.57` — GhostBSD on
+**FreeBSD 15.0-RELEASE-p2**, **AMD Ryzen 7 5800U** (Zen 3), ZFS root (`zroot`),
+wired NIC `re0` (192.168.0.57), `wlan0` no-carrier. A second box
+(`paul@192.168.0.204`, FreeBSD 14.3, NIC `em0`) was where pf was redeemed.
+
+Versions in use (on .57): bhyve from base (15.0), `vm-bhyve 1.7.3`,
 `edk2-bhyve-g202508` (UEFI firmware), `dnsmasq 2.92`, `qemu 11.0.0`
 (qemu-img), `fuse-ext2 0.0.11`.
 
@@ -84,11 +102,38 @@ expects pf + dnsmasq done manually, which setup-nat.sh does.
 
 ### Per-VM pf anchor (the netpolicy enforcement seam — REQUIRED for confinement)
 
+> ### ⚠️ FIRST, disable ipfw on the guest bridge path (the load-bearing fix, 2026-07-05)
+>
+> **GhostBSD ships `ipfw` ENABLED by default** (`net.inet.ip.fw.enable=1`) with a
+> stock ruleset. It hooks the same pfil framework pf uses. The moment
+> `net.link.bridge.pfil_member=1` routes bridged guest-to-guest L3 packets through
+> pfil, **ipfw — which knows nothing about the guest subnet — silently drops them**,
+> even though pf *passes* them. This masqueraded for a long time as an "if_bridge+pf
+> bug" (see `if_bridge-pf-delivery-bug.md`); it is not. **pf's per-member inter-VM
+> confinement works fine once ipfw is off the bridge path** — proven on FreeBSD 14.3
+> with the full acceptance suite (whitelisted flow completes, non-whitelisted blocked).
+>
+> Do ONE of these before expecting inter-VM confinement to bite:
+> ```sh
+> # simplest: turn ipfw off entirely if aeo owns this host's networking
+> sudo sysctl net.inet.ip.fw.enable=0
+> sudo sysrc firewall_enable=NO        # persist across reboot
+> # OR, if you must keep ipfw: add a pass for the guest subnet BEFORE its denies
+> #   sudo ipfw add 100 allow ip from 172.16.0.0/24 to 172.16.0.0/24
+> ```
+> Diagnostic when a whitelisted flow still won't complete: `sysctl net.inet.ip.fw.enable`
+> and `kldstat | grep -i fw`. A packet "passed by pf but lost" = a SECOND pfil
+> consumer (ipfw/ipf) is eating it — check that before ever blaming if_bridge again.
+
 `aeo up` LOADS each VM's deny-default netpolicy (from `constrain{ egress /
 ingress_from / deny_egress }`) into a per-VM pf anchor `aeo/<vm>` (lib/pf —
 `pfctl -a aeo/<vm> -f /etc/pf.anchors/aeo-<vm>`). The write→load→read-back chain
-is VERIFIED against real pfctl on this box (2026-06-25). But two pf.conf changes
-are REQUIRED for the loaded rules to actually govern traffic:
+is VERIFIED against real pfctl. The deny-default + whitelist acceptance suite PASSES
+on FreeBSD 14.3 (once ipfw is off the bridge, per the box above). Three things are
+REQUIRED for the loaded rules to actually govern traffic:
+
+0. **ipfw off the guest bridge path** — the box above. Without it everything else is
+   necessary-but-not-sufficient; ipfw silently eats the bridged packet.
 
 1. **Reference the anchor** — add `anchor "aeo/*"` to `/etc/pf.conf`.
 2. **Don't let a blanket pass override it.** The default `setup-nat.sh` pf.conf
