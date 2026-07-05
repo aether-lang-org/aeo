@@ -42,6 +42,8 @@ exports (
     guest_image, network, ssh_key,
     health_interval, health_budget, within, every, without, get_within_ms, get_without_ms,
     health_retry, up_within, down_within,
+    policy, reprobe_every, on_drift, restart_after_failures, reattest_every,
+    get_policy_reprobe_ms, get_policy_on_drift, get_policy_max_failures, get_policy_reattest_ms,
     count, name_at, get_system, get_host, reset_nodes,
     syscount, sysname_at,
     entrypoint, base,
@@ -797,6 +799,79 @@ down_within(_ctx: ptr, d: Duration) {
     config.put("aeo.cmp.without.${_ctx}", ms)
     config.put("aeo.cmp.curwithout", ms)
 }
+
+// --- policy{} — per-node RECONCILE policy, as data (Formae-envy item 5) ----------
+//
+// The DSL companion to `aeo watch` (item 1): a node declares HOW it wants to be kept
+// coherent, and the reconcile loop reads it. Same closure-with-setters shape as
+// health_retry{} — `policy(node){ ... }` returns the node ctx; the setters below
+// store against it. Purely additive: a composition with no policy{} behaves exactly
+// as today (the runner falls back to the flag/env defaults).
+//
+//     app = container("app") { image("...") }
+//     policy(app) {
+//         reprobe_every(15s)              // this node's own watch cadence
+//         on_drift("converge")            // act on drift (default: "alert" only)
+//         restart_after_failures(3)       // give up-and-recreate threshold (advisory)
+//         reattest_every(24h)             // re-verify the image digest periodically
+//     }
+policy(_ctx: ptr) -> ptr { return _ctx }
+
+// reprobe_every(d) — this node's watch/reconcile cadence (ms). Overrides the global
+// AEO_WATCH_INTERVAL for this node. Unset -> the loop's default.
+reprobe_every(_ctx: ptr, d: Duration) {
+    config.put("aeo.cmp.pol.reprobe.${_ctx}", string_from_int(_dur_ms(d)))
+}
+
+// on_drift(action) — "alert" (audit + report, the DEFAULT — a containment tool must
+// not silently mutate) or "converge" (act: restart/recreate to the declared envelope
+// even without the global --converge flag).
+on_drift(_ctx: ptr, action: string) {
+    config.put("aeo.cmp.pol.ondrift.${_ctx}", action)
+}
+
+// restart_after_failures(n) — how many consecutive failed probes before the loop
+// escalates from restart to recreate (advisory; stored for the loop to consult).
+restart_after_failures(_ctx: ptr, n: int) {
+    config.put("aeo.cmp.pol.maxfail.${_ctx}", string_from_int(n))
+}
+
+// reattest_every(d) — re-verify the node's image digest this often (ms). 0/unset ->
+// attest only at bring-up (today's behavior).
+reattest_every(_ctx: ptr, d: Duration) {
+    config.put("aeo.cmp.pol.reattest.${_ctx}", string_from_int(_dur_ms(d)))
+}
+
+// get_policy_reprobe_ms(nm) — the node's declared reprobe cadence in ms, 0 if unset
+// (the runner then uses the global/default interval).
+get_policy_reprobe_ms(nm: string) -> int {
+    v = config.get("aeo.cmp.pol.reprobe.${nm}")
+    if string_length(v) == 0 { return 0 }
+    return _to_int(v)
+}
+
+// get_policy_on_drift(nm) — "alert" | "converge"; defaults to "alert" (never mutate
+// unless the composition or the operator explicitly opts in).
+get_policy_on_drift(nm: string) -> string {
+    v = config.get("aeo.cmp.pol.ondrift.${nm}")
+    if string_length(v) == 0 { return "alert" }
+    return v
+}
+
+// get_policy_max_failures(nm) — the restart->recreate threshold, 0 if unset.
+get_policy_max_failures(nm: string) -> int {
+    v = config.get("aeo.cmp.pol.maxfail.${nm}")
+    if string_length(v) == 0 { return 0 }
+    return _to_int(v)
+}
+
+// get_policy_reattest_ms(nm) — the re-attest cadence in ms, 0 if unset.
+get_policy_reattest_ms(nm: string) -> int {
+    v = config.get("aeo.cmp.pol.reattest.${nm}")
+    if string_length(v) == 0 { return 0 }
+    return _to_int(v)
+}
+
 // Duration (ns) -> milliseconds.
 _dur_ms(d: Duration) -> int { return d / 1000000 }
 // the node's WITHOUT (teardown-gone) window in ms: own setter, else the floated
@@ -848,6 +923,13 @@ reset_nodes() {
     while i < n {
         nm = config.get("aeo.cmp.name.${i}")
         config.put("aeo.cmp.kind.${nm}", "")
+        // also clear per-node POLICY keys — a re-declared name would otherwise
+        // inherit a prior node's on_drift/reprobe (on_drift's default is a non-empty
+        // "alert", so a stale "converge" silently persists). Test isolation for item 5.
+        config.put("aeo.cmp.pol.ondrift.${nm}", "")
+        config.put("aeo.cmp.pol.reprobe.${nm}", "")
+        config.put("aeo.cmp.pol.maxfail.${nm}", "")
+        config.put("aeo.cmp.pol.reattest.${nm}", "")
         i = i + 1
     }
     config.put("aeo.cmp.count", "0")
@@ -1289,6 +1371,17 @@ _details(nm: string) -> string {
     np = get_netpolicy(nm)
     if string_length(np) > 0 {
         det = _join(det, "net{${np}; deny rest}")
+    }
+    // reconcile policy{} — surface a NON-DEFAULT on_drift or a reprobe cadence, so
+    // the tree shows how a node is kept coherent. (Default alert / unset stays quiet.)
+    od = get_policy_on_drift(nm)
+    rp = get_policy_reprobe_ms(nm)
+    if od != "alert" {
+        det = _join(det, "policy{on_drift=${od}}")
+    } else {
+        if rp > 0 {
+            det = _join(det, "policy{reprobe=${string_from_int(rp)}ms}")
+        }
     }
     return det
 }

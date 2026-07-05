@@ -1512,6 +1512,15 @@ _reconcile_node(nm: string, converge: int) -> int {
         println("aeo: [${nm}] reconcile not yet supported for kind='${k}' (container only in v1)")
         return 0
     }
+    // POLICY (item 5): a node's own policy{ on_drift("converge") } opts IT into
+    // convergence even without the global --converge flag. The global flag is an
+    // operator override that forces convergence tree-wide; the per-node policy is the
+    // composition's own declared intent. Either one arms this node. Default (no
+    // policy, no flag) stays alert-only.
+    if converge == 0 {
+        pod = compose.get_policy_on_drift(nm)
+        if pod == "converge" { converge = 1 }
+    }
     eng = compose.get_engine(nm)
     // 1. LIVENESS: is the node even up?
     alive = driver_linux.probe(nm, compose.get_health(nm), eng)
@@ -1619,13 +1628,32 @@ run_watch() {
     }
 }
 
-// AEO_WATCH_INTERVAL seconds -> ms; default 30s, floor 1s.
+// The watch-loop cadence in ms. Precedence: explicit AEO_WATCH_INTERVAL (operator
+// override) > the SMALLEST reprobe_every declared by any node's policy{} (so a node
+// asking to be checked every 5s isn't starved by a 30s default) > 30s default. Every
+// node is reconciled each pass; per-node reprobe_every sets the FLOOR on how often
+// the loop runs, honoring the most-eager node. (True per-node independent scheduling
+// is a follow-up; this keeps the composition's declared intent without under-serving.)
 _watch_interval_ms() -> int {
     v = _envc("AEO_WATCH_INTERVAL")
-    if string_length(v) == 0 { return 30000 }
-    s = _atoi_simple(v)
-    if s < 1 { return 30000 }
-    return s * 1000
+    if string_length(v) > 0 {
+        s = _atoi_simple(v)
+        if s >= 1 { return s * 1000 }
+    }
+    // smallest declared per-node reprobe_every (ms), 0 if none declared.
+    n = compose.count()
+    i = 0
+    best = 0
+    while i < n {
+        r = compose.get_policy_reprobe_ms(compose.name_at(i))
+        if r > 0 {
+            if best == 0 { best = r }
+            if r < best { best = r }
+        }
+        i = i + 1
+    }
+    if best > 0 { return best }
+    return 30000
 }
 
 // run_apply_node — `aeo apply-node <compose.ae> <node>`: patch ONE node on a

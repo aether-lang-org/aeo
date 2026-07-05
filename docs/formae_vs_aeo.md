@@ -204,6 +204,14 @@ provider plugin can prove it honors the plugin contract.
 
 ### 5. Continuous policy attachment (DSL companion to item 1)
 
+**STATUS: BUILT 2026-07-05.** `policy(node){ reprobe_every(d) on_drift("alert"|
+"converge") restart_after_failures(n) reattest_every(d) }` — compose grammar,
+closure-with-setters like `health_retry{}`. `aeo watch`/`reconcile` read it: a node's
+`on_drift("converge")` arms just that node (the global `--converge` is the operator
+override); the watch cadence floors at the smallest declared `reprobe_every`. Default
+`on_drift` = "alert" (never silently mutate). Purely additive — no `policy{}` = today's
+behavior. test/spec_policy.ae (6). See `docs/reconcile.md`. The rest is the clean-room design.
+
 **What Formae does:** reconcile policies are attached to stacks *as data*, and
 the runtime enforces them on a schedule; policies are updatable independently
 of the resources they govern.

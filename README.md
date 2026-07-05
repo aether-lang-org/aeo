@@ -160,6 +160,9 @@ grouped by what they declare:
   Intel N100. (See [`examples/cdi/`](./examples/cdi/) for a ready CDI spec.)
 - **VM sizing:** `cpus`, `memory`, `nic`; **image recipes:** `from`, `install`,
   `systemd_unit`, `realize_as`, …
+- **reconcile policy:** `policy(node){ reprobe_every(15s) on_drift("converge")
+  reattest_every(24h) }` — per-node data that `aeo watch`/`reconcile` reads;
+  `on_drift` defaults to `"alert"` (never silently mutate).
 
 `depends` accepts either a handle (`depends(db)`) or a name string
 (`depends("db")`) — handles are typo-checked, the string form is there for
@@ -274,7 +277,7 @@ lib/driver_windows/  lib/driver_wslc/   Windows OCI engines (podman-in-WSL2 / MS
 examples/             the substrate grid — twelve `db ◄ app` compositions (see examples/README.md)
 examples/checks/      the per-example check()/smoke()/suite() aeocha specs
 lib/reconcile/        desired-vs-actual property diff (drift detection under `aeo watch`/`reconcile`)
-test/                 ~31 specs (fluent-aeocha style): driver/confinement/attest/audit/lifecycle/gpu/pasta/reconcile + real-jail
+test/                 ~32 specs (fluent-aeocha style): driver/confinement/attest/audit/lifecycle/gpu/pasta/reconcile/policy + real-jail
 ```
 
 ## What aeo is NOT

@@ -85,6 +85,35 @@ each container node against live state (below the plan preview) — so you see w
 edited composition WOULD change before applying. On a host where nothing is running,
 dry-run reads exactly as before (plan only).
 
+## `policy{}` — per-node reconcile policy as data
+
+A node can declare HOW it wants to be kept coherent, and the reconcile loop reads it
+(Formae-envy item 5; the DSL companion to `watch`). Same closure-with-setters shape
+as `health_retry{}`:
+
+```
+app = container("app") { image("...") }
+policy(app) {
+    reprobe_every(15s)          // this node's own watch cadence
+    on_drift("converge")        // act on drift (default: "alert" only)
+    restart_after_failures(3)   // restart->recreate escalation threshold (advisory)
+    reattest_every(24h)         // re-verify the image digest periodically
+}
+```
+
+- **`on_drift`** defaults to **`"alert"`** — a node converges from its own policy only
+  when it declares `on_drift("converge")`. This is the composition expressing intent;
+  the global `--converge` flag is the operator's tree-wide override. Either arms a
+  node; the safe default (no policy, no flag) stays detect-only.
+- **`reprobe_every`** sets the watch cadence. `aeo watch` runs at `AEO_WATCH_INTERVAL`
+  if set, else the SMALLEST declared `reprobe_every` across nodes (so an eager node
+  isn't starved by the 30s default), else 30s. Every node is reconciled each pass;
+  true per-node independent scheduling is a follow-up.
+- Purely **additive**: a composition with no `policy{}` behaves exactly as before.
+  `up`/`down` are unaffected — only `watch`/`reconcile` read the policy.
+- `describe_tree` surfaces a non-default policy (`policy{on_drift=converge}` /
+  `policy{reprobe=5000ms}`); a default node adds no noise.
+
 ## Scope (v1) and follow-ups
 
 - **container kind only** — the one kind with an inspect surface today. Other kinds
