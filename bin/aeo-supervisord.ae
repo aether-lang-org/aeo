@@ -40,6 +40,7 @@ import driver_lxc
 import driver_bwrap
 import driver_nspawn
 import driver_firecracker
+import driver_vm
 
 extern exit(code: int)
 extern sleep(ms: int)
@@ -231,6 +232,8 @@ _driver_down(nm: string, k: string) -> string {
     if k == "bwrap" { return driver_bwrap.down(nm) }
     if k == "nspawn" { return driver_nspawn.down(nm) }
     if k == "firecracker" { return driver_firecracker.down(nm) }
+    if k == "kvm" { return driver_vm.down("kvm", nm) }
+    if k == "bhyve" { return driver_vm.down("bhyve", nm) }
     if k == "container" { return driver_linux.down(nm, "") }
     return driver_linux.down(nm, "")
 }
@@ -241,6 +244,8 @@ _driver_probe(nm: string, k: string) -> int {
     if k == "bwrap" { return driver_bwrap.probe(nm, "", "") }
     if k == "nspawn" { return driver_nspawn.probe(nm, "", "") }
     if k == "firecracker" { return driver_firecracker.probe(nm, "", "") }
+    if k == "kvm" { return driver_vm.probe("kvm", nm, "") }
+    if k == "bhyve" { return driver_vm.probe("bhyve", nm, "") }
     if k == "container" { return driver_linux.probe(nm, "", "") }
     return driver_linux.probe(nm, "", "")
 }

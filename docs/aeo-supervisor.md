@@ -1,7 +1,7 @@
 # aeo-supervisor — the resident holder of this-boot's trees
 
-Status: **BUILT + live-proven 2026-07-05** (6 of 7 substrate drivers: container, jail,
-nspawn, bwrap, firecracker, lxc — only kvm/qemu untested-live for want of the binary).
+Status: **BUILT + live-proven 2026-07-05** (ALL 7 substrate drivers: container, jail,
+nspawn, bwrap, firecracker, lxc, kvm).
 `lib/supervisor` (registry) + `bin/aeo-supervisord` (daemon, with a resident liveness
 watch) + front-door adopt/release + the init-aware installer
 (`bin/aeo-supervisor-install.sh`). Proven on CachyOS as a real systemd service:
@@ -15,14 +15,15 @@ CachyOS via `driver_nspawn` — adopt → `/status` alive → release), and the
 whole fallback discussion was about: adopt → alive → release, process gone), and the
 **microVM tier** (firecracker on CachyOS via `driver_firecracker` — a real booted
 Firecracker v1.16.1 microVM: adopt → `/status` alive → release → the fc process gone),
-plus **lxc** (CachyOS via `driver_lxc` — a privileged alpine:3.21 container on lxcbr0:
-aeo up creates+starts + adopts, `/status` alive via `lxc-info`, down releases +
-destroys). So the registry-holder is not container-only; it holds and releases 6 of the
-7 substrate drivers live, the same way — every substrate the box can run. Remaining
-follow-ups (§8): kvm/qemu routing (no qemu binary on either box — one `pacman -S
-qemu-base` away; correct by construction, same routing exercised for the other 6), the
-OpenRC/Alpine installer arm live-proof, and supervisor-as-launcher (the deeper pidfile
-removal — see §6, deliberately deferred).
+plus **lxc** (CachyOS via `driver_lxc`) and **kvm** (CachyOS via `driver_vm` — a real
+qemu 11.0.2 microVM booting a cirros disk: aeo up boots+adopts, `/status` alive via the
+pidfile, down releases → qemu gone). So the registry-holder holds and releases ALL 7
+substrate drivers live, the same way. (Proving kvm surfaced a REAL daemon bug: the
+`_driver_down`/`_driver_probe` router had no `kvm`/`bhyve` case, so those kinds fell
+through to the container/podman default — a kvm node would be mis-probed dead + torn
+down with `podman rm`. Fixed by adding driver_vm routing.) Remaining follow-ups (§8):
+the OpenRC/Alpine installer arm live-proof, and supervisor-as-launcher (the deeper
+pidfile removal — see §6, deliberately deferred).
 NOTE the firecracker/nspawn `systemd-run --user` launch needs
 `XDG_RUNTIME_DIR=/run/user/<uid>` in the environment — a bare (non-login) ssh session
 lacks it and the `--user` unit silently fails to start.
