@@ -1489,11 +1489,13 @@ _count_lines(p: string) -> string {
 // (not per-node) — but bound to a composition so the change is recorded in that
 // composition's audit trail. Linux-only (rootless podman); a no-op elsewhere.
 //
-// HONEST CONTRACT: `on` switches the active forwarder to pasta (verified: podman
-// then forwards via pasta, not rootlessport). FULL source-IP preservation for the
-// rootless bridge net aeo uses is still landing upstream (podman #28478); aeo writes
-// the correct mechanism now, so nodes inherit true source IPs the moment upstream
-// ships. `on` never claims preservation it can't prove — it reports what took effect.
+// HONEST CONTRACT: `on` switches the active forwarder to pasta. On the BRIDGE net
+// aeo uses, the pesto source-preserving path fully engages (verified: the shared
+// pasta control socket is present — podman 6.0.0 ships this, it is NOT upstream-
+// pending). The one unproven arm on our test box: a genuine EXTERNAL LAN client's
+// source surviving — host-originated traffic to a published port is mapped to pasta's
+// guest-addr by design, and we had no third LAN host to test the external/TAP path.
+// So `on` never claims a preservation we observed; it reports what took effect.
 run_pasta() {
     mode = _envc("AEO_NODE")
     if mode == "" { mode = "status" }
@@ -1504,7 +1506,7 @@ run_pasta() {
     if mode == "status" {
         if driver_linux.pasta_forwarder_active("") == 1 {
             println("aeo: pasta forwarder ACTIVE (${driver_linux.pasta_dropin_path()}) — rootless published ports forward via pasta")
-            println("     note: full source-IP preservation for the bridge net is upstream-WIP (podman #28478); the mechanism is in place")
+            println("     on a bridge net the pesto source-preserving path engages (pasta.sock present); external-client preservation is pasta's behavior on the TAP path")
         } else {
             println("aeo: pasta forwarder OFF — rootless published ports use rootlessport (masks the client source IP as the gateway)")
         }
@@ -1518,7 +1520,7 @@ run_pasta() {
         }
         _ = audit.record("_host", "pasta", "forwarder", "on (${driver_linux.pasta_dropin_path()})")
         println("aeo: pasta forwarder ON — wrote ${driver_linux.pasta_dropin_path()}")
-        println("     rootless published ports now forward via pasta (source-IP-preserving path lands with upstream podman #28478)")
+        println("     rootless published ports on a bridge net now forward via pasta+pesto (kernel-level, source-IP-preserving for external clients)")
         return
     }
     if mode == "off" {

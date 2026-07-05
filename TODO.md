@@ -576,22 +576,26 @@ wired yet; mapped here as candidate kinds. Ordered by how cleanly they'd land:
       a cloud-resource graph. Keep the seam sharp, same as aeo-is-NOT-aeb.)
 
 - [~] **pasta port-forwarder for rootless containers — preserve true source IP**
-      MECHANISM BUILT + lifecycle live-proven 2026-07-05; full source-IP
-      preservation is UPSTREAM-BLOCKED (podman #28478), so aeo writes the
-      forward-compatible mechanism now and reports honestly. Built: driver_linux
-      pasta_dropin_path/content (pure, unit-tested — spec_pasta.ae, 3) +
+      MECHANISM BUILT + lifecycle live-proven + ROOT-CAUSED 2026-07-05. Built:
+      driver_linux pasta_dropin_path/content (pure, unit-tested — spec_pasta.ae, 3) +
       pasta_forwarder_ensure/active/clear (sudo -n NOPASSWD writes, matching the
       pf/nspawn/lxc contract); `aeo pasta <compose> on|off|status` subcommand
       (front-door + runner run_pasta, audit-recorded). LIVE-PROVEN: full
-      status(off)->on->status(active)->off->status(off) cycle on the N100 box, drop-in
-      written/removed correctly, forwarder switches to pasta. HONEST GAP: `-p` source
-      still showed 169.254.x under pasta — preservation for the rootless BRIDGE net is
-      upstream-WIP (podman #28478; docs call it experimental). passt on the box
-      (2026_06_11) meets the version floor; the moment upstream's pesto/bridge path
-      ships, aeo nodes inherit true source IPs with NO aeo change. Findings:
-      docs/linux-host-setup.md (the NOPASSWD grant + the honest status). Remaining:
-      the source-preserving behavior itself (upstream), and wiring the teardown
-      stale-rule guard (#29032) into the restart path.
+      status(off)->on->status(active)->off->status(off) cycle on the N100 box.
+      CORRECTION (an earlier note wrongly said "upstream-blocked / waiting for
+      #28478"): podman 6.0.0 SHIPS pesto and it RUNS. Root-caused why the source
+      looked masked: (1) my first test used a bare `-p` container (no --network) =>
+      pasta-as-network-stack, always 169.254.x; (2) on a BRIDGE net (what aeo's up
+      path uses) the pesto path fully engages — VERIFIED the shared `pasta -c
+      .../pasta.sock` control socket is present (the #28478 mechanism). The ONLY
+      unproven arm: a genuine EXTERNAL LAN client's source surviving — pasta's
+      `--map-guest-addr 169.254.1.2` maps HOST-originated traffic to a published port
+      by design (loopback/splice), so host-local curls always show 169.254.x; only a
+      real remote host over the LAN interface takes the TAP path. We had no third LAN
+      host, so external-client preservation is pasta's documented behavior but
+      UNVERIFIED here (test-harness limit, NOT an aeo gap or upstream wait). Findings:
+      docs/linux-host-setup.md. Remaining: prove the external arm with a real 2nd host;
+      wire the teardown stale-rule guard (#29032) into the restart path.
       (podman 6, `rootless_port_forwarder = "pasta"`). Directly serves aeo's
       rootless-containment thesis: without it, a rootless container behind a
       reverse-proxy node sees the PROXY's internal IP, not the real client — which

@@ -74,14 +74,30 @@ rootless_port_forwarder = "pasta"
 
 which switches the forwarder to **pasta** (kernel-level forwarding via *pesto*).
 
-**Honest status (2026-07-05, podman 6.0.0 + pasta 2026_06_11):** the drop-in DOES
-switch the active forwarder to pasta (confirmed: `podman info` + the pasta process).
-But full source-IP preservation for the rootless **bridge** network aeo uses is still
-landing upstream ([podman #28478](https://github.com/podman-container-tools/podman/pull/28478),
-documented experimental). So aeo writes the **correct, forward-compatible mechanism
-today** — the moment upstream's pesto/bridge path ships, aeo nodes get true client
-IPs with no aeo change. `aeo pasta … status` always reports what is actually in
-effect; aeo never claims a preservation it can't prove.
+**Status — root-caused live 2026-07-05 (podman 6.0.0 + pasta/pesto 2026_06_11):**
+the drop-in switches the forwarder to pasta, and on a **bridge** network (which is
+exactly what aeo's `up` path uses — `aeo-<system>`) the **pesto** source-preserving
+path fully engages. Verified: podman starts a shared `pasta … -c …/pasta.sock`
+instance and the `pasta.sock` control socket is present — the
+[podman #28478](https://github.com/podman-container-tools/podman/pull/28478)
+mechanism. This is **shipped in podman 6.0.0, not upstream-pending** (an earlier note
+here was wrong).
+
+The one thing **not** provable on the reference box: whether a genuine **external
+LAN client's** source IP survives. pasta starts with `--map-guest-addr 169.254.1.2`,
+so **host-originated** traffic to a published port (the host curling its own `-p`)
+is mapped to that guest-addr by pasta's loopback/splice path *by design* — you will
+see `169.254.x` from a host-local client even when pesto is active. Only a **real
+remote host** arriving over the LAN interface takes the TAP path where the true
+source is preserved, and we had no third LAN host to exercise it. So: the mechanism
+aeo writes is correct and fully wired; external-client source preservation is pasta's
+documented behavior on this path but is **unverified here** (a test-harness limit —
+not an aeo gap, not an upstream wait). `aeo pasta … status` reports what is actually
+in effect; aeo never claims a preservation it observed.
+
+> **Testing tip:** don't test source-IP fidelity by curling the host's own published
+> port — that's the loopback path and always shows the guest-addr. Use a separate
+> physical host on the LAN.
 
 ```sh
 aeo pasta compose.ae status   # OFF (rootlessport) | ACTIVE (pasta)

@@ -249,14 +249,22 @@ network_ensure_internal(net: string, engine_pref: string) -> string {
 // client. The fix is a containers.conf drop-in switching the forwarder to `pasta`
 // (kernel-level forwarding via "pesto"), which preserves the client source IP.
 //
-// HONEST STATUS (verified on the box 2026-07-05, podman 6.0.0 + pasta 2026_06_11):
-// the drop-in DOES switch the active forwarder to pasta (podman info + the pasta
-// process confirm it). But full source-IP preservation for the rootless BRIDGE
-// network aeo uses is still landing upstream (podman #28478 "under development";
-// the setting is documented experimental). So this writes the CORRECT, forward-
-// compatible mechanism — when the upstream pesto/bridge path ships, aeo nodes get
-// true source IPs with no aeo change. We do NOT claim preservation we can't yet
-// prove; pasta_forwarder_active() reports what's actually in effect.
+// STATUS — root-caused live 2026-07-05 (podman 6.0.0 + pasta/pesto 2026_06_11):
+// the drop-in switches the forwarder to pasta AND, for a container on a BRIDGE net
+// (which is exactly what aeo's up path uses — aeo-<system>), the pesto path fully
+// engages: podman starts a shared `pasta … -c …/pasta.sock` instance and pesto
+// registers the ports (the #28478 mechanism — VERIFIED: the pasta.sock control
+// socket is present). This is NOT upstream-pending; podman 6.0.0 ships pesto and it
+// runs. The ONE thing not provable on this box: whether a genuine EXTERNAL LAN
+// client's source survives — because pasta starts with `--map-guest-addr 169.254.1.2`,
+// so HOST-originated traffic to a published port (host hitting its own -p) is mapped
+// to that guest-addr by pasta's loopback/splice path BY DESIGN; only a real remote
+// host over the LAN interface takes the TAP path where the true source is preserved.
+// We had no third host on the box's LAN to prove that arm. So: the mechanism aeo
+// writes is correct and fully wired; source-IP preservation for external clients is
+// pasta's documented behavior on this path but UNVERIFIED here (test-harness limit,
+// not an aeo gap or an upstream wait). pasta_forwarder_active() reports what's in
+// effect; nothing here claims a preservation we observed.
 
 // pasta_dropin_path() — the canonical drop-in aeo writes. A dedicated aeo-owned
 // file (not the base containers.conf) so it's idempotent + cleanly removable.
