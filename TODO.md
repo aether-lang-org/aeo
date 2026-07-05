@@ -594,8 +594,38 @@ wired yet; mapped here as candidate kinds. Ordered by how cleanly they'd land:
       real remote host over the LAN interface takes the TAP path. We had no third LAN
       host, so external-client preservation is pasta's documented behavior but
       UNVERIFIED here (test-harness limit, NOT an aeo gap or upstream wait). Findings:
-      docs/linux-host-setup.md. Remaining: prove the external arm with a real 2nd host;
-      wire the teardown stale-rule guard (#29032) into the restart path.
+      docs/linux-host-setup.md.
+        - **[ ] PROVE THE EXTERNAL ARM — the one thing left unverified.** Everything
+          up to the TAP path is confirmed; the last mile is: does a genuine remote
+          client's real source IP reach the container? It CANNOT be tested from the
+          host itself — host-originated traffic to a published port takes pasta's
+          loopback/splice path and is mapped to `--map-guest-addr 169.254.1.2` by
+          design, so a host-local curl ALWAYS shows 169.254.x even when pesto is fully
+          active (this is the trap that produced the false "upstream-blocked"
+          conclusion — see memory pasta-source-ip-test-trap). Only a SECOND PHYSICAL
+          HOST on the box's LAN, hitting the box's LAN IP, traverses the TAP path
+          where the source survives.
+          Recipe when a 2nd host is available (both on 192.168.0.0/24):
+            1. On the pasta host (the box): `aeo pasta compose.ae on`, then bring up a
+               container on a BRIDGE net publishing a port, running the source-echo
+               server (test/srv-srcip.py logs `PEER=<client_address[0]>`; the same server
+               used in the root-cause probes).
+            2. Confirm pesto engaged: `pasta.sock` present under
+               `/run/user/<uid>/containers/networks/rootless-netns/`.
+            3. From the SECOND host: `curl http://<box-LAN-IP>:<port>/`.
+            4. PASS = the server logs `PEER=<second-host's LAN IP>` (e.g.
+               192.168.0.x). FAIL/regression = `PEER=169.254.x` (still mapped).
+            5. Control: repeat with `aeo pasta compose.ae off` (rootlessport) — expect
+               the masked address, proving the drop-in is what flips the behavior.
+          Candidate 2nd hosts on this LAN: the bazzite box (192.168.0.x) or the
+          GhostBSD box (192.168.0.57) as a plain curl client. Once green, promote the
+          pasta item from [~] to [x] and record the external-arm proof in
+          docs/linux-host-setup.md (replacing the "unverified here" caveat).
+        - **[ ] Teardown stale-rule guard (podman #29032).** pesto/pasta forward rules
+          aren't always torn down cleanly on container shutdown -> port conflicts on
+          restart. Wire an explicit clear into aeo's restart/teardown path
+          (lib/snapshot_linux / the restart op) so a pasta-host node reliably comes
+          back up. Test in the container-restart path.
       (podman 6, `rootless_port_forwarder = "pasta"`). Directly serves aeo's
       rootless-containment thesis: without it, a rootless container behind a
       reverse-proxy node sees the PROXY's internal IP, not the real client — which
