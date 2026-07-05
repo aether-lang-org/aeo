@@ -58,9 +58,11 @@ aeo_orchestration() {
     }
 }
 AE
-    CONFINE_CHECK() { rctl -h 2>/dev/null | grep "jail:$NODE" | head -1; }
+    # the rctl cap aeo applied on `up`: `rctl jail:<node>` lists it
+    # (jail:jnode:memoryuse:deny=268435456). Needs the same sudo grant aeo uses.
+    CONFINE_CHECK() { sudo -n rctl "jail:$NODE" 2>/dev/null | head -1; }
     CONFINE_WANT="memoryuse"
-    LIVE_CHECK() { jls -j "$NODE" name 2>/dev/null; }
+    LIVE_CHECK() { sudo -n jls -j "$NODE" name 2>/dev/null; }
     ;;
   *) say "unknown substrate '$SUB'"; exit 2 ;;
 esac

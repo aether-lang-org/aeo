@@ -201,10 +201,11 @@ drift.
 every driver's name() non-empty + distinct; the shape compiles or the build fails; the
 stub is fail-loud) and `test/conformance-behavioral.sh` (the create→probe→confinement→
 stop→verify-gone lifecycle, driven through the real `aeo` front-door, per substrate).
-Container arm PASSES live on podman 6; jail arm ready + host-gated (needs a prepared
-FreeBSD box + a real jail rootfs). Already caught a real bug — driver_stub.probe had a
-malformed tuple return instead of the uniform `-> int`; fixed. See
-`docs/driver-conformance.md`. Turns the substrate grid from showcase to contract.
+BOTH arms PASS live: container on podman 6 (CachyOS), jail on GhostBSD/FreeBSD 14.3
+(aeo up -> zfs+jail, rctl memoryuse cap present, down -> verify-gone, all via the real
+front-door). Already caught a real bug — driver_stub.probe had a malformed tuple return
+instead of the uniform `-> int`; fixed. See `docs/driver-conformance.md`. Turns the
+substrate grid from showcase to contract.
 
 **What Formae does:** ships `pkg/plugin-conformance-tests` so any third-party
 provider plugin can prove it honors the plugin contract.

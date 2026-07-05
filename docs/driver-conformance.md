@@ -50,10 +50,15 @@ Five stages, each PASS/FAIL:
 
 - **container arm: PASSES live** on podman 6 (CachyOS): created+running,
   confinement flag present (128M cap), verify-gone — all through `aeo up`/`down`.
-- **jail arm: ready, host-gated.** The harness supports `jail`, but it needs a real
-  jail rootfs on the dataset (a base-populated tree, not an empty zfs dataset) and a
-  prepared FreeBSD host — so it runs on a set-up GhostBSD box, not in CI. Point
-  `AEO_CONF_JAIL_DATASET` at a base-installed dataset.
+- **jail arm: PASSES live** on GhostBSD/FreeBSD 14.3 (2026-07-05): `aeo up` creates
+  the zfs dataset + jail, probe reports it running, the rctl `memoryuse` cap aeo
+  applied is present (`rctl jail:jnode` → `memoryuse:deny=268435456`), `aeo down`
+  removes it and verify-gone confirms absence — all through the real front-door.
+  Prereqs on the host: a jail rootfs on the dataset (base.txz-populated, not an empty
+  zfs dataset — point `AEO_CONF_JAIL_DATASET` at it), and NOPASSWD sudo for
+  `jail`/`jls`/`jexec`/`zfs`/`rctl` (see `bsd-host-setup.md`). Not CI (needs a
+  prepared FreeBSD box + the ae toolchain built there — see memory
+  `ae-toolchain-build-freebsd`).
 - **other substrates** (lxc, bwrap, nspawn, firecracker, bhyve) — the harness pattern
   extends the same way as the drivers gain a testable seam; do a new substrate's
   conformance run as its definition-of-done (the doc's rule: run this before adding a

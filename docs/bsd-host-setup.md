@@ -32,6 +32,39 @@ Versions in use (on .57): bhyve from base (15.0), `vm-bhyve 1.7.3`,
 
 ---
 
+## 0. Building the ae toolchain + aeo on GhostBSD (4 footguns)
+
+GhostBSD is a desktop distro and ships **without the base development files**, so a
+fresh box can't compile anything until you fix that. In order (verified on FreeBSD
+14.3, memory `ae-toolchain-build-freebsd`):
+
+```sh
+# git needs a matching pcre2 (version skew on a fresh box):
+sudo pkg install -y git pcre2 gmake
+git clone https://github.com/aether-lang-org/aether.git   # https, not git@ (no key)
+git clone https://github.com/aether-lang-org/aeo.git
+
+# THE BIG ONE: base dev files are missing (/usr/include empty, no crt1.o/libgcc_s).
+# Fetch the matching base.txz and extract the dev bits:
+fetch https://download.freebsd.org/releases/amd64/$(freebsd-version | sed 's/-p[0-9]*//')/base.txz
+sudo tar -xf base.txz -C / ./usr/include './usr/lib/*' './lib/*'   # a few .so unlink-fails are harmless
+
+# build: GNU make + clang-as-cc (no gcc on FreeBSD)
+cd aether && gmake CC=cc
+# stage the install layout + AETHER_HOME (like the Linux box)
+mkdir -p ~/.local/bin ~/.local/share/aether ~/.local/lib/aether
+cp build/ae build/aetherc ~/.local/bin/; cp -r std runtime ~/.local/share/aether/
+cp build/libaether.a ~/.local/lib/aether/
+export PATH=$HOME/.local/bin:$PATH AETHER_HOME=$HOME/.local AE_CC=cc CC=cc  # AE_CC=cc: ae links via gcc by default
+
+cd ../aeo && ae build bin/aeo.ae -o ~/.local/bin/aeo --lib lib   # AE_CC=cc must be set
+```
+
+`AE_CC=cc` is load-bearing for every `ae build` / `aeo` invocation (ae shells out to
+`gcc` for the final link otherwise, which fails silently as "Build failed").
+
+---
+
 ## 1. Packages
 
 ```sh
