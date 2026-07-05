@@ -1,7 +1,7 @@
 # aeo-supervisor — the resident holder of this-boot's trees
 
-Status: **BUILT + live-proven 2026-07-05** (5 of 6 substrate drivers: container, jail,
-nspawn, bwrap, firecracker).
+Status: **BUILT + live-proven 2026-07-05** (6 of 7 substrate drivers: container, jail,
+nspawn, bwrap, firecracker, lxc — only kvm/qemu untested-live for want of the binary).
 `lib/supervisor` (registry) + `bin/aeo-supervisord` (daemon, with a resident liveness
 watch) + front-door adopt/release + the init-aware installer
 (`bin/aeo-supervisor-install.sh`). Proven on CachyOS as a real systemd service:
@@ -14,12 +14,15 @@ CachyOS via `driver_nspawn` — adopt → `/status` alive → release), and the
 **pidfile bare-process tier** (bwrap on CachyOS via `driver_bwrap` — the tier the
 whole fallback discussion was about: adopt → alive → release, process gone), and the
 **microVM tier** (firecracker on CachyOS via `driver_firecracker` — a real booted
-Firecracker v1.16.1 microVM: adopt → `/status` alive → release → the fc process gone).
-So the registry-holder is not container-only; it holds and releases 5 of the 6
-substrate drivers live, the same way. Remaining follow-ups (§8): lxc + kvm/qemu routing
-(neither box has those binaries installed — correct by construction, same routing
-exercised for the other 5), the OpenRC/Alpine installer arm live-proof, and
-supervisor-as-launcher (the deeper pidfile removal — see §6, deliberately deferred).
+Firecracker v1.16.1 microVM: adopt → `/status` alive → release → the fc process gone),
+plus **lxc** (CachyOS via `driver_lxc` — a privileged alpine:3.21 container on lxcbr0:
+aeo up creates+starts + adopts, `/status` alive via `lxc-info`, down releases +
+destroys). So the registry-holder is not container-only; it holds and releases 6 of the
+7 substrate drivers live, the same way — every substrate the box can run. Remaining
+follow-ups (§8): kvm/qemu routing (no qemu binary on either box — one `pacman -S
+qemu-base` away; correct by construction, same routing exercised for the other 6), the
+OpenRC/Alpine installer arm live-proof, and supervisor-as-launcher (the deeper pidfile
+removal — see §6, deliberately deferred).
 NOTE the firecracker/nspawn `systemd-run --user` launch needs
 `XDG_RUNTIME_DIR=/run/user/<uid>` in the environment — a bare (non-login) ssh session
 lacks it and the `--user` unit silently fails to start.
