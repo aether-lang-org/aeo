@@ -1,13 +1,15 @@
 # aeo-supervisor — the resident holder of this-boot's trees
 
-Status: **BUILT + live-proven 2026-07-05** (container substrate). `lib/supervisor`
-(registry) + `bin/aeo-supervisord` (daemon) + front-door adopt/release + the
-init-aware installer (`bin/aeo-supervisor-install.sh`). Proven on CachyOS as a real
-systemd service: installer → `active`; `aeo up` → adopted; `aeo down` → released via
-the supervisor; and the ORPHAN-GAP CLOSURE (down with an empty `.ae` still tears down
-what the supervisor holds). Still container-only for the drivers wired into the daemon
-(jail/lxc/bwrap/nspawn/firecracker routing is present but the BSD/Alpine live-proof +
-moving `watch` into the daemon + deleting the pidfile path are follow-ups, §8).
+Status: **BUILT + live-proven 2026-07-05** (container + jail substrates).
+`lib/supervisor` (registry) + `bin/aeo-supervisord` (daemon, with a resident liveness
+watch) + front-door adopt/release + the init-aware installer
+(`bin/aeo-supervisor-install.sh`). Proven on CachyOS as a real systemd service:
+installer → `active`; `aeo up` → adopted; `aeo down` → released via the supervisor; the
+ORPHAN-GAP CLOSURE (down with an empty `.ae` still tears down what the supervisor
+holds); the resident watch logs a held node that died. Proven substrate-general on
+FreeBSD: the daemon adopts + releases a **jail** (routing to `driver_bsd`), not just
+containers. Remaining follow-ups (§8): the OpenRC/Alpine installer arm live-proof, and
+supervisor-as-launcher (the deeper pidfile removal — see §6, deliberately deferred).
 Captures the decision to give aeo a host-resident supervisor so `aeo down`/`status`/
 `watch` latch onto a live registry instead of re-deriving handles from a re-handed
 composition (and so the pidfile fallback path can be deleted). Supersedes the "no
@@ -164,8 +166,19 @@ that note recommended.
   persistent state authority.
 - A host must run the supervisor to use the default path; `--no-supervisor` is the
   escape hatch (and the only path on a host where you don't want a resident aeo).
-- The pidfile fallback (`driver_bwrap`, `driver_firecracker`, VM raw-launch) becomes
-  dead code on the supervised path — a real simplification, the original motivation.
+- The pidfile fallback — HONEST SCOPE CORRECTION (2026-07-05, after building it): the
+  supervisor removes the ORCHESTRATION-level fallback that motivated it — `aeo down`
+  no longer re-derives node handles from a re-handed composition; it asks the
+  supervisor, which holds the tree by its own record (proven: down with an empty `.ae`
+  still tears the tree down). But the DRIVER-internal pidfile (in
+  `driver_firecracker.down` / `driver_bwrap.down`) is NOT dead code — those drivers
+  already prefer the name registry (`systemctl --user stop`) and fall back to a
+  pidfile only on a host WITHOUT systemd-run. That per-substrate choice is a legitimate
+  mechanism, not the fallback-coding complaint. TRULY eliminating the pidfile would
+  require the supervisor to be the LAUNCHER of those bare-process tiers (fork/hold them
+  as its own children) — a distinct, larger future item, not this one. So: the
+  supervisor fixes the fallback the operator objected to (composition re-derivation);
+  supervisor-as-launcher (the deeper pidfile removal) is deliberately deferred.
 
 ## 7. Relation to the aeo-agent
 
@@ -174,8 +187,9 @@ Orthogonal and composable:
   boundary (a container in a VM), because the host orchestrator must not reach
   *through* the boundary. It is the local orchestrator for its subtree, INSIDE the
   guest.
-- **supervisor** = per-HOST holder: holds the whole tree of THIS host's nodes as live
-  children, so the CLI has something to talk to and the pidfile fallback dies.
+- **supervisor** = per-HOST holder: holds the whole tree of THIS host's nodes, so the
+  CLI has something to talk to and `down` stops re-deriving handles from the
+  composition (the orchestration-level fallback the operator objected to).
 
 A nested tree uses both: the host supervisor holds the VM (and adopts it); inside the
 VM, the agent is (in turn) that guest's local holder for its own children. Same

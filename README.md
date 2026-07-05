@@ -24,6 +24,7 @@ aeo apply-node compose.ae node # small blast radius: re-render ONE node, apply o
 aeo extract                   # reality->code: walk live containers, print a composition (attest() pre-filled); > file.ae
 aeo inventory [compose.ae]    # the live walk as a table; with a composition, a "declared? yes/no" column
 aeo pasta    compose.ae on   # rootless source-IP fidelity: switch the port forwarder to pasta (see docs/linux-host-setup.md)
+# aeo up hands the tree to a resident aeo-supervisord BY DEFAULT (down/status ask it); --no-supervisor = today's fire-and-exit
 # also: snapshot | rollback | backup | prune | exec | restart  (per-node lifecycle ops)
 ```
 
@@ -45,16 +46,22 @@ Containment](https://paulhammant.com/2016/12/14/principles-of-containment/) (see
 > Status: **working v0, with a live-proven containment story.** Host probe,
 > drivers for Linux (podman/docker, LXC, KVM) and FreeBSD (jail, bhyve), an
 > actor-based runtime, the compose DSL, host-gating fast-fail, and the `aeo`
-> front-door are implemented and verified end-to-end on real infrastructure. Of
-> the six containment axes, **five are live-proven** — Linux container
-> confinement (a fork-bomb refused by `--pids-limit`, a `deny_egress` node with
-> no network), image attestation (a mismatched digest refused at boot), a
-> tamper-evident audit trail (an edited log caught), the FreeBSD jail boundary,
-> and rctl resource caps. The one red axis is FreeBSD pf inter-VM delivery (a
-> known if_bridge bug; the Linux per-flow netpolicy sidesteps it). See
-> [`aeo-design.md`](./aeo-design.md) for the full design, [`TODO.md`](./TODO.md)
-> for the honest what's-proven-vs-modeled scorecard, and [`LLM.md`](./LLM.md) for
-> the Aether constraints navigated.
+> front-door are implemented and verified end-to-end on real infrastructure. All
+> **six containment axes are now live-proven** — Linux container confinement (a
+> fork-bomb refused by `--pids-limit`, a `deny_egress` node with no network),
+> image attestation (a mismatched digest refused at boot), a tamper-evident audit
+> trail (an edited log caught), the FreeBSD jail boundary, rctl resource caps, and
+> **FreeBSD pf inter-VM delivery** — the last was long the one red axis (blamed on
+> an `if_bridge` bug) but was root-caused to GhostBSD's default-enabled `ipfw`
+> eating bridged packets, not pf; with ipfw off the guest bridge path, pf's
+> deny-default + whitelist bites (whitelisted flow completes, non-whitelisted
+> blocked), and aeo now detects + handles the ipfw conflict on `up`
+> (`docs/if_bridge-pf-delivery-bug.md`). Beyond containment, aeo has grown a life
+> *between* `up` and `down` — reconcile/watch, apply-node, extract/inventory, a
+> `policy{}` block, and a resident **aeo-supervisor** that holds this-boot's trees
+> (`docs/aeo-supervisor.md`). See [`aeo-design.md`](./aeo-design.md) for the full
+> design, [`TODO.md`](./TODO.md) for the honest what's-proven-vs-modeled scorecard,
+> and [`LLM.md`](./LLM.md) for the Aether constraints navigated.
 
 ## The one-line distinction
 
@@ -282,7 +289,8 @@ lib/reconcile/        desired-vs-actual property diff (drift detection under `ae
 lib/extract/          reality->code emitter (`aeo extract`/`inventory` — live containers to a composition)
 lib/supervisor/       the in-memory tree registry the aeo-supervisord daemon holds (this-boot's trees)
 bin/aeo-supervisord   resident holder of this-boot's trees; `aeo up` adopts by default (`--no-supervisor` opts out)
-test/                 ~35 specs (fluent-aeocha style): driver/confinement/attest/audit/lifecycle/gpu/pasta/reconcile/policy/extract/conformance/ipfw + real-jail
+bin/aeo-supervisor-install.sh  install aeo-supervisord as a boot service per init (systemd/OpenRC/rc.d, Restart=no)
+test/                 ~36 specs (fluent-aeocha style): driver/confinement/attest/audit/lifecycle/gpu/pasta/reconcile/policy/extract/conformance/ipfw/supervisor + real-jail
 test/conformance-behavioral.sh  the live driver-conformance lifecycle (create->probe->confine->stop->verify-gone) per substrate
 ```
 

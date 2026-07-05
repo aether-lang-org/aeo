@@ -26,6 +26,13 @@ aeo watch     compose.ae --converge 15   # loop every 15s AND converge
 
 `AEO_CONVERGE=1` and `AEO_WATCH_INTERVAL=<seconds>` are the env equivalents.
 
+> **The resident home.** `aeo watch` is a foreground reconcile loop (full property
+> diff, needs the composition). The **aeo-supervisor** (`docs/aeo-supervisor.md`) also
+> runs a *resident* watch over the trees it holds — but only LIVENESS (it holds
+> name+kind, so it answers "is a held node still alive?" and logs a held-but-dead node
+> each pass, `AEO_SUP_WATCH` seconds). Full property-diff reconcile stays with
+> `aeo watch`/`reconcile`, which have the desired values from the `.ae`.
+
 ## Default is ALERT, not mutate
 
 A containment tool must not silently mutate. So the default is **detect + audit
