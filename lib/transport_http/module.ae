@@ -32,7 +32,7 @@ exports (
     // server (agent) side
     serve_create, set_serve_token, token_ok, queue_push, recv_one, queue_pending,
     // client (parent) side
-    send_command, send_command_status, probe_health,
+    send_command, send_command_status, probe_health, post_path,
     // shared
     default_port
 )
@@ -224,6 +224,27 @@ send_command_status(base: string, token: string, line: string) -> int {
     st = response_status(resp)
     response_free(resp)                  // free WITHOUT reading ->body (UAF-safe)
     return st
+}
+
+// post_path(base, path, body) — generic authed POST to any endpoint, returning
+// "STATUS\tBODY" ("" on transport error). The aeo-supervisor client uses it for
+// /adopt /release /status. A 60s timeout absorbs a slow /release (each container's
+// `podman stop` grace can be ~5s; a big tree's teardown stays under 60s). Body carries
+// the token as its first line (the supervisor's protocol) — a thin transport, not the
+// /dispatch command shape.
+post_path(base: string, path: string, body: string) -> string {
+    req = request("POST", "${base}${path}")
+    set_body(req, body, string_length(body), "text/plain")
+    set_timeout(req, 60s)
+    resp, err = send_request(req)
+    request_free(req)
+    if err != "" {
+        return ""
+    }
+    st = response_status(resp)
+    bd = response_body(resp)
+    response_free(resp)
+    return "${st}\t${bd}"
 }
 
 // Residence (TSR) probe: GET /health, return 1 if it answers 200. Used by the

@@ -38,6 +38,7 @@ import snapshot_linux
 import confine_linux
 import reconcile
 import extract
+import transport_http (post_path, probe_health)
 import attest
 import audit
 import resource (set_state, get_state, STATE_DOWN, STATE_BOOTING, STATE_UP, STATE_FAILED)
@@ -1673,6 +1674,101 @@ _watch_interval_ms() -> int {
     return 30000
 }
 
+// ---- aeo-supervisor client (docs/aeo-supervisor.md) --------------------------
+//
+// `aeo up` hands the tree to a resident supervisor BY DEFAULT so `down`/`status` latch
+// onto a live registry (not a re-handed composition). `--no-supervisor` (front-door ->
+// AEO_NO_SUPERVISOR=1) reverts to the ephemeral fire-and-exit path. Default-up with no
+// supervisor present is an ERROR — never a silent downgrade.
+
+// the supervisor base URL (AEO_SUP_URL, default the local daemon).
+_sup_base() -> string {
+    v = _envc("AEO_SUP_URL")
+    if string_length(v) == 0 { return "http://127.0.0.1:9460" }
+    return v
+}
+
+// the shared token (AEO_SUP_TOKEN) — the front-door and the daemon must agree.
+_sup_token() -> string { return _envc("AEO_SUP_TOKEN") }
+
+// supervised mode is the default; AEO_NO_SUPERVISOR=1 opts out.
+_supervised() -> int {
+    if _envc("AEO_NO_SUPERVISOR") == "1" { return 0 }
+    return 1
+}
+
+// 1 if a supervisor answers /health at the base URL.
+_sup_present() -> int { return probe_health(_sup_base()) }
+
+// _sup_post — POST body to a supervisor path, return the body ("" on error / non-200).
+// The reply is "STATUS\tBODY"; we split + gate on 200.
+_sup_post(path: string, body: string) -> string {
+    r = post_path(_sup_base(), path, body)
+    if string_length(r) == 0 { return "" }
+    tab = string_index_of(r, "\t")
+    if tab < 0 { return "" }
+    st = string_substring(r, 0, tab)
+    bd = string_substring(r, tab + 1, string_length(r))
+    if st != "200" { return "" }
+    return bd
+}
+
+// _sup_adopt — hand the just-brought-up tree to the supervisor. Body:
+// "<token>\n<system>\n<node>:<kind>...". One adopt per system in the composition.
+// Returns "" on success, an error string otherwise.
+_sup_adopt() -> string {
+    tok = _sup_token()
+    // group nodes by system (a composition can declare more than one).
+    scount = compose.syscount()
+    si = 0
+    while si < scount {
+        sys = compose.sysname_at(si)
+        body = "${tok}\n${sys}"
+        n = compose.count()
+        i = 0
+        any = 0
+        while i < n {
+            nm = compose.name_at(i)
+            if compose.get_system(nm) == sys {
+                // top-level nodes only (nested nodes are held by their guest's agent).
+                if compose.get_host(nm) == "" {
+                    body = "${body}\n${nm}:${compose.get_kind(nm)}"
+                    any = 1
+                }
+            }
+            i = i + 1
+        }
+        if any == 1 {
+            r = _sup_post("/adopt", body)
+            if string_length(r) == 0 {
+                return "aeo: supervisor /adopt failed for system '${sys}'"
+            }
+            println("aeo: [${sys}] adopted by supervisor (${_sup_base()})")
+        }
+        si = si + 1
+    }
+    return ""
+}
+
+// _sup_release_all — release every system in the composition from the supervisor
+// (it tears the nodes down + forgets). Returns "" on success.
+_sup_release_all() -> string {
+    tok = _sup_token()
+    scount = compose.syscount()
+    si = 0
+    while si < scount {
+        sys = compose.sysname_at(si)
+        r = _sup_post("/release", "${tok}\n${sys}")
+        if string_length(r) == 0 {
+            println("aeo: [${sys}] supervisor release returned nothing (may not have held it)")
+        } else {
+            println("aeo: ${r}")
+        }
+        si = si + 1
+    }
+    return ""
+}
+
 // run_extract — `aeo extract`: walk the host's LIVE containers and print a valid aeo
 // composition (.ae) to stdout that would reproduce them (Formae-envy item 2, the
 // brownfield-adoption path). Each node gets an attest() pre-filled with the image's
@@ -2572,6 +2668,17 @@ main() {
 
     if cmd == "down" {
         println(profile())
+        // SUPERVISED down: if a supervisor holds this tree, ask IT to release (it
+        // tears the nodes down from its live registry — no dependence on this .ae
+        // matching what's live). Falls through to the local run_down if unsupervised
+        // or no supervisor answers (so --no-supervisor and supervisor-less hosts work).
+        if _supervised() == 1 {
+            if _sup_present() == 1 {
+                _ = _sup_release_all()
+                println("aeo: torn down (via supervisor)")
+                return
+            }
+        }
         run_down()
         println("aeo: torn down")
         return
@@ -2594,6 +2701,24 @@ main() {
         exit(1)
     }
     println("aeo: stack up")
+
+    // SUPERVISOR (docs/aeo-supervisor.md): by default, hand the just-brought-up tree
+    // to the resident supervisor so `aeo down`/`status` latch onto a live registry.
+    // --no-supervisor (AEO_NO_SUPERVISOR=1) skips this (ephemeral fire-and-exit).
+    // smoke/suite run their own specs + may tear down, so they skip adoption.
+    if cmd == "up" {
+        if _supervised() == 1 {
+            if _sup_present() == 0 {
+                println("aeo: no aeo-supervisor at ${_sup_base()} — start one, or pass --no-supervisor for the ephemeral path (tree is UP; not adopted)")
+                exit(1)
+            }
+            aerr = _sup_adopt()
+            if aerr != "" {
+                println(aerr)
+                exit(1)
+            }
+        }
+    }
 
     // smoke — deploy + run smoke() specs against the live tree, LEAVE IT STANDING.
     if cmd == "smoke" {

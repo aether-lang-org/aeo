@@ -238,12 +238,18 @@ main() {
     // process group + forward signals + reap the group: a Ctrl-C during
     // bring-up forwards to the whole tree.
     _ = _setenv("AEO_CMD", cmd)
-    // The optional 3rd arg: snapshot/rollback TAG, or `--json` for status output.
+    // The optional 3rd arg: snapshot/rollback TAG, `--json` (status), or
+    // `--no-supervisor` (up/down: opt out of the resident supervisor -> ephemeral
+    // fire-and-exit, today's behavior).
     if tag == "--json" {
         _ = _setenv("AEO_STATUS_JSON", "1")   // `aeo status <compose.ae> --json`
     } else {
-        if tag != "" {
-            _ = _setenv("AEO_TAG", tag)
+        if tag == "--no-supervisor" {
+            _ = _setenv("AEO_NO_SUPERVISOR", "1")
+        } else {
+            if tag != "" {
+                _ = _setenv("AEO_TAG", tag)
+            }
         }
     }
     // reconcile/watch: `--converge` (arg3) opts into acting on drift (default is
