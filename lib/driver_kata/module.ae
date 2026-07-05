@@ -1,0 +1,207 @@
+// lib/driver_kata — Kata Containers backend: a container-image workload booted
+// INSIDE a lightweight microVM (its own guest kernel), for VM-grade isolation with
+// the container API. This is a MICROVM-TIER kind (`kata`), a peer of firecracker/kvm
+// — NOT a podman engine flag. (An earlier `engine("kata")` framing was wrong and
+// reverted; see docs/kata-considered.md. Proven live: a kata microVM reports a guest
+// kernel DIFFERENT from the host.)
+//
+// The SUPPORTED seam is containerd + the shim-v2: `nerdctl --runtime
+// io.containerd.kata.v2 run/stop/rm/ps`. Kata 3.x's own `kata-runtime` is NOT a
+// runc-CLI drop-in, so podman `--runtime kata` fails — nerdctl-over-containerd is the
+// real path. nerdctl drives the SYSTEM containerd socket, so the tools self-sudo
+// (`sudo -n nerdctl …`), the same NOPASSWD contract as driver_lxc/nspawn.
+//
+//   up    — `nerdctl --runtime io.containerd.kata.v2 run -d --name NAME IMAGE [cmd]`
+//   down  — `nerdctl rm -f NAME` (an absent container is success)
+//   probe — 1 if `nerdctl ps` lists NAME as running
+//
+// All argv builders are pure (unit-testable); the exec is isolated in up/down/probe.
+
+import std.os (run_capture, os_which)
+import std.list
+import std.string (string_length, string_contains, string_char_at, string_substring)
+
+exports (
+    name, available, kata_runtime, run_argv, rm_argv, ps_argv,
+    up, down, probe
+)
+
+name() -> string { return "kata" }
+
+// the containerd shim-v2 runtime name (AEO_KATA_RUNTIME overrides — e.g. a qemu vs
+// firecracker kata variant, or an absolute shim path).
+kata_runtime() -> string {
+    return "io.containerd.kata.v2"
+}
+
+// available() — 1 if the Kata seam is present: nerdctl on PATH + the kata shim
+// reachable. (containerd running is a host prereq, checked at up-time via the run.)
+available() -> int {
+    if os_which("nerdctl") == "" { return 0 }
+    if os_which("containerd-shim-kata-v2") == "" {
+        // the shim may live under /opt/kata/bin (not on PATH); the run still finds it
+        // via containerd's config, so don't hard-fail — nerdctl presence is the gate.
+        return 1
+    }
+    return 1
+}
+
+// --- pure argv builders --------------------------------------------------------
+
+// `nerdctl run -d --runtime io.containerd.kata.v2 --name NAME IMAGE [/bin/sh -c CMD]`
+// — `--runtime` is a `run` SUBCOMMAND flag, so it comes AFTER `run` (nerdctl rejects
+// it as a global flag before the subcommand: "unknown flag: --runtime").
+run_argv(res_name: string, image: string, cmd: string) -> ptr {
+    av = list_new()
+    list_add(av, "run")
+    list_add(av, "-d")
+    list_add(av, "--runtime")
+    list_add(av, kata_runtime())
+    list_add(av, "--name")
+    list_add(av, res_name)
+    list_add(av, image)
+    if string_length(cmd) > 0 {
+        list_add(av, "/bin/sh")
+        list_add(av, "-c")
+        list_add(av, cmd)
+    }
+    return av
+}
+
+// `nerdctl rm -f NAME` — stop + remove the microVM (idempotent; absent is success).
+rm_argv(res_name: string) -> ptr {
+    av = list_new()
+    list_add(av, "rm")
+    list_add(av, "-f")
+    list_add(av, res_name)
+    return av
+}
+
+// `nerdctl ps --filter name=^NAME$ --filter status=running --format {{.Names}}` —
+// prints the name iff the microVM is running.
+ps_argv(res_name: string) -> ptr {
+    av = list_new()
+    list_add(av, "ps")
+    list_add(av, "--filter")
+    list_add(av, "name=^${res_name}$")
+    list_add(av, "--filter")
+    list_add(av, "status=running")
+    list_add(av, "--format")
+    list_add(av, "{{.Names}}")
+    return av
+}
+
+// --- lifecycle (self-sudo nerdctl) ---------------------------------------------
+
+up(res_name: string, image: string, cmd: string) -> string {
+    if probe(res_name, "", "") == 1 {
+        return ""
+    }
+    if available() == 0 {
+        return "aeo: kata needs nerdctl + the kata shim (install containerd + nerdctl; register io.containerd.kata.v2; see docs/kata-considered.md)"
+    }
+    if string_length(image) == 0 {
+        return "aeo: kata '${res_name}' has no image() set (want an OCI image, e.g. docker.io/library/alpine:latest)"
+    }
+    av = run_argv(res_name, image, cmd)
+    out, status, err = _sudo("nerdctl", av)
+    list_free(av)
+    if err != "" {
+        return "aeo: kata run spawn failed for '${res_name}': ${err}"
+    }
+    if status != 0 {
+        return "aeo: 'nerdctl --runtime kata run' failed for '${res_name}' (exit ${_i(status)}): ${out}"
+    }
+    // Confirm the microVM actually reached running (nerdctl run -d can return 0 yet
+    // the sandbox fail to boot — a bad shim/kvm, no /dev/kvm, etc.).
+    if probe(res_name, "", "") != 1 {
+        return "aeo: kata '${res_name}' did not become running after launch (containerd up? kata shim on containerd's PATH? /dev/kvm?)"
+    }
+    return ""
+}
+
+down(res_name: string) -> string {
+    av = rm_argv(res_name)
+    out, status, err = _sudo("nerdctl", av)
+    list_free(av)
+    if err != "" {
+        return "aeo: kata teardown spawn failed for '${res_name}': ${err}"
+    }
+    // rm -f on an absent container is non-fatal (idempotent teardown).
+    if status != 0 {
+        if string_contains(out, "no such container") == 1 { return "" }
+        if string_contains(out, "not found") == 1 { return "" }
+        // benign: already gone.
+    }
+    return ""
+}
+
+probe(res_name: string, health: string, _unused: string) -> int {
+    av = ps_argv(res_name)
+    out, status, err = _sudo("nerdctl", av)
+    list_free(av)
+    if err != "" { return 0 }
+    if status != 0 { return 0 }
+    if string_length(_chomp(out)) == 0 { return 0 }
+    return 1
+}
+
+// --- helpers -------------------------------------------------------------------
+
+// `sudo -n <tool> <argv...>` — nerdctl drives the system containerd socket, so it
+// runs as root. Full path via os_which so a path-specific NOPASSWD rule matches. The
+// argv is passed DIRECTLY (not interpolated into an sh -c string). Mirrors
+// driver_lxc._sudo_lxc / driver_nspawn._sudo.
+_sudo(tool: string, argv: ptr) -> {
+    full = list_new()
+    list_add(full, "-n")
+    path = os_which(tool)
+    if path == "" { path = tool }
+    list_add(full, path)
+    i = 0
+    n = list_size(argv)
+    while i < n {
+        list_add(full, list_get_raw(argv, i))
+        i = i + 1
+    }
+    out, status, err = run_capture("sudo", full, null)
+    list_free(full)
+    return out, status, err
+}
+
+_chomp(s: string) -> string {
+    n = string_length(s)
+    while n > 0 {
+        c = string_char_at(s, n - 1)
+        if c != 10 { if c != 13 { if c != 32 { if c != 9 { break } } } }
+        n = n - 1
+    }
+    return string_substring(s, 0, n)
+}
+
+_i(n: int) -> string {
+    if n == 0 { return "0" }
+    neg = 0
+    v = n
+    if v < 0 { neg = 1 v = 0 - v }
+    s = ""
+    while v > 0 {
+        d = v - (v / 10) * 10
+        s = "${_digit(d)}${s}"
+        v = v / 10
+    }
+    if neg == 1 { return "-${s}" }
+    return s
+}
+_digit(d: int) -> string {
+    if d == 0 { return "0" }
+    if d == 1 { return "1" }
+    if d == 2 { return "2" }
+    if d == 3 { return "3" }
+    if d == 4 { return "4" }
+    if d == 5 { return "5" }
+    if d == 6 { return "6" }
+    if d == 7 { return "7" }
+    if d == 8 { return "8" }
+    return "9"
+}

@@ -131,8 +131,8 @@ jobs, env)`): the openers (`container`, `jail`, …) and the block setters
 starting `app`; `aeo down` stops `app` before the `db` it depends on. The
 operator writes the tree once; direction is aeo's job.
 
-Kind verbs: `container` / `lxc` / `kvm_vm` / `bwrap` / `nspawn` / `firecracker`
-(Linux), `jail` / `bhyve_vm` / `freebsd_vm` (FreeBSD). `container` is the one OCI
+Kind verbs: `container` / `lxc` / `kvm_vm` / `bwrap` / `nspawn` / `firecracker` /
+`kata` (Linux), `jail` / `bhyve_vm` / `freebsd_vm` (FreeBSD). `container` is the one OCI
 app-container kind; which **engine** realizes it is the `engine()` property, not a
 separate kind — `engine("podman"|"docker"|"wslc"|"wsl_podman")`, system-scope
 float + per-node override, auto-resolving per host (Linux → podman → docker;
@@ -141,7 +141,10 @@ the *same* declaration, differing by one engine string. `bwrap` is the lightest
 tier — an unprivileged bubblewrap sandbox (no root, no host setup); `nspawn` is a
 systemd-nspawn system container (the systemd-native LXC peer); `firecracker` is a
 minimal-device-model microVM (the "smaller VM" peer of full KVM, live-proven boot
-+ persist + teardown). Block setters (one arg per call — Aether is fixed-arity),
++ persist + teardown); `kata` boots an OCI container image *inside* a lightweight
+microVM (its own guest kernel — VM-grade isolation with the container API, via
+containerd's Kata shim-v2; live-proven, guest kernel ≠ host). Block setters (one arg
+per call — Aether is fixed-arity),
 grouped by what they declare:
 
 - **identity / lifecycle:** `image`, `command`, `entrypoint`, `dockerfile`,
@@ -271,6 +274,7 @@ lib/driver_lxc/       real LXC system-container backend (lxc-create/start/attach
 lib/driver_bwrap/     unprivileged bubblewrap sandbox backend (rootless; pidfile-tracked)
 lib/driver_nspawn/    systemd-nspawn system-container backend (machined-managed; self-sudo)
 lib/driver_firecracker/  Firecracker microVM backend (config-file boot; pidfile-tracked)
+lib/driver_kata/      Kata Containers backend — an OCI image in a microVM (nerdctl + containerd kata shim-v2)
 lib/driver_vm/        KVM/qemu (Linux) + bhyve (FreeBSD) VM backend
 lib/driver_bsd/       FreeBSD jail backend (jail/jexec/jls over a ZFS dataset)
 lib/driver_stub/      fail-loud arm for unsupported host/kind
@@ -290,7 +294,7 @@ lib/extract/          reality->code emitter (`aeo extract`/`inventory` — live 
 lib/supervisor/       the in-memory tree registry the aeo-supervisord daemon holds (this-boot's trees)
 bin/aeo-supervisord   resident holder of this-boot's trees; `aeo up` adopts by default (`--no-supervisor` opts out)
 bin/aeo-supervisor-install.sh  install aeo-supervisord as a boot service per init (systemd/OpenRC/rc.d, Restart=no)
-test/                 ~36 specs (fluent-aeocha style): driver/confinement/attest/audit/lifecycle/gpu/pasta/reconcile/policy/extract/conformance/ipfw/supervisor + real-jail
+test/                 ~37 specs (fluent-aeocha style): driver/confinement/attest/audit/lifecycle/gpu/pasta/reconcile/policy/extract/conformance/ipfw/supervisor/kata + real-jail
 test/conformance-behavioral.sh  the live driver-conformance lifecycle (create->probe->confine->stop->verify-gone) per substrate
 ```
 

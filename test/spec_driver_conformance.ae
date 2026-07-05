@@ -26,6 +26,7 @@ import driver_bsd
 import driver_bwrap
 import driver_nspawn
 import driver_firecracker
+import driver_kata
 import driver_stub
 import std.string (string_length, string_index_of, string_substring)
 
@@ -44,6 +45,7 @@ main() {
                 aeocha.expect_str(driver_bwrap.name()).to_equal_str("bwrap")
                 aeocha.expect_str(driver_nspawn.name()).to_equal_str("nspawn")
                 aeocha.expect_str(driver_firecracker.name()).to_equal_str("firecracker")
+                aeocha.expect_str(driver_kata.name()).to_equal_str("kata")
                 aeocha.expect_str(driver_stub.name()).to_equal_str("stub")
             }
         }

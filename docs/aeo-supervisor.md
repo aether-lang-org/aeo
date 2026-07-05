@@ -1,7 +1,7 @@
 # aeo-supervisor — the resident holder of this-boot's trees
 
-Status: **BUILT + live-proven 2026-07-05** (ALL 7 substrate drivers: container, jail,
-nspawn, bwrap, firecracker, lxc, kvm).
+Status: **BUILT + live-proven 2026-07-05** (ALL 8 substrate drivers: container, jail,
+nspawn, bwrap, firecracker, lxc, kvm, kata).
 `lib/supervisor` (registry) + `bin/aeo-supervisord` (daemon, with a resident liveness
 watch) + front-door adopt/release + the init-aware installer
 (`bin/aeo-supervisor-install.sh`). Proven on CachyOS as a real systemd service:
@@ -17,8 +17,10 @@ whole fallback discussion was about: adopt → alive → release, process gone),
 Firecracker v1.16.1 microVM: adopt → `/status` alive → release → the fc process gone),
 plus **lxc** (CachyOS via `driver_lxc`) and **kvm** (CachyOS via `driver_vm` — a real
 qemu 11.0.2 microVM booting a cirros disk: aeo up boots+adopts, `/status` alive via the
-pidfile, down releases → qemu gone). So the registry-holder holds and releases ALL 7
-substrate drivers live, the same way. (Proving kvm surfaced a REAL daemon bug: the
+pidfile, down releases → qemu gone), plus **kata** (CachyOS via `driver_kata` — an OCI
+image booted in a Kata microVM through containerd's shim-v2, guest kernel 6.18.35 ≠
+host 7.1.2: aeo up adopts, `/status` alive, down releases). So the registry-holder
+holds and releases ALL 8 substrate drivers live, the same way. (Proving kvm surfaced a REAL daemon bug: the
 `_driver_down`/`_driver_probe` router had no `kvm`/`bhyve` case, so those kinds fell
 through to the container/podman default — a kvm node would be mis-probed dead + torn
 down with `podman rm`. Fixed by adding driver_vm routing.) Remaining follow-ups (§8):

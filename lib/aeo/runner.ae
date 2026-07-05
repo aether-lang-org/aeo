@@ -27,6 +27,7 @@ import driver_vm
 import driver_bwrap
 import driver_nspawn
 import driver_firecracker
+import driver_kata
 import driver_windows
 import driver_wslc
 import compose
@@ -631,6 +632,11 @@ driver_up(nm: string, k: string) -> string {
         // image() is a bundle dir (vmlinux + rootfs.ext4); cpus()/memory() size it.
         return driver_firecracker.up(nm, compose.get_image(nm), compose.get_cpus(nm), compose.get_memory(nm))
     }
+    if k == "kata" {
+        // Kata microVM (driver_kata): an OCI image booted inside a lightweight VM via
+        // containerd's kata shim-v2. image() is the OCI image; command() its payload.
+        return driver_kata.up(nm, compose.get_image(nm), compose.get_command(nm))
+    }
     return "aeo: kind '${k}' has no up() driver on this host"
 }
 
@@ -702,6 +708,9 @@ driver_down(nm: string, k: string) -> string {
     if k == "firecracker" {
         return driver_firecracker.down(nm)
     }
+    if k == "kata" {
+        return driver_kata.down(nm)
+    }
     if k == "container" {
         eng = compose.get_engine(nm)
         if eng == "wslc" {
@@ -756,6 +765,9 @@ driver_probe(nm: string, k: string, health: string) -> int {
     }
     if k == "firecracker" {
         return driver_firecracker.probe(nm, health, "")
+    }
+    if k == "kata" {
+        return driver_kata.probe(nm, health, "")
     }
     return driver_linux.probe(nm, health, "")
 }
@@ -2455,6 +2467,9 @@ _kind_runnable(k: string, fam: string) -> int {
         return _eq(fam, "linux")
     }
     if k == "firecracker" {
+        return _eq(fam, "linux")
+    }
+    if k == "kata" {
         return _eq(fam, "linux")
     }
     return 0

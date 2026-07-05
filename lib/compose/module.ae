@@ -33,7 +33,7 @@ exports (
     system,
     bhyve_vm, freebsd_vm, get_flavor, kvm_vm,
     resource,
-    container, lxc, kvm, jail, bhyve, bwrap, nspawn, firecracker,
+    container, lxc, kvm, jail, bhyve, bwrap, nspawn, firecracker, kata,
     engine, get_engine,
     check, smoke, suite, get_phase_spec_count, get_phase_spec_at,
     image, command, dockerfile, health, dataset, ip, depends, env, get_env, attest, get_attest,
@@ -195,6 +195,10 @@ bhyve(nm: string)     -> string { return resource(nm, "bhyve") }
 bwrap(nm: string)     -> string { return resource(nm, "bwrap") }
 nspawn(nm: string)    -> string { return resource(nm, "nspawn") }
 firecracker(nm: string) -> string { return resource(nm, "firecracker") }
+// kata — a container-image workload booted inside a lightweight microVM (its own
+// guest kernel; VM-grade isolation, container API). MicroVM tier, driven via
+// containerd's kata shim-v2 (lib/driver_kata). See docs/kata-considered.md.
+kata(nm: string)      -> string { return resource(nm, "kata") }
 
 // engine(v) — pick the OCI engine that realizes a `container()` node:
 //   "podman" | "docker" | "wslc" | "wsl_podman" | "" (auto)

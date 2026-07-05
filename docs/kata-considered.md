@@ -1,4 +1,14 @@
-# Kata Containers in aeo — a peer VM-runtime, NOT a podman engine
+# Kata Containers in aeo — a microVM-tier KIND (built), not a podman engine
+
+**STATUS: BUILT + live-proven 2026-07-05.** A first-class `kata("name"){}` kind (option
+1 below), driven through containerd's shim-v2 via nerdctl (`lib/driver_kata`), wired
+into compose/runner/supervisor/conformance. LIVE-PROVEN on CachyOS: `aeo up` a `kata()`
+node boots a real microVM whose **guest kernel (6.18.35) DIFFERS from the host
+(7.1.2-cachyos)** — genuine VM isolation, not a shared-kernel container; the supervisor
+adopts + releases it; `/status` reports it alive. specs: spec_driver_kata.ae (5) +
+conformance. The first take (an `engine("kata")` podman flag) was WRONG, proven wrong
+live, and reverted — the history below is kept because the reasoning is what led to the
+right design.
 
 Written 2026-07-05 after a false start. First take framed Kata as an `engine("kata")`
 value on `container()` (a podman `--runtime` flag). That was **wrong**, proven wrong
@@ -56,11 +66,27 @@ container engine. Two honest shapes:
    runtime. aeo's "the boundary is explicit in the config" philosophy prefers the
    visible form.
 
-## Recommendation
+## What was built (option 1)
 
-Do NOT add `engine("kata")`. If a first-class Kata tier is ever wanted, it's option 1
-(a `kata` kind + driver, microVM-tier), and the live-proof needs Kata driven through
-its *supported* seam (containerd shim-v2), not podman `--runtime`. Until then, aeo
-already offers the same isolation via its explicit nesting grammar (option 2). The
-installed Kata 3.32 on the CachyOS box (`/opt/kata`) remains available if that tier is
-built. See `docs/aeo-agent.md` for the nesting/recursion model that option 2 leans on.
+`lib/driver_kata` + the `kata("name"){}` kind. It shells **`nerdctl run -d --runtime
+io.containerd.kata.v2 --name NAME IMAGE`** (self-sudo; the same NOPASSWD contract as
+driver_lxc/nspawn) — the SUPPORTED containerd shim-v2 seam, NOT podman `--runtime`
+(which fails, `Invalid command "create"`). `up`/`down`(`nerdctl rm -f`)/`probe`(`nerdctl
+ps`) mirror the other name-registry drivers; the supervisor routes `kata` in
+`_driver_down`/`_driver_probe` exactly as it routes firecracker/kvm. `available()` gates
+on nerdctl presence; `up` verifies the microVM reached running (a bad shim / no
+/dev/kvm fails loud).
+
+Host prereqs (proven on CachyOS): `containerd` + `nerdctl` installed and containerd
+running; the Kata static release at `/opt/kata` with `containerd-shim-kata-v2` on
+containerd's PATH (symlink to `/usr/local/bin`); `/dev/kvm`. `image()` is an OCI image;
+`command()` the payload. GOTCHA: `--runtime` is a `run` SUBCOMMAND flag — it must come
+AFTER `run` (nerdctl rejects it before the subcommand: "unknown flag: --runtime").
+
+## The still-valid alternative (option 2)
+
+Kata ≈ "a `container` nested in a microVM", which aeo ALSO expresses explicitly:
+`firecracker("vm"){ container("app") }`. The `kata` kind is the pre-packaged, one-verb
+form (VM isolation + container API in a single node); the nesting grammar is the
+assemble-it-yourself, boundary-visible form. Both are legitimate; a composition picks
+whichever reads better. See `docs/aeo-agent.md` for the nesting/recursion model.
