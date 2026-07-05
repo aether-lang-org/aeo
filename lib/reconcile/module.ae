@@ -16,7 +16,7 @@
 // So memory values are normalised to bytes before comparison; an unset cap is 0 on
 // both sides. Get this wrong and operators stop reading the diff.
 
-import std.string (string_length, string_contains, string_index_of, string_substring, string_char_at, string_from_int, string_from_long)
+import std.string (string_length, string_contains, string_index_of, string_substring, string_char_at, string_from_int, string_from_long, string_equals)
 import std.list
 
 exports (
@@ -121,7 +121,7 @@ field_of(line: string, key: string) -> string {
 // needs it today (bytes); other fields compare verbatim. Isolated so adding a
 // canonicaliser (e.g. digest short/long form) is one branch.
 _canon_field(key: string, val: string) -> string {
-    if key == "mem" { return mem_to_bytes(val) }
+    if string_equals(key, "mem") == 1 { return mem_to_bytes(val) }
     return val
 }
 
@@ -147,7 +147,23 @@ state_diff(desired: string, actual: string) -> string {
 _diff_field(acc: string, key: string, desired: string, actual: string) -> string {
     d = _canon_field(key, field_of(desired, key))
     a = _canon_field(key, field_of(actual, key))
-    if d == a { return acc }
+    // UNSET CAP = NOT MANAGED. For the numeric cap fields (mem/pids/nanocpus), a
+    // desired value of 0 means the composition declared NO cap — aeo isn't managing
+    // that dimension, so the substrate's default (podman defaults PidsLimit to 2048,
+    // Memory to 0) is NOT drift. Only diff a cap aeo actually declared. img always
+    // diffs (there is no "unset image"). This is the pids-0-vs-2048 false-positive fix.
+    // NB string_equals, NOT `==`: `==` on a SUBSTRING-derived string (field_of returns
+    // string_substring results) compares by identity, not value — `sub == "0"` is
+    // FALSE even when sub is "0" (Aether footgun; verified). Every comparison here is
+    // on substring-derived values, so all must go through string_equals.
+    if string_equals(key, "img") == 0 {
+        // UNSET CAP = NOT MANAGED: desired 0/"" means the composition declared no cap
+        // (aeo isn't managing that dimension), so the substrate default (podman
+        // PidsLimit=2048) is NOT drift. Only diff a cap aeo actually declared.
+        if string_equals(d, "0") == 1 { return acc }
+        if string_equals(d, "") == 1 { return acc }
+    }
+    if string_equals(d, a) == 1 { return acc }
     item = "${key}: ${a} -> ${d}"
     if string_length(acc) == 0 { return item }
     return "${acc}; ${item}"

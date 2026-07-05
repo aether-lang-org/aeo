@@ -20,6 +20,7 @@ aeo audit    compose.ae      # verify the hash-chained audit trail
 aeo cutover  compose.ae node  # zero-downtime blue-green: green up + confined + health-gated, alias-swap, retire blue
 aeo reconcile compose.ae      # one-shot drift check: live probes vs the composition (exit 1 on drift); --converge to fix
 aeo watch    compose.ae       # reconcile on a loop (default 30s) — aeo's life between up and down; --converge to act
+aeo apply-node compose.ae node # small blast radius: re-render ONE node, apply only its delta, touch nothing else
 aeo pasta    compose.ae on   # rootless source-IP fidelity: switch the port forwarder to pasta (see docs/linux-host-setup.md)
 # also: snapshot | rollback | backup | prune | exec | restart  (per-node lifecycle ops)
 ```

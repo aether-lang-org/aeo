@@ -96,6 +96,12 @@ main() {
             exec_node = aether_args_get(3)          // on | off | status
         }
     }
+    // apply-node: aeo apply-node <compose.ae> <node>  (node=arg3, via the node slot)
+    if cmd == "apply-node" {
+        if argc >= 4 {
+            exec_node = aether_args_get(3)
+        }
+    }
     // backup: aeo backup <compose.ae> <tag> [dir]   (tag=arg3 already; dir=arg4)
     // prune:  aeo prune  <compose.ae> [keep]         (keep=arg3 already as `tag`)
     backup_dir = ""
@@ -112,14 +118,14 @@ main() {
     }
 
     if compose_path == "" {
-        _diag("usage: aeo [up|down|status|check|smoke|suite|dry-run|snapshot|rollback|exec|restart|cutover|backup|prune|audit|pasta|reconcile|watch] <compose.ae> [tag|node cmd...]")
+        _diag("usage: aeo [up|down|status|check|smoke|suite|dry-run|snapshot|rollback|exec|restart|cutover|backup|prune|audit|pasta|reconcile|watch|apply-node] <compose.ae> [tag|node cmd...]")
         exit(2)
     }
     // check/smoke/suite are the declared-verification phases (the composition's
     // check()/smoke()/suite() spec refs): check = specs only, no deploy; smoke =
     // deploy + specs, leave standing; suite = deploy + specs, tear down.
     if _known_cmd(cmd) == 0 {
-        _diag("aeo: unknown subcommand '${cmd}' (want up|down|status|check|smoke|suite|dry-run|snapshot|rollback|exec|restart|cutover|backup|prune|audit|pasta|reconcile|watch)")
+        _diag("aeo: unknown subcommand '${cmd}' (want up|down|status|check|smoke|suite|dry-run|snapshot|rollback|exec|restart|cutover|backup|prune|audit|pasta|reconcile|watch|apply-node)")
         exit(2)
     }
 
@@ -241,6 +247,10 @@ main() {
     if cmd == "pasta" {
         _ = _setenv("AEO_NODE", exec_node)
     }
+    // apply-node: the target node rides the node slot -> AEO_NODE.
+    if cmd == "apply-node" {
+        _ = _setenv("AEO_NODE", exec_node)
+    }
     // backup: AEO_TAG (the tag arg, already set above) + the output dir.
     if cmd == "backup" {
         if backup_dir != "" {
@@ -296,6 +306,7 @@ _known_cmd(c: string) -> int {
     if c == "pasta" { return 1 }
     if c == "reconcile" { return 1 }
     if c == "watch" { return 1 }
+    if c == "apply-node" { return 1 }
     return 0
 }
 

@@ -73,6 +73,14 @@ main() {
                 actual  = "img=alpine|mem=0|pids=512|nanocpus=0|net="
                 aeocha.expect_str(state_diff(desired, actual)).to_contain("pids: 512 -> 16")
             }
+            aeocha.it("an UNSET cap is NOT drift (desired pids=0 vs podman's default 2048)") callback {
+                // the composition declared no limit_maxproc -> desired pids=0 (unmanaged).
+                // podman defaults PidsLimit to 2048; that must NOT read as drift.
+                desired = render_desired("alpine", "128M", "", "", "")
+                actual  = "img=alpine|mem=134217728|pids=2048|nanocpus=0|net="
+                aeocha.expect_str(state_diff(desired, actual)).to_equal_str("")
+                aeocha.expect_int(has_drift(desired, actual)).to_equal(0)
+            }
             aeocha.it("reports MULTIPLE changed fields, semicolon-joined, in order") callback {
                 desired = render_desired("alpine:3.21", "256M", "16", "0", "")
                 actual  = "img=alpine:3.19|mem=134217728|pids=512|nanocpus=0|net="

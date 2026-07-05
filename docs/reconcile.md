@@ -62,6 +62,29 @@ With `--converge`:
   the recreate goes through the same confined bring-up path (and same attest gate) as
   a fresh `up`.
 
+## `aeo apply-node` — small blast radius on a standing tree
+
+`aeo apply-node <compose.ae> <node>` patches ONE node: re-render that node's flags
+from the (edited) composition, diff against the live node, and apply only if it
+drifted — recreating just that node, touching nothing else. The on-call "change one
+property at 3am without owning the whole tree" workflow. It is a single-node,
+always-converge reconcile; a coherent node is a clean no-op, not an error.
+
+```sh
+aeo apply-node compose.ae db   # recreate db to the declared envelope if it drifted; app untouched
+```
+
+Proven live: on a 2-node tree with `db` externally drifted, `apply-node db`
+recreated only `db` (its container id changed, mem restored) while `app`'s container
+was left running untouched (id unchanged).
+
+## `aeo dry-run` grows a live diff
+
+When the tree is already up, `aeo dry-run` now also shows the property-level diff of
+each container node against live state (below the plan preview) — so you see what an
+edited composition WOULD change before applying. On a host where nothing is running,
+dry-run reads exactly as before (plan only).
+
 ## Scope (v1) and follow-ups
 
 - **container kind only** — the one kind with an inspect surface today. Other kinds

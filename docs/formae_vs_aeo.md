@@ -157,6 +157,12 @@ its "coexist with Terraform and ClickOps" pitch credible — Day 0 is optional.
 
 ### 3. Patch semantics — small blast radius on a standing tree
 
+**STATUS: BUILT + live-proven 2026-07-05.** `aeo apply-node <compose> <node>` (a
+single-node, always-converge reconcile reusing `lib/reconcile`) + `aeo dry-run` grown
+to show a live property diff when the tree is up. Proven: applying one drifted node
+recreated only it, left its sibling untouched. See `docs/reconcile.md`. Rate limiting
+skipped (cloud-API concern, per the notes). The rest is the original clean-room design.
+
 **What Formae does:** targeted changes travel as patch documents; a changeset
 executor computes the minimal delta (with rate limiting toward cloud APIs) so
 an on-call engineer can change one property of one resource without touching

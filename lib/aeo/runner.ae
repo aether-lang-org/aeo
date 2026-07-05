@@ -1628,6 +1628,44 @@ _watch_interval_ms() -> int {
     return s * 1000
 }
 
+// run_apply_node — `aeo apply-node <compose.ae> <node>`: patch ONE node on a
+// standing tree (Formae-envy item 3, small blast radius). Re-render THAT node's
+// flags from the (edited) composition, diff against the live node, and apply only
+// if it drifted — recreating just that node, touching nothing else. The on-call
+// "change one property at 3am without owning the whole tree" workflow.
+//
+// It IS a single-node, always-converge reconcile: the diff + recreate machinery is
+// _reconcile_node(node, converge=1). Coherent node -> a clear no-op (not an error).
+// The node comes from AEO_NODE (front-door sets it). A confined node's patch is
+// audit-recorded exactly as reconcile's convergence is.
+run_apply_node() {
+    node = _envc("AEO_NODE")
+    if node == "" {
+        println("aeo: apply-node needs a node (usage: aeo apply-node <compose.ae> <node>)")
+        exit(2)
+    }
+    // verify the node is declared.
+    n = compose.count()
+    found = 0
+    i = 0
+    while i < n {
+        if compose.name_at(i) == node { found = 1 }
+        i = i + 1
+    }
+    if found == 0 {
+        println("aeo: apply-node — no node '${node}' in this composition")
+        exit(2)
+    }
+    println("aeo: apply-node [${node}] — diff vs live, apply only the delta")
+    events = _reconcile_node(node, 1)
+    if events == 0 {
+        println("aeo: apply-node [${node}] — already coherent, nothing to apply")
+        exit(0)
+    }
+    println("aeo: apply-node [${node}] — applied (see the audit trail)")
+    exit(0)
+}
+
 _count_lines(p: string) -> string {
     av = list_new()
     list_add(av, "-c")
@@ -2181,6 +2219,39 @@ _plan() {
     println("aeo: teardown would be the reverse of the above")
 }
 
+// _plan_live_diff — when the tree is ALREADY UP, dry-run also shows the
+// property-level diff of each container node against live state (Formae-envy item 3:
+// "dry-run should grow the same property-level diff against live state"). Reuses the
+// reconcile diff. Silent when a node isn't up (nothing live to compare) or is
+// coherent — so on a fresh host dry-run reads exactly as before (plan only).
+_plan_live_diff() {
+    if host.family() == "bsd" { return }
+    n = compose.count()
+    header = 0
+    i = 0
+    while i < n {
+        nm = compose.name_at(i)
+        if compose.get_kind(nm) == "container" {
+            eng = compose.get_engine(nm)
+            actual = driver_linux.inspect_state(nm, eng)
+            if string_length(actual) > 0 {
+                d = reconcile.state_diff(_desired_line(nm), actual)
+                if string_length(d) > 0 {
+                    if header == 0 {
+                        println("aeo: LIVE DRIFT (this composition differs from the running tree):")
+                        header = 1
+                    }
+                    println("  ${nm}: ${d}")
+                }
+            }
+        }
+        i = i + 1
+    }
+    if header == 1 {
+        println("  (apply per-node with `aeo apply-node <compose> <node>`, or all with `aeo reconcile --converge`)")
+    }
+}
+
 // ---- front-door entry ----
 // Subcommand comes from AEO_CMD (the front-door sets it): "up" (default),
 // "down", "status", or "dry-run". The operator's declaration is run first
@@ -2266,6 +2337,10 @@ main() {
         run_watch()
         return
     }
+    if cmd == "apply-node" {
+        run_apply_node()
+        return
+    }
 
     // Fast-fail host gating before any bring-up or teardown touches a
     // resource. Applies to up, down, and dry-run alike — dry-run is the
@@ -2284,6 +2359,7 @@ main() {
     if cmd == "dry-run" {
         println(profile())
         _plan()
+        _plan_live_diff()
         return
     }
 
