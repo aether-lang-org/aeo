@@ -1,6 +1,7 @@
 # aeo-supervisor — the resident holder of this-boot's trees
 
-Status: **BUILT + live-proven 2026-07-05** (container + jail substrates).
+Status: **BUILT + live-proven 2026-07-05** (5 of 6 substrate drivers: container, jail,
+nspawn, bwrap, firecracker).
 `lib/supervisor` (registry) + `bin/aeo-supervisord` (daemon, with a resident liveness
 watch) + front-door adopt/release + the init-aware installer
 (`bin/aeo-supervisor-install.sh`). Proven on CachyOS as a real systemd service:
@@ -11,12 +12,17 @@ three holding-mechanism classes the daemon routes to: name-registry (container o
 CachyOS, jail on FreeBSD via `driver_bsd`), the **systemd-unit registry** (nspawn on
 CachyOS via `driver_nspawn` — adopt → `/status` alive → release), and the
 **pidfile bare-process tier** (bwrap on CachyOS via `driver_bwrap` — the tier the
-whole fallback discussion was about: adopt → alive → release, process gone). So the
-registry-holder is not container-only; it holds and releases every substrate the same
-way. Remaining follow-ups (§8): the OpenRC/Alpine installer arm live-proof, lxc/kvm/
-firecracker routing (the CachyOS box lacks those binaries — proven by construction,
-not live-run), and supervisor-as-launcher (the deeper pidfile removal — see §6,
-deliberately deferred).
+whole fallback discussion was about: adopt → alive → release, process gone), and the
+**microVM tier** (firecracker on CachyOS via `driver_firecracker` — a real booted
+Firecracker v1.16.1 microVM: adopt → `/status` alive → release → the fc process gone).
+So the registry-holder is not container-only; it holds and releases 5 of the 6
+substrate drivers live, the same way. Remaining follow-ups (§8): lxc + kvm/qemu routing
+(neither box has those binaries installed — correct by construction, same routing
+exercised for the other 5), the OpenRC/Alpine installer arm live-proof, and
+supervisor-as-launcher (the deeper pidfile removal — see §6, deliberately deferred).
+NOTE the firecracker/nspawn `systemd-run --user` launch needs
+`XDG_RUNTIME_DIR=/run/user/<uid>` in the environment — a bare (non-login) ssh session
+lacks it and the `--user` unit silently fails to start.
 Captures the decision to give aeo a host-resident supervisor so `aeo down`/`status`/
 `watch` latch onto a live registry instead of re-deriving handles from a re-handed
 composition (and so the pidfile fallback path can be deleted). Supersedes the "no
