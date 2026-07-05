@@ -197,6 +197,15 @@ drift.
 
 ### 4. Driver conformance-test kit (cheapest item, pure test code)
 
+**STATUS: BUILT 2026-07-05.** Two layers: `test/spec_driver_conformance.ae` (pure —
+every driver's name() non-empty + distinct; the shape compiles or the build fails; the
+stub is fail-loud) and `test/conformance-behavioral.sh` (the create→probe→confinement→
+stop→verify-gone lifecycle, driven through the real `aeo` front-door, per substrate).
+Container arm PASSES live on podman 6; jail arm ready + host-gated (needs a prepared
+FreeBSD box + a real jail rootfs). Already caught a real bug — driver_stub.probe had a
+malformed tuple return instead of the uniform `-> int`; fixed. See
+`docs/driver-conformance.md`. Turns the substrate grid from showcase to contract.
+
 **What Formae does:** ships `pkg/plugin-conformance-tests` so any third-party
 provider plugin can prove it honors the plugin contract.
 

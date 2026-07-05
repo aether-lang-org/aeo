@@ -280,7 +280,8 @@ examples/             the substrate grid — twelve `db ◄ app` compositions (s
 examples/checks/      the per-example check()/smoke()/suite() aeocha specs
 lib/reconcile/        desired-vs-actual property diff (drift detection under `aeo watch`/`reconcile`)
 lib/extract/          reality->code emitter (`aeo extract`/`inventory` — live containers to a composition)
-test/                 ~33 specs (fluent-aeocha style): driver/confinement/attest/audit/lifecycle/gpu/pasta/reconcile/policy/extract + real-jail
+test/                 ~34 specs (fluent-aeocha style): driver/confinement/attest/audit/lifecycle/gpu/pasta/reconcile/policy/extract/conformance + real-jail
+test/conformance-behavioral.sh  the live driver-conformance lifecycle (create->probe->confine->stop->verify-gone) per substrate
 ```
 
 ## What aeo is NOT

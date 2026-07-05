@@ -29,9 +29,12 @@ down(res_kind: string, res_name: string) -> string {
     return _refuse(res_kind, res_name, "tear down")
 }
 
-// probe returns (alive, err). alive is always 0 here; err explains.
-probe(res_kind: string, res_name: string) -> {
-    return (0, _refuse(res_kind, res_name, "probe"))
+// probe -> int (0 = not alive), matching every real driver's probe signature. The
+// stub never has a live resource, so it is ALWAYS 0 — fail-loud by never pretending
+// something it refused to bring up is running. (Was a malformed tuple return that
+// only escaped notice because nothing imported the stub until the conformance kit.)
+probe(res_kind: string, res_name: string) -> int {
+    return 0
 }
 
 _refuse(res_kind: string, res_name: string, verb: string) -> string {
