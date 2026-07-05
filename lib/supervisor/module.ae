@@ -1,0 +1,205 @@
+// lib/supervisor — the in-memory tree registry the aeo-supervisor daemon holds.
+//
+// The daemon (bin/aeo-supervisord) is a resident holder of THIS BOOT's trees: what
+// `aeo up` stood up during this OS uptime, so `aeo down`/`status`/`watch` latch onto
+// a live registry instead of re-deriving handles from a re-handed composition (and so
+// the pidfile fallback can be deleted). See docs/aeo-supervisor.md.
+//
+// This module is the PURE data model: an in-memory registry (std.config KV — Aether
+// has no top-level mutable global, so the config bridge is the store, exactly as
+// transport_http's queue does it). BOOT-SCOPED + NON-RESTORING by construction: the
+// KV lives in the daemon process; when the daemon dies (crash -> reboot, or
+// shutdown), the registry dies with it. NOTHING is written to disk — no state file,
+// ever. The registry can therefore never outlive, or lie about, the reality it holds.
+//
+// Model: a set of SYSTEMS, each holding an ordered list of NODES (name + kind). One
+// system == one `aeo up`. adopt() records; release_system() forgets (the daemon does
+// the actual teardown via the drivers, then calls this); the readers drive /status.
+
+import std.config
+import std.string (string_length, string_index_of, string_substring, string_from_int, string_contains)
+import std.list
+
+exports (
+    adopt, forget_system, held_systems, held_count, nodes_of, holds_system,
+    system_at, node_name_at, node_kind_at, node_count, clear_all,
+    _split_first
+)
+
+// ---- adopt: record a node under a system --------------------------------------
+
+// adopt(system, node, kind) — register `node` (of `kind`) as held under `system`.
+// Idempotent per (system,node): re-adopting the same node is a no-op (no dup). A new
+// system is appended to the systems roster.
+adopt(system: string, node: string, kind: string) {
+    _ensure_system(system)
+    key = "aeo.sup.nodes.${system}"
+    existing = config.get(key)
+    // node entries are "name\tkind" joined by "\n"; skip if this name already there.
+    if _has_node(existing, node) == 1 {
+        return
+    }
+    entry = "${node}\t${kind}"
+    if string_length(existing) == 0 {
+        config.put(key, entry)
+    } else {
+        config.put(key, "${existing}\n${entry}")
+    }
+}
+
+// forget_system(system) — drop a system + all its nodes from the registry. The daemon
+// calls this AFTER it has torn the nodes down (release), so the registry only ever
+// reflects live-held trees.
+forget_system(system: string) {
+    config.put("aeo.sup.nodes.${system}", "")
+    config.put("aeo.sup.sysknown.${system}", "")
+    // rebuild the systems roster without `system` (compact, order-preserving).
+    n = held_count()
+    kept = ""
+    i = 0
+    while i < n {
+        s = system_at(i)
+        if s != system {
+            if string_length(s) > 0 {
+                if string_length(kept) == 0 {
+                    kept = s
+                } else {
+                    kept = "${kept}\n${s}"
+                }
+            }
+        }
+        i = i + 1
+    }
+    _write_roster(kept)
+}
+
+// clear_all() — wipe the whole registry (daemon startup: begin EMPTY, the
+// boot-scoped/non-restoring invariant).
+clear_all() {
+    n = held_count()
+    i = 0
+    while i < n {
+        s = system_at(i)
+        config.put("aeo.sup.nodes.${s}", "")
+        config.put("aeo.sup.sysknown.${s}", "")
+        i = i + 1
+    }
+    _write_roster("")
+}
+
+// ---- readers (drive /status + release) ----------------------------------------
+
+// held_count() — number of systems currently held.
+held_count() -> int {
+    r = config.get("aeo.sup.roster")
+    if string_length(r) == 0 { return 0 }
+    return _line_count(r)
+}
+
+// held_systems() — the roster as a "\n"-joined string ("" if none).
+held_systems() -> string { return config.get("aeo.sup.roster") }
+
+// holds_system(system) -> 1 if held.
+holds_system(system: string) -> int {
+    if string_length(config.get("aeo.sup.sysknown.${system}")) > 0 { return 1 }
+    return 0
+}
+
+// system_at(i) — the i-th held system name ("" out of range).
+system_at(i: int) -> string {
+    return _line_at(config.get("aeo.sup.roster"), i)
+}
+
+// nodes_of(system) — the raw "name\tkind\n..." block for a system ("" if none).
+nodes_of(system: string) -> string { return config.get("aeo.sup.nodes.${system}") }
+
+// node_count(system) — how many nodes held under a system.
+node_count(system: string) -> int {
+    b = config.get("aeo.sup.nodes.${system}")
+    if string_length(b) == 0 { return 0 }
+    return _line_count(b)
+}
+
+// node_name_at(system, i) / node_kind_at(system, i) — the i-th node's name / kind.
+node_name_at(system: string, i: int) -> string {
+    line = _line_at(config.get("aeo.sup.nodes.${system}"), i)
+    nm, k = _split_first(line, "\t")
+    return nm
+}
+node_kind_at(system: string, i: int) -> string {
+    line = _line_at(config.get("aeo.sup.nodes.${system}"), i)
+    nm, k = _split_first(line, "\t")
+    return k
+}
+
+// ---- internals ----------------------------------------------------------------
+
+_ensure_system(system: string) {
+    if holds_system(system) == 1 { return }
+    config.put("aeo.sup.sysknown.${system}", "1")
+    r = config.get("aeo.sup.roster")
+    if string_length(r) == 0 {
+        _write_roster(system)
+    } else {
+        _write_roster("${r}\n${system}")
+    }
+}
+
+_write_roster(r: string) {
+    config.put("aeo.sup.roster", r)
+}
+
+// 1 if the node block already contains a node named `node`.
+_has_node(block: string, node: string) -> int {
+    n = _line_count(block)
+    i = 0
+    while i < n {
+        line = _line_at(block, i)
+        nm, k = _split_first(line, "\t")
+        if nm == node { return 1 }
+        i = i + 1
+    }
+    return 0
+}
+
+// count "\n"-separated non-empty lines.
+_line_count(s: string) -> int {
+    if string_length(s) == 0 { return 0 }
+    n = 1
+    rest = s
+    more = 1
+    while more == 1 {
+        idx = string_index_of(rest, "\n")
+        if idx < 0 {
+            more = 0
+        } else {
+            n = n + 1
+            rest = string_substring(rest, idx + 1, string_length(rest))
+        }
+    }
+    return n
+}
+
+// the i-th "\n"-separated line ("" out of range).
+_line_at(s: string, want: int) -> string {
+    rest = s
+    idx = 0
+    while idx < want {
+        p = string_index_of(rest, "\n")
+        if p < 0 { return "" }
+        rest = string_substring(rest, p + 1, string_length(rest))
+        idx = idx + 1
+    }
+    p = string_index_of(rest, "\n")
+    if p < 0 { return rest }
+    return string_substring(rest, 0, p)
+}
+
+// split `s` at the first `sep`; return (before, after). No sep -> (s, "").
+_split_first(s: string, sep: string) -> (string, string) {
+    idx = string_index_of(s, sep)
+    if idx < 0 { return s, "" }
+    before = string_substring(s, 0, idx)
+    after = string_substring(s, idx + string_length(sep), string_length(s))
+    return before, after
+}

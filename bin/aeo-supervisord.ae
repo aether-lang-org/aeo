@@ -1,0 +1,252 @@
+// bin/aeo-supervisord — the host-resident holder of THIS BOOT's aeo trees.
+//
+// Started as a boot service (systemd/OpenRC/rc.d — Restart=NO; if it crashes, ops
+// reboots the box). `aeo up` (default) hands each tree to it via /adopt; `aeo down`/
+// `status` ask it. It holds the tree in lib/supervisor's in-memory registry — NO disk
+// state, boot-scoped, non-restoring: it starts EMPTY and forgets everything on death.
+// The tree lives because the daemon is resident, not because anything is persisted.
+// See docs/aeo-supervisor.md.
+//
+// NEVER-CRASH discipline: every handler guards its inputs and can only ever return a
+// status line — a malformed request is a 400, not a panic. The registry mutation is
+// trivial (no parsing of untrusted compositions here — the front-door already built
+// the plan; the daemon receives a flat name+kind list).
+//
+// Protocol (POST bodies are one line; token-gated except /health):
+//   GET  /health            -> "ok"           (open liveness / residence probe)
+//   POST /adopt   body: "<token>\n<system>\n<node>:<kind>\n<node>:<kind>..."
+//                           -> "adopted <system> (<n> nodes)"
+//   POST /release body: "<token>\n<system>"   -> tears the system's nodes down
+//                           (driver down + forget) -> "released <system>"
+//   POST /status  body: "<token>"             -> the held tree, one line per node:
+//                           "<system>\t<node>\t<kind>\t<alive|dead>"
+//
+// The DRIVERS do the real teardown (down + the substrate's own registry / the pid the
+// daemon holds for bare-process tiers); the daemon holds the record + routes by kind.
+
+import std.os
+import std.os (getenv, run_capture)
+import std.string (string_length, string_index_of, string_substring, string_contains, string_from_int, string_char_at)
+import std.list
+import std.config
+import std.http (server_create, server_set_host, server_get, server_post,
+                 server_start_background, response_set_status, response_set_body,
+                 request_body)
+import supervisor
+import driver_linux
+import driver_bsd
+import driver_lxc
+import driver_bwrap
+import driver_nspawn
+import driver_firecracker
+
+extern exit(code: int)
+extern sleep(ms: int)
+
+default_port() -> int { return 9460 }   // beside aeo-agent's 9450, aeb-agent's 9440
+
+main() {
+    token = _env_or("AEO_SUP_TOKEN", "")
+    if string_length(token) == 0 {
+        println("aeo-supervisord: refusing to start with no AEO_SUP_TOKEN (fail-closed)")
+        exit(2)
+    }
+    config.put("aeo.sup.token", token)
+    // BOOT-SCOPED: begin EMPTY. (In-process registry; a fresh process is already
+    // empty, but be explicit — the invariant is load-bearing.)
+    supervisor.clear_all()
+
+    port = default_port()
+    pv = _env_or("AEO_SUP_PORT", "")
+    if string_length(pv) > 0 { port = _atoi(pv) }
+
+    raw = server_create(port)
+    if raw == 0 {
+        println("aeo-supervisord: FAIL server_create on port ${string_from_int(port)}")
+        exit(1)
+    }
+    bind = _env_or("AEO_SUP_BIND", "127.0.0.1")
+    server_set_host(raw, bind)
+    server_get(raw, "/health", _h_health, 0)
+    server_post(raw, "/adopt", _h_adopt, 0)
+    server_post(raw, "/release", _h_release, 0)
+    server_post(raw, "/status", _h_status, 0)
+    serr = server_start_background(raw)
+    if string_length(serr) > 0 {
+        println("aeo-supervisord: FAIL server_start_background: ${serr}")
+        exit(1)
+    }
+    println("aeo-supervisord: holding this-boot's trees on ${bind}:${string_from_int(port)}")
+    // resident: keep main alive; the server serves on its own thread.
+    while 1 == 1 {
+        sleep(1000)
+    }
+}
+
+// ---- handlers -----------------------------------------------------------------
+
+// GET /health — open liveness (the residence probe the front-door dials to decide
+// "is a supervisor present"). Reveals nothing.
+_h_health(req: ptr, res: ptr, ud: ptr) -> int {
+    response_set_status(res, 200)
+    response_set_body(res, "ok")
+    return 0
+}
+
+// POST /adopt — record a system + its nodes. Body: "<token>\n<system>\n<node>:<kind>..."
+_h_adopt(req: ptr, res: ptr, ud: ptr) -> int {
+    body = request_body(req)
+    tok, rest = _split_first(body, "\n")
+    if _token_ok(tok) == 0 { return _reply(res, 401, "unauthorized") }
+    system, nodelines = _split_first(rest, "\n")
+    if string_length(system) == 0 { return _reply(res, 400, "adopt: no system") }
+    n = 0
+    remaining = nodelines
+    more = 1
+    while more == 1 {
+        line, tail = _split_first(remaining, "\n")
+        if string_length(line) > 0 {
+            name, kind = _split_first(line, ":")
+            if string_length(name) > 0 {
+                supervisor.adopt(system, name, kind)
+                n = n + 1
+            }
+        }
+        if string_contains(tail, "\n") == 0 {
+            if string_length(tail) > 0 {
+                nm2, k2 = _split_first(tail, ":")
+                if string_length(nm2) > 0 {
+                    supervisor.adopt(system, nm2, k2)
+                    n = n + 1
+                }
+            }
+            more = 0
+        } else {
+            remaining = tail
+        }
+    }
+    return _reply(res, 200, "adopted ${system} (${string_from_int(n)} nodes)")
+}
+
+// POST /release — tear down + forget a held system. Body: "<token>\n<system>".
+_h_release(req: ptr, res: ptr, ud: ptr) -> int {
+    body = request_body(req)
+    tok, system = _split_first(body, "\n")
+    if _token_ok(tok) == 0 { return _reply(res, 401, "unauthorized") }
+    system = _chomp(system)
+    if supervisor.holds_system(system) == 0 {
+        return _reply(res, 404, "release: not holding '${system}'")
+    }
+    // reverse order (dependency-safe), like run_down.
+    cnt = supervisor.node_count(system)
+    i = cnt - 1
+    while i >= 0 {
+        nm = supervisor.node_name_at(system, i)
+        k = supervisor.node_kind_at(system, i)
+        _ = _driver_down(nm, k)
+        i = i - 1
+    }
+    supervisor.forget_system(system)
+    return _reply(res, 200, "released ${system}")
+}
+
+// POST /status — the held tree + per-node liveness. Body: "<token>".
+_h_status(req: ptr, res: ptr, ud: ptr) -> int {
+    tok = _chomp(request_body(req))
+    if _token_ok(tok) == 0 { return _reply(res, 401, "unauthorized") }
+    out = ""
+    ns = supervisor.held_count()
+    si = 0
+    while si < ns {
+        system = supervisor.system_at(si)
+        nc = supervisor.node_count(system)
+        ni = 0
+        while ni < nc {
+            nm = supervisor.node_name_at(system, ni)
+            k = supervisor.node_kind_at(system, ni)
+            live = "dead"
+            if _driver_probe(nm, k) == 1 { live = "alive" }
+            row = "${system}\t${nm}\t${k}\t${live}"
+            if string_length(out) == 0 { out = row } else { out = "${out}\n${row}" }
+            ni = ni + 1
+        }
+        si = si + 1
+    }
+    return _reply(res, 200, out)
+}
+
+// ---- driver routing (kind -> driver; engine defaults to "" auto for containers) ---
+
+_driver_down(nm: string, k: string) -> string {
+    if k == "jail" { return driver_bsd.down(nm) }
+    if k == "lxc" { return driver_lxc.down(nm) }
+    if k == "bwrap" { return driver_bwrap.down(nm) }
+    if k == "nspawn" { return driver_nspawn.down(nm) }
+    if k == "firecracker" { return driver_firecracker.down(nm) }
+    if k == "container" { return driver_linux.down(nm, "") }
+    return driver_linux.down(nm, "")
+}
+
+_driver_probe(nm: string, k: string) -> int {
+    if k == "jail" { return driver_bsd.probe(nm, "", "") }
+    if k == "lxc" { return driver_lxc.probe(nm, "", "") }
+    if k == "bwrap" { return driver_bwrap.probe(nm, "", "") }
+    if k == "nspawn" { return driver_nspawn.probe(nm, "", "") }
+    if k == "firecracker" { return driver_firecracker.probe(nm, "", "") }
+    if k == "container" { return driver_linux.probe(nm, "", "") }
+    return driver_linux.probe(nm, "", "")
+}
+
+// ---- helpers ------------------------------------------------------------------
+
+_token_ok(tok: string) -> int {
+    want = config.get("aeo.sup.token")
+    if string_length(want) == 0 { return 0 }
+    if _chomp(tok) == want { return 1 }
+    return 0
+}
+
+_reply(res: ptr, code: int, msg: string) -> int {
+    response_set_status(res, code)
+    response_set_body(res, msg)
+    return 0
+}
+
+_split_first(s: string, sep: string) -> (string, string) {
+    idx = string_index_of(s, sep)
+    if idx < 0 { return s, "" }
+    before = string_substring(s, 0, idx)
+    after = string_substring(s, idx + string_length(sep), string_length(s))
+    return before, after
+}
+
+// strip a trailing \r\n / whitespace (bodies arrive with line endings).
+_chomp(s: string) -> string {
+    n = string_length(s)
+    while n > 0 {
+        c = string_char_at(s, n - 1)
+        if c != 10 { if c != 13 { if c != 32 { if c != 9 { break } } } }
+        n = n - 1
+    }
+    return string_substring(s, 0, n)
+}
+
+_env_or(k: string, dflt: string) -> string {
+    v = getenv(k)
+    if string_length(v) == 0 { return dflt }
+    return v
+}
+
+_atoi(s: string) -> int {
+    n = string_length(s)
+    i = 0
+    acc = 0
+    while i < n {
+        c = string_char_at(s, i)
+        if c < 48 { return acc }
+        if c > 57 { return acc }
+        acc = acc * 10 + (c - 48)
+        i = i + 1
+    }
+    return acc
+}
