@@ -18,6 +18,8 @@ aeo smoke    compose.ae      # deploy + run smoke() specs, leave the tree STANDI
 aeo suite    compose.ae      # deploy + run suite() specs, then TEAR DOWN (the CI shape)
 aeo audit    compose.ae      # verify the hash-chained audit trail
 aeo cutover  compose.ae node  # zero-downtime blue-green: green up + confined + health-gated, alias-swap, retire blue
+aeo reconcile compose.ae      # one-shot drift check: live probes vs the composition (exit 1 on drift); --converge to fix
+aeo watch    compose.ae       # reconcile on a loop (default 30s) — aeo's life between up and down; --converge to act
 aeo pasta    compose.ae on   # rootless source-IP fidelity: switch the port forwarder to pasta (see docs/linux-host-setup.md)
 # also: snapshot | rollback | backup | prune | exec | restart  (per-node lifecycle ops)
 ```
@@ -270,7 +272,8 @@ lib/resource/         the actor↔main state bridge
 lib/driver_windows/  lib/driver_wslc/   Windows OCI engines (podman-in-WSL2 / MSFT's native wslc.exe)
 examples/             the substrate grid — twelve `db ◄ app` compositions (see examples/README.md)
 examples/checks/      the per-example check()/smoke()/suite() aeocha specs
-test/                 ~30 specs (fluent-aeocha style): driver/confinement/attest/audit/lifecycle/gpu/pasta + real-jail
+lib/reconcile/        desired-vs-actual property diff (drift detection under `aeo watch`/`reconcile`)
+test/                 ~31 specs (fluent-aeocha style): driver/confinement/attest/audit/lifecycle/gpu/pasta/reconcile + real-jail
 ```
 
 ## What aeo is NOT

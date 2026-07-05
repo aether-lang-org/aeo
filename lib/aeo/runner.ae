@@ -36,6 +36,7 @@ import rctl
 import snapshot
 import snapshot_linux
 import confine_linux
+import reconcile
 import attest
 import audit
 import resource (set_state, get_state, STATE_DOWN, STATE_BOOTING, STATE_UP, STATE_FAILED)
@@ -1472,6 +1473,161 @@ run_audit() {
         println("  chain:   ${v}")
     }
 }
+// ---- reconcile: give aeo a life between up and down (Formae-envy item 1) ----
+//
+// `aeo reconcile <compose>` (one-shot) / `aeo watch <compose>` (loop): re-probe
+// each node, read its ACTUAL rendered properties off the substrate, diff against
+// what the composition NOW declares (lib/reconcile), and report/converge drift.
+// State is NONE — desired = the composition, actual = live probes (no datastore).
+//
+// DEFAULT IS ALERT, NOT MUTATE (the doc's rule: containment tools must not silently
+// mutate). Drift is audit-logged + printed; convergence only happens with
+// AEO_CONVERGE=1 (the front-door sets it from `--converge`). A confined node
+// drifting out of its declared envelope is a SECURITY EVENT — every detection and
+// action is written to the lib/audit hash chain.
+//
+// v1 scope: the `container` kind (the one with inspect_state). Other kinds report
+// "reconcile not yet supported for kind=X" — honest, not silent.
+
+// _desired_line(nm) — the composition's desired canonical property line for a
+// container node (the reconcile diff LHS), matching driver_linux.inspect_state's
+// shape. Reads image + limit{} (memoryuse/maxproc from get_rctl) + the shared net.
+_desired_line(nm: string) -> string {
+    img = compose.get_image(nm)
+    rctl = compose.get_rctl(nm)
+    mem = confine_linux._kv_value(rctl, "memoryuse")
+    pids = confine_linux._kv_value(rctl, "maxproc")
+    // net: a node on the shared aeo net (unless deny_egress -> none). We report the
+    // shared net name with the trailing comma podman's inspect range emits. A node
+    // with a bridge net shows it; default-net (pasta) shows empty on both sides.
+    net = ""
+    return reconcile.render_desired(img, mem, pids, "0", net)
+}
+
+// _reconcile_node(nm, converge) — reconcile ONE container node. Returns the number
+// of drift/failure events observed (0 = coherent). Audits every event + action.
+_reconcile_node(nm: string, converge: int) -> int {
+    k = compose.get_kind(nm)
+    if k != "container" {
+        println("aeo: [${nm}] reconcile not yet supported for kind='${k}' (container only in v1)")
+        return 0
+    }
+    eng = compose.get_engine(nm)
+    // 1. LIVENESS: is the node even up?
+    alive = driver_linux.probe(nm, compose.get_health(nm), eng)
+    if alive == 0 {
+        println("aeo: [${nm}] DRIFT: node is not running (down or unhealthy)")
+        _ = audit.record(nm, k, "drift", "node not running")
+        if converge == 1 {
+            println("aeo: [${nm}] converge: restarting")
+            err = driver_up(nm, k)
+            if string_starts_err(err) == 1 {
+                println("aeo: [${nm}] converge FAILED: ${_strip_err(err)}")
+                _ = audit.record(nm, k, "converge-fail", _strip_err(err))
+            } else {
+                _ = audit.record(nm, k, "converge", "restarted (was not running)")
+            }
+        }
+        return 1
+    }
+    // 2. PROPERTY DRIFT: diff the live envelope against the composition.
+    actual = driver_linux.inspect_state(nm, eng)
+    if string_length(actual) == 0 {
+        // running per probe but not inspectable (a Windows/wsl engine, or a race).
+        return 0
+    }
+    desired = _desired_line(nm)
+    d = reconcile.state_diff(desired, actual)
+    if string_length(d) == 0 {
+        return 0
+    }
+    // A confined node OUT of its declared envelope is a security event.
+    println("aeo: [${nm}] DRIFT: ${d}")
+    _ = audit.record(nm, k, "drift", d)
+    if converge == 1 {
+        // Property drift on a container is corrected by RECREATE (podman can't
+        // re-cap a running container). driver_up short-circuits on an already-running
+        // node (its up idempotency guard), so we DOWN first to clear the drifted
+        // container, then UP recreates it with the composition's flags — re-attesting
+        // fail-closed, exactly as `up` does. (down+up, not a raw --replace, so the
+        // recreate goes through the SAME confined bring-up path as a fresh up.)
+        println("aeo: [${nm}] converge: recreating to the declared envelope")
+        _ = driver_down(nm, k)
+        err = driver_up(nm, k)
+        if string_starts_err(err) == 1 {
+            println("aeo: [${nm}] converge FAILED: ${_strip_err(err)}")
+            _ = audit.record(nm, k, "converge-fail", _strip_err(err))
+        } else {
+            _ = audit.record(nm, k, "converge", "recreated to envelope (${d})")
+        }
+    }
+    return 1
+}
+
+// run_reconcile — one pass over every node in declaration order (which honors
+// depends: run_up ordered them). Prints a summary; exits non-zero if any drift was
+// seen (so `aeo reconcile` is a CI-usable coherence gate). AEO_CONVERGE=1 acts.
+run_reconcile() {
+    converge = 0
+    if _envc("AEO_CONVERGE") == "1" { converge = 1 }
+    mode = "detect"
+    if converge == 1 { mode = "converge" }
+    println("aeo: reconcile (${mode}) — desired=composition, actual=live probes")
+    n = compose.count()
+    i = 0
+    events = 0
+    while i < n {
+        events = events + _reconcile_node(compose.name_at(i), converge)
+        i = i + 1
+    }
+    if events == 0 {
+        println("aeo: reconcile — COHERENT (no drift)")
+        exit(0)
+    }
+    println("aeo: reconcile — ${string_from_int(events)} drift/failure event(s) (see the audit trail)")
+    exit(1)
+}
+
+// run_watch — `aeo watch <compose>`: run_reconcile's pass on a loop, every
+// AEO_WATCH_INTERVAL seconds (default 30), until interrupted (Ctrl-C). The
+// long-running mode of the runner — NOT a new daemon. Never exits on its own; each
+// pass reports drift + (if AEO_CONVERGE=1) converges. In-memory pass counter only.
+run_watch() {
+    converge = 0
+    if _envc("AEO_CONVERGE") == "1" { converge = 1 }
+    interval = _watch_interval_ms()
+    mode = "detect"
+    if converge == 1 { mode = "converge" }
+    println("aeo: watch (${mode}) — reconciling every ${string_from_int(interval / 1000)}s (Ctrl-C to stop)")
+    pass = 0
+    keep = 1
+    while keep == 1 {
+        pass = pass + 1
+        n = compose.count()
+        i = 0
+        events = 0
+        while i < n {
+            events = events + _reconcile_node(compose.name_at(i), converge)
+            i = i + 1
+        }
+        if events == 0 {
+            println("aeo: watch pass ${string_from_int(pass)} — coherent")
+        } else {
+            println("aeo: watch pass ${string_from_int(pass)} — ${string_from_int(events)} drift event(s)")
+        }
+        sleep(interval)
+    }
+}
+
+// AEO_WATCH_INTERVAL seconds -> ms; default 30s, floor 1s.
+_watch_interval_ms() -> int {
+    v = _envc("AEO_WATCH_INTERVAL")
+    if string_length(v) == 0 { return 30000 }
+    s = _atoi_simple(v)
+    if s < 1 { return 30000 }
+    return s * 1000
+}
+
 _count_lines(p: string) -> string {
     av = list_new()
     list_add(av, "-c")
@@ -2100,6 +2256,14 @@ main() {
     }
     if cmd == "pasta" {
         run_pasta()
+        return
+    }
+    if cmd == "reconcile" {
+        run_reconcile()
+        return
+    }
+    if cmd == "watch" {
+        run_watch()
         return
     }
 

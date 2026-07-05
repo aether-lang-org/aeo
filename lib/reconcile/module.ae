@@ -1,0 +1,161 @@
+// lib/reconcile — the desired-vs-actual PROPERTY DIFF (Formae-envy item 1/3, the
+// shared primitive). Reconcile gives aeo a life between `up` and `down`: it reads a
+// node's ACTUAL rendered properties off the live substrate (driver.inspect_state),
+// renders the DESIRED properties the composition NOW declares, and diffs them
+// field-by-field. `aeo watch` acts on the diff; `aeo apply-node` (later) reuses it.
+//
+// This module is PURE — no host I/O. It takes two canonical property lines
+// (`img=…|mem=…|pids=…|nanocpus=…|net=…`, the shape driver_linux.inspect_state
+// emits) and returns a human diff of the fields that changed. The caller supplies
+// both sides: actual from the driver, desired from render_desired() below fed the
+// composition's values.
+//
+// CANONICALISE BEFORE DIFFING (the doc's load-bearing warning): aeo renders
+// `--memory 512M` (a human string) but podman reports `.HostConfig.Memory` in BYTES
+// (536870912). A naive string diff would cry wolf on EVERY node with a memory cap.
+// So memory values are normalised to bytes before comparison; an unset cap is 0 on
+// both sides. Get this wrong and operators stop reading the diff.
+
+import std.string (string_length, string_contains, string_index_of, string_substring, string_char_at, string_from_int, string_from_long)
+import std.list
+
+exports (
+    render_desired, field_of, mem_to_bytes, state_diff, has_drift,
+    _canon_field
+)
+
+// ---- build the DESIRED canonical line from a node's composition values -------
+//
+// render_desired(image, mem, pids, nanocpus, net) — assemble the SAME
+// `key=val|...` shape inspect_state emits, from the values the composition declares
+// (image() + limit{} + the shared net). mem is the human string ("512M"); it is
+// normalised to bytes so it matches podman's byte report. pids/nanocpus "" or "0"
+// mean "no cap". net is the comma-joined network list (trailing comma, as podman's
+// range emits) or "".
+render_desired(image: string, mem: string, pids: string, nanocpus: string, net: string) -> string {
+    memb = mem_to_bytes(mem)
+    p = pids
+    if string_length(p) == 0 { p = "0" }
+    nc = nanocpus
+    if string_length(nc) == 0 { nc = "0" }
+    return "img=${image}|mem=${memb}|pids=${p}|nanocpus=${nc}|net=${net}"
+}
+
+// ---- canonicalisers ----------------------------------------------------------
+
+// mem_to_bytes(v) — a human memory string ("512M", "256m", "1G", "2g", "1024k") to
+// its byte count as a decimal string. A bare number passes through (already bytes,
+// as podman reports). "" or "0" -> "0" (no cap). Suffixes K/M/G (case-insensitive),
+// powers of 1024 (podman's convention). Unknown suffix -> pass the raw digits.
+mem_to_bytes(v: string) -> string {
+    n = string_length(v)
+    if n == 0 { return "0" }
+    // split trailing non-digit suffix.
+    last = string_char_at(v, n - 1)
+    mult = 1
+    digits = v
+    if _is_suffix(last) == 1 {
+        digits = string_substring(v, 0, n - 1)
+        mult = _suffix_mult(last)
+    }
+    num = _to_int(digits)
+    if num == 0 { return "0" }
+    // 64-bit multiply: 2G+ overflows a 32-bit int (2*1073741824 wraps negative).
+    // _mul_long's `long` params force the product in 64-bit. (Caught by the spec.)
+    return string_from_long(_mul_long(num, mult))
+}
+
+// 64-bit multiply — the params are `long` so the product is computed in 64-bit,
+// not the 32-bit int the operands would default to (a 2G memory cap overflows int).
+_mul_long(a: long, b: long) -> long { return a * b }
+
+_is_suffix(c: int) -> int {
+    // K k M m G g
+    if c == 75 { return 1 }
+    if c == 107 { return 1 }
+    if c == 77 { return 1 }
+    if c == 109 { return 1 }
+    if c == 71 { return 1 }
+    if c == 103 { return 1 }
+    return 0
+}
+_suffix_mult(c: int) -> int {
+    if c == 75 { return 1024 }
+    if c == 107 { return 1024 }
+    if c == 77 { return 1048576 }
+    if c == 109 { return 1048576 }
+    if c == 71 { return 1073741824 }
+    if c == 103 { return 1073741824 }
+    return 1
+}
+_to_int(s: string) -> int {
+    n = string_length(s)
+    i = 0
+    acc = 0
+    while i < n {
+        c = string_char_at(s, i)
+        if c < 48 { return acc }
+        if c > 57 { return acc }
+        acc = acc * 10 + (c - 48)
+        i = i + 1
+    }
+    return acc
+}
+
+// ---- field extraction + diff -------------------------------------------------
+
+// field_of(line, key) — the value of `key=` in a canonical `k=v|k=v` line, "" if
+// absent. e.g. field_of("img=x|mem=5", "mem") -> "5".
+field_of(line: string, key: string) -> string {
+    needle = "${key}="
+    idx = string_index_of(line, needle)
+    if idx < 0 { return "" }
+    start = idx + string_length(needle)
+    rest = string_substring(line, start, string_length(line))
+    bar = string_index_of(rest, "|")
+    if bar < 0 { return rest }
+    return string_substring(rest, 0, bar)
+}
+
+// _canon_field(key, val) — normalise one field's value for comparison. Only `mem`
+// needs it today (bytes); other fields compare verbatim. Isolated so adding a
+// canonicaliser (e.g. digest short/long form) is one branch.
+_canon_field(key: string, val: string) -> string {
+    if key == "mem" { return mem_to_bytes(val) }
+    return val
+}
+
+// state_diff(desired, actual) — a human, newline-free-per-item list of the fields
+// that differ, canonicalised. "" if the two states agree on every known field.
+// Format per changed field: "<key>: <actual> -> <desired>" joined by "; ".
+// Keys checked in a fixed order so the report is deterministic.
+// v1 diffs the SECURITY-CRITICAL envelope: image + the confinement caps. `net` is
+// deliberately NOT diffed — network membership renders differently across the
+// netpolicy tiers (bridge shows the aeo net, pasta-default shows empty, deny_egress
+// shows none), so a naive net diff cries wolf on healthy nodes. Per-tier net
+// reconciliation is a documented follow-up; the confinement envelope is what a
+// "confined node drifted" alert must catch, and it does.
+state_diff(desired: string, actual: string) -> string {
+    out = ""
+    out = _diff_field(out, "img", desired, actual)
+    out = _diff_field(out, "mem", desired, actual)
+    out = _diff_field(out, "pids", desired, actual)
+    out = _diff_field(out, "nanocpus", desired, actual)
+    return out
+}
+
+_diff_field(acc: string, key: string, desired: string, actual: string) -> string {
+    d = _canon_field(key, field_of(desired, key))
+    a = _canon_field(key, field_of(actual, key))
+    if d == a { return acc }
+    item = "${key}: ${a} -> ${d}"
+    if string_length(acc) == 0 { return item }
+    return "${acc}; ${item}"
+}
+
+// has_drift(desired, actual) — 1 if any known field differs, else 0. The cheap
+// boolean the watch loop gates on before building the human diff string.
+has_drift(desired: string, actual: string) -> int {
+    if string_length(state_diff(desired, actual)) > 0 { return 1 }
+    return 0
+}

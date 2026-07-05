@@ -26,7 +26,7 @@ import std.fs (write_atomic)
 
 exports (
     name, engine_resolve,
-    up, up_net, up_confined, up_green, alias_move, network_ensure, network_ensure_internal, down, probe, exec_capture, build, build_entrypoint, built_tag,
+    up, up_net, up_confined, up_green, alias_move, network_ensure, network_ensure_internal, down, probe, inspect_argv, inspect_state, exec_capture, build, build_entrypoint, built_tag,
     ps_running_argv, ps_all_running_argv, running_names, run_argv, run_argv_net, run_argv_confined, stop_argv, rm_argv, exec_health_argv,
     net_disconnect_argv, net_connect_alias_argv,
     pasta_dropin_path, pasta_dropin_content, pasta_forwarder_ensure, pasta_forwarder_active, pasta_forwarder_clear,
@@ -559,6 +559,55 @@ probe(res_name: string, health: string, engine_pref: string) -> int {
         return 1
     }
     return 0
+}
+
+// --- reconcile: read a container's ACTUAL rendered properties ---------------
+//
+// probe() answers only alive/dead. The reconcile loop (aeo watch) needs the live
+// VALUES of the confinement + image properties aeo rendered at up-time, to diff
+// against what the composition now declares. inspect_state returns them as one
+// canonical `key=val|key=val` line (stable key order), "" if the container is
+// absent. The keys mirror what up_confined sets: image, mem (--memory bytes), pids
+// (--pids-limit), nanocpus (--cpus), net (joined networks). The DESIRED side
+// (compose) renders the same shape; a field-by-field diff is then apples-to-apples.
+
+// inspect_argv(res_name) — `<engine> inspect NAME --format '<canonical>'`. Pure
+// (the format template is fixed), so the shape is unit-testable without a host.
+inspect_argv(res_name: string) -> ptr {
+    av = list_new()
+    list_add(av, "inspect")
+    list_add(av, res_name)
+    list_add(av, "--format")
+    // one canonical line; PidsLimit/Memory are 0 when unset (no cap declared).
+    list_add(av, "img={{.ImageName}}|mem={{.HostConfig.Memory}}|pids={{.HostConfig.PidsLimit}}|nanocpus={{.HostConfig.NanoCpus}}|net={{range $k,$v := .NetworkSettings.Networks}}{{$k}},{{end}}")
+    return av
+}
+
+// inspect_state(res_name, engine_pref) — the live canonical property line, or ""
+// if the container doesn't exist (inspect exits non-zero) or no engine. The
+// reconcile "actual" side.
+inspect_state(res_name: string, engine_pref: string) -> string {
+    eng = engine_resolve(engine_pref)
+    if eng == "" {
+        return ""
+    }
+    av = inspect_argv(res_name)
+    out, status, err = run_capture(eng, av, null)
+    list_free(av)
+    if err != "" {
+        return ""
+    }
+    if status != 0 {
+        return ""
+    }
+    // strip a trailing newline for a clean canonical value.
+    n = string_length(out)
+    if n > 0 {
+        if string_char_at(out, n - 1) == 10 {
+            return string_substring(out, 0, n - 1)
+        }
+    }
+    return out
 }
 
 // Run `cmd` inside the container via `<engine> exec NAME /bin/sh -c CMD`

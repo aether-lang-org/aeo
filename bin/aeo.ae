@@ -112,14 +112,14 @@ main() {
     }
 
     if compose_path == "" {
-        _diag("usage: aeo [up|down|status|check|smoke|suite|dry-run|snapshot|rollback|exec|restart|cutover|backup|prune|audit|pasta] <compose.ae> [tag|node cmd...]")
+        _diag("usage: aeo [up|down|status|check|smoke|suite|dry-run|snapshot|rollback|exec|restart|cutover|backup|prune|audit|pasta|reconcile|watch] <compose.ae> [tag|node cmd...]")
         exit(2)
     }
     // check/smoke/suite are the declared-verification phases (the composition's
     // check()/smoke()/suite() spec refs): check = specs only, no deploy; smoke =
     // deploy + specs, leave standing; suite = deploy + specs, tear down.
     if _known_cmd(cmd) == 0 {
-        _diag("aeo: unknown subcommand '${cmd}' (want up|down|status|check|smoke|suite|dry-run|snapshot|rollback|exec|restart|cutover|backup|prune|audit|pasta)")
+        _diag("aeo: unknown subcommand '${cmd}' (want up|down|status|check|smoke|suite|dry-run|snapshot|rollback|exec|restart|cutover|backup|prune|audit|pasta|reconcile|watch)")
         exit(2)
     }
 
@@ -212,6 +212,16 @@ main() {
             _ = _setenv("AEO_TAG", tag)
         }
     }
+    // reconcile/watch: `--converge` (arg3) opts into acting on drift (default is
+    // detect + audit only — a containment tool must not silently mutate). For watch,
+    // an optional interval-seconds rides arg4 -> AEO_WATCH_INTERVAL.
+    if cmd == "reconcile" {
+        if tag == "--converge" { _ = _setenv("AEO_CONVERGE", "1") }
+    }
+    if cmd == "watch" {
+        if tag == "--converge" { _ = _setenv("AEO_CONVERGE", "1") }
+        if argc >= 5 { _ = _setenv("AEO_WATCH_INTERVAL", aether_args_get(4)) }
+    }
     // exec/restart: the target node (exec also passes the command).
     if cmd == "exec" {
         _ = _setenv("AEO_NODE", exec_node)
@@ -284,6 +294,8 @@ _known_cmd(c: string) -> int {
     if c == "prune" { return 1 }
     if c == "audit" { return 1 }
     if c == "pasta" { return 1 }
+    if c == "reconcile" { return 1 }
+    if c == "watch" { return 1 }
     return 0
 }
 
