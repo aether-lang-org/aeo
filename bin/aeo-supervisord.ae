@@ -32,6 +32,7 @@ import std.config
 import std.http (server_create, server_set_host, server_get, server_post,
                  server_start_background, response_set_status, response_set_body,
                  request_body)
+import std.io (stderr_write)
 import supervisor
 import driver_linux
 import driver_bsd
@@ -48,7 +49,7 @@ default_port() -> int { return 9460 }   // beside aeo-agent's 9450, aeb-agent's 
 main() {
     token = _env_or("AEO_SUP_TOKEN", "")
     if string_length(token) == 0 {
-        println("aeo-supervisord: refusing to start with no AEO_SUP_TOKEN (fail-closed)")
+        _log("aeo-supervisord: refusing to start with no AEO_SUP_TOKEN (fail-closed)")
         exit(2)
     }
     config.put("aeo.sup.token", token)
@@ -62,7 +63,7 @@ main() {
 
     raw = server_create(port)
     if raw == 0 {
-        println("aeo-supervisord: FAIL server_create on port ${string_from_int(port)}")
+        _log("aeo-supervisord: FAIL server_create on port ${string_from_int(port)}")
         exit(1)
     }
     bind = _env_or("AEO_SUP_BIND", "127.0.0.1")
@@ -73,13 +74,60 @@ main() {
     server_post(raw, "/status", _h_status, 0)
     serr = server_start_background(raw)
     if string_length(serr) > 0 {
-        println("aeo-supervisord: FAIL server_start_background: ${serr}")
+        _log("aeo-supervisord: FAIL server_start_background: ${serr}")
         exit(1)
     }
-    println("aeo-supervisord: holding this-boot's trees on ${bind}:${string_from_int(port)}")
-    // resident: keep main alive; the server serves on its own thread.
+    _log("aeo-supervisord: holding this-boot's trees on ${bind}:${string_from_int(port)}")
+    // The server serves on its own thread; main runs the RESIDENT LIVENESS WATCH over
+    // the trees it holds — the reconcile loop's natural home. Every AEO_SUP_WATCH
+    // seconds (default 30, 0 = off) it probes each held node; a HELD node found dead
+    // is a real event (something aeo stood up + the supervisor holds died out from
+    // under it) — logged loudly. This is LIVENESS reconcile only (the daemon holds
+    // name+kind, so it can answer "still alive?"); full property-diff reconcile needs
+    // the composition and stays with `aeo watch` / `aeo reconcile`.
+    interval = _watch_secs()
     while 1 == 1 {
+        if interval > 0 {
+            _watch_pass()
+            _sleep_secs(interval)
+        } else {
+            sleep(1000)
+        }
+    }
+}
+
+// one liveness pass over every held node; log each held-but-dead node.
+_watch_pass() {
+    ns = supervisor.held_count()
+    si = 0
+    while si < ns {
+        system = supervisor.system_at(si)
+        nc = supervisor.node_count(system)
+        ni = 0
+        while ni < nc {
+            nm = supervisor.node_name_at(system, ni)
+            k = supervisor.node_kind_at(system, ni)
+            if _driver_probe(nm, k) == 0 {
+                _log("aeo-supervisord: WATCH — held node [${system}/${nm}] (${k}) is NOT alive (died out from under the supervisor)")
+            }
+            ni = ni + 1
+        }
+        si = si + 1
+    }
+}
+
+// AEO_SUP_WATCH seconds, default 30, floor 0 (off).
+_watch_secs() -> int {
+    v = _env_or("AEO_SUP_WATCH", "")
+    if string_length(v) == 0 { return 30 }
+    return _atoi(v)
+}
+
+_sleep_secs(s: int) {
+    i = 0
+    while i < s {
         sleep(1000)
+        i = i + 1
     }
 }
 
@@ -229,6 +277,13 @@ _chomp(s: string) -> string {
         n = n - 1
     }
     return string_substring(s, 0, n)
+}
+
+// _log — UNBUFFERED daemon log to stderr. println() block-buffers when stdout isn't a
+// TTY, so its output is lost when the daemon is killed (verified). stderr_write is
+// unbuffered + stderr is the conventional daemon log stream (journald/rc.d capture it).
+_log(msg: string) {
+    _ = stderr_write("${msg}\n")
 }
 
 _env_or(k: string, dflt: string) -> string {
