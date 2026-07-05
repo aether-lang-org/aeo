@@ -6,10 +6,17 @@ watch) + front-door adopt/release + the init-aware installer
 (`bin/aeo-supervisor-install.sh`). Proven on CachyOS as a real systemd service:
 installer → `active`; `aeo up` → adopted; `aeo down` → released via the supervisor; the
 ORPHAN-GAP CLOSURE (down with an empty `.ae` still tears down what the supervisor
-holds); the resident watch logs a held node that died. Proven substrate-general on
-FreeBSD: the daemon adopts + releases a **jail** (routing to `driver_bsd`), not just
-containers. Remaining follow-ups (§8): the OpenRC/Alpine installer arm live-proof, and
-supervisor-as-launcher (the deeper pidfile removal — see §6, deliberately deferred).
+holds); the resident watch logs a held node that died. Proven SUBSTRATE-GENERAL across all
+three holding-mechanism classes the daemon routes to: name-registry (container on
+CachyOS, jail on FreeBSD via `driver_bsd`), the **systemd-unit registry** (nspawn on
+CachyOS via `driver_nspawn` — adopt → `/status` alive → release), and the
+**pidfile bare-process tier** (bwrap on CachyOS via `driver_bwrap` — the tier the
+whole fallback discussion was about: adopt → alive → release, process gone). So the
+registry-holder is not container-only; it holds and releases every substrate the same
+way. Remaining follow-ups (§8): the OpenRC/Alpine installer arm live-proof, lxc/kvm/
+firecracker routing (the CachyOS box lacks those binaries — proven by construction,
+not live-run), and supervisor-as-launcher (the deeper pidfile removal — see §6,
+deliberately deferred).
 Captures the decision to give aeo a host-resident supervisor so `aeo down`/`status`/
 `watch` latch onto a live registry instead of re-deriving handles from a re-handed
 composition (and so the pidfile fallback path can be deleted). Supersedes the "no
