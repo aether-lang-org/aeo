@@ -1,0 +1,128 @@
+// lib/extract — reality -> code (Formae-envy item 2). Walk the host's LIVE
+// containers and emit a valid aeo composition (.ae) that would reproduce them. The
+// brownfield-adoption path: Day 0 is optional — point aeo at a host someone else
+// (or ClickOps) set up, and get a composition you can then `up`/`watch`/`apply-node`.
+//
+// This module is PURE — no host I/O. The runner does the podman walk (ps + inspect
+// + digest) and feeds each container's facts here; render_node emits one node's
+// block, render_composition wraps N nodes in a `system(){}`. Unit-testable in full.
+//
+// The CONTAINMENT WIN Formae has no analog for: each emitted node carries an
+// `attest("sha256:...")` pre-filled with the image's CURRENT digest — so extraction
+// doubles as an instant attestation baseline. Re-`up` the extracted composition and
+// aeo verifies the image hasn't drifted from what was running when you extracted.
+
+import std.string (string_length, string_char_at, string_substring, string_from_int, string_from_long, string_equals)
+import std.list
+
+exports (
+    render_composition, render_node, bytes_to_human,
+    _indent
+)
+
+// render_composition(sys_name, nodes_ae) — wrap the joined per-node blocks in the
+// `import`/`exports`/`aeo_orchestration` skeleton the front-door expects, plus a
+// `system(sys)`. nodes_ae is the already-rendered, newline-joined node blocks.
+render_composition(sys_name: string, nodes_ae: string) -> string {
+    hdr = "// Extracted by `aeo extract` from live host state. Review before `up`.\n"
+    imp = "import compose (system, container, image, command, expose, attest, limit, limit_mem, limit_maxproc)\n"
+    exp = "exports ( aeo_orchestration )\n\n"
+    open = "aeo_orchestration() {\n    system(\"${sys_name}\") {\n"
+    close = "    }\n}\n"
+    return "${hdr}${imp}${exp}${open}${nodes_ae}${close}"
+}
+
+// render_node(name, image, digest, mem_bytes, pids, expose, command) — one
+// container block. Empty/zero fields are OMITTED (a node with no cap emits no
+// limit{}). digest "" -> no attest() (couldn't resolve — honest, don't fake a pin).
+// mem_bytes is the podman byte count (0 = no cap); emitted as a human string.
+render_node(name: string, image: string, digest: string, mem_bytes: string, pids: string, expose_port: string, command: string) -> string {
+    body = ""
+    if string_length(image) > 0 {
+        body = "${body}            image(\"${image}\")\n"
+    }
+    // attest() pre-filled with the CURRENT digest — the instant baseline.
+    if string_length(digest) > 0 {
+        body = "${body}            attest(\"${digest}\")\n"
+    }
+    if string_length(command) > 0 {
+        body = "${body}            command(\"${command}\")\n"
+    }
+    if _nonzero(expose_port) == 1 {
+        body = "${body}            expose(${expose_port})\n"
+    }
+    // limit{} block only if a cap is actually set (mem>0 or pids>0).
+    has_mem = _nonzero(mem_bytes)
+    has_pids = _nonzero(pids)
+    node = "        container(\"${name}\") {\n${body}        }\n"
+    if has_mem == 1 {
+        node = "${node}        limit(\"${name}\") {\n"
+        node = "${node}            limit_mem(\"${bytes_to_human(mem_bytes)}\")\n"
+        if has_pids == 1 {
+            node = "${node}            limit_maxproc(${pids})\n"
+        }
+        node = "${node}        }\n"
+    } else {
+        if has_pids == 1 {
+            node = "${node}        limit(\"${name}\") {\n            limit_maxproc(${pids})\n        }\n"
+        }
+    }
+    return node
+}
+
+// bytes_to_human(b) — the reverse of reconcile.mem_to_bytes: a decimal byte count to
+// the largest EXACT power-of-1024 unit ("134217728" -> "128M", "1073741824" -> "1G").
+// Not an exact multiple of a unit -> the raw bytes (round-tripping is exact either
+// way; reconcile.mem_to_bytes("128M") == "134217728"). 0/"" -> "0".
+bytes_to_human(b: string) -> string {
+    n = _to_long(b)
+    if n == 0 { return "0" }
+    g = 1073741824
+    m = 1048576
+    k = 1024
+    if _divides(n, g) == 1 { return "${string_from_long(_div(n, g))}G" }
+    if _divides(n, m) == 1 { return "${string_from_long(_div(n, m))}M" }
+    if _divides(n, k) == 1 { return "${string_from_long(_div(n, k))}K" }
+    return b
+}
+
+// ---- helpers -----------------------------------------------------------------
+
+// long parse (bytes can exceed 32-bit; a 4G cap is 4294967296).
+_to_long(s: string) -> long {
+    n = string_length(s)
+    i = 0
+    acc = _zero_long()
+    while i < n {
+        c = string_char_at(s, i)
+        if c < 48 { return acc }
+        if c > 57 { return acc }
+        acc = _add_long(_mul10(acc), _digit_long(c - 48))
+        i = i + 1
+    }
+    return acc
+}
+// long arithmetic via typed helpers (params force 64-bit; see reconcile's note).
+_zero_long() -> long { return 0 }
+_mul10(a: long) -> long { return a * 10 }
+_add_long(a: long, b: long) -> long { return a + b }
+_digit_long(d: int) -> long { return d }
+_div(a: long, b: long) -> long { return a / b }
+_mod(a: long, b: long) -> long { return a - (a / b) * b }
+_divides(a: long, b: long) -> int {
+    if _mod(a, b) == 0 { return 1 }
+    return 0
+}
+
+// "0"/""/non-digit -> 0, else 1. For the omit-empty-field decisions.
+_nonzero(s: string) -> int {
+    if string_length(s) == 0 { return 0 }
+    if string_equals(s, "0") == 1 { return 0 }
+    return 1
+}
+
+// indent every line of `s` by `pad` spaces (for nesting; used by the runner if it
+// composes blocks). Kept simple; render_node already emits its own indentation.
+_indent(s: string, pad: string) -> string {
+    return "${pad}${s}"
+}

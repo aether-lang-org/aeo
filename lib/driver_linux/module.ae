@@ -26,7 +26,7 @@ import std.fs (write_atomic)
 
 exports (
     name, engine_resolve,
-    up, up_net, up_confined, up_green, alias_move, network_ensure, network_ensure_internal, down, probe, inspect_argv, inspect_state, exec_capture, build, build_entrypoint, built_tag,
+    up, up_net, up_confined, up_green, alias_move, network_ensure, network_ensure_internal, down, probe, inspect_argv, inspect_state, list_running, extract_argv, extract_facts, image_digest, exec_capture, build, build_entrypoint, built_tag,
     ps_running_argv, ps_all_running_argv, running_names, run_argv, run_argv_net, run_argv_confined, stop_argv, rm_argv, exec_health_argv,
     net_disconnect_argv, net_connect_alias_argv,
     pasta_dropin_path, pasta_dropin_content, pasta_forwarder_ensure, pasta_forwarder_active, pasta_forwarder_clear,
@@ -601,6 +601,73 @@ inspect_state(res_name: string, engine_pref: string) -> string {
         return ""
     }
     // strip a trailing newline for a clean canonical value.
+    n = string_length(out)
+    if n > 0 {
+        if string_char_at(out, n - 1) == 10 {
+            return string_substring(out, 0, n - 1)
+        }
+    }
+    return out
+}
+
+// --- extract: walk live containers -> facts for lib/extract ------------------
+//
+// `aeo extract` reconstructs a composition from running containers. list_running()
+// returns their names (newline-sep); extract_facts(name) returns one pipe-delimited
+// fact line richer than inspect_state (adds command + published port) that the
+// runner splits and feeds to lib/extract.render_node. image_digest(image) resolves
+// the current sha256 for the attest() pre-fill.
+
+// list_running(engine_pref) — newline-separated names of all running containers, ""
+// if none/no engine. (running_names already does this; alias for the extract path.)
+list_running(engine_pref: string) -> string {
+    return running_names(engine_pref)
+}
+
+// extract_argv(name) — inspect one container into a pipe line:
+//   name=<n>|img=<image>|mem=<bytes>|pids=<n>|cmd=<argv-join>|port=<p/proto>
+extract_argv(res_name: string) -> ptr {
+    av = list_new()
+    list_add(av, "inspect")
+    list_add(av, res_name)
+    list_add(av, "--format")
+    list_add(av, "name={{.Name}}|img={{.ImageName}}|mem={{.HostConfig.Memory}}|pids={{.HostConfig.PidsLimit}}|cmd={{range .Config.Cmd}}{{.}} {{end}}|port={{range $p,$b := .HostConfig.PortBindings}}{{$p}}{{end}}")
+    return av
+}
+
+// extract_facts(name, engine_pref) — the pipe line for one container, "" on failure.
+extract_facts(res_name: string, engine_pref: string) -> string {
+    eng = engine_resolve(engine_pref)
+    if eng == "" { return "" }
+    av = extract_argv(res_name)
+    out, status, err = run_capture(eng, av, null)
+    list_free(av)
+    if err != "" { return "" }
+    if status != 0 { return "" }
+    n = string_length(out)
+    if n > 0 {
+        if string_char_at(out, n - 1) == 10 {
+            return string_substring(out, 0, n - 1)
+        }
+    }
+    return out
+}
+
+// image_digest(image, engine_pref) — the image's current content digest
+// ("sha256:...") for the extract attest() pre-fill, "" if unresolvable.
+image_digest(image: string, engine_pref: string) -> string {
+    eng = engine_resolve(engine_pref)
+    if eng == "" { return "" }
+    av = list_new()
+    list_add(av, "image")
+    list_add(av, "inspect")
+    list_add(av, image)
+    list_add(av, "--format")
+    list_add(av, "{{.Digest}}")
+    out, status, err = run_capture(eng, av, null)
+    list_free(av)
+    if err != "" { return "" }
+    if status != 0 { return "" }
     n = string_length(out)
     if n > 0 {
         if string_char_at(out, n - 1) == 10 {

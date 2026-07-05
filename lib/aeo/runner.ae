@@ -18,7 +18,7 @@
 // AEO_CMD env (the front-door sets it): up (default) / down / status.
 
 import std.config
-import std.string (string_length, string_substring, string_index_of, string_char_at, string_from_char)
+import std.string (string_length, string_substring, string_index_of, string_char_at, string_from_char, string_starts_with)
 import std.list
 import driver_linux
 import driver_lxc
@@ -37,6 +37,7 @@ import snapshot
 import snapshot_linux
 import confine_linux
 import reconcile
+import extract
 import attest
 import audit
 import resource (set_state, get_state, STATE_DOWN, STATE_BOOTING, STATE_UP, STATE_FAILED)
@@ -1656,6 +1657,160 @@ _watch_interval_ms() -> int {
     return 30000
 }
 
+// run_extract — `aeo extract`: walk the host's LIVE containers and print a valid aeo
+// composition (.ae) to stdout that would reproduce them (Formae-envy item 2, the
+// brownfield-adoption path). Each node gets an attest() pre-filled with the image's
+// CURRENT digest — extraction doubles as an attestation baseline. Container kind v1.
+run_extract() {
+    if host.family() == "bsd" {
+        println("// aeo extract: container walk is Linux-only in v1 (jail/bhyve extract is a follow-up)")
+        return
+    }
+    names = driver_linux.list_running("")
+    nodes = ""
+    seen = 0
+    i = 0
+    n = string_length(names)
+    line = ""
+    while i <= n {
+        c = 10
+        if i < n { c = string_char_at(names, i) }
+        if c == 10 {
+            if string_length(line) > 0 {
+                nb = _extract_one(line)
+                if string_length(nb) > 0 {
+                    nodes = "${nodes}${nb}"
+                    seen = seen + 1
+                }
+            }
+            line = ""
+        } else {
+            line = "${line}${string_from_char(c)}"
+        }
+        i = i + 1
+    }
+    if seen == 0 {
+        println("// aeo extract: no running containers found")
+        return
+    }
+    print(extract.render_composition("extracted", nodes))
+}
+
+// _extract_one(name) — inspect one container + resolve its digest, render its node.
+_extract_one(name: string) -> string {
+    facts = driver_linux.extract_facts(name, "")
+    if string_length(facts) == 0 { return "" }
+    img = reconcile.field_of(facts, "img")
+    mem = reconcile.field_of(facts, "mem")
+    pids = reconcile.field_of(facts, "pids")
+    // omit podman's DEFAULT PidsLimit (2048) — it's not a declared cap, so re-emitting
+    // it would fabricate a limit_maxproc the operator never wrote (same class as the
+    // reconcile unset-cap rule).
+    if pids == "2048" { pids = "0" }
+    // aeo runs command() under `/bin/sh -c CMD`; strip that wrapper so the extracted
+    // command() is the bare command the operator would write (round-trips through up).
+    cmd = _strip_sh_c(_trim(reconcile.field_of(facts, "cmd")))
+    port = _port_num(reconcile.field_of(facts, "port"))
+    digest = ""
+    if string_length(img) > 0 {
+        digest = driver_linux.image_digest(img, "")
+    }
+    return extract.render_node(name, img, digest, mem, pids, port, cmd)
+}
+
+// "8080/tcp" -> "8080" (strip the /proto); "" -> "". The published-port number.
+_port_num(p: string) -> string {
+    slash = string_index_of(p, "/")
+    if slash < 0 { return p }
+    return string_substring(p, 0, slash)
+}
+
+// strip a leading `/bin/sh -c ` wrapper (aeo adds it at up-time via command()).
+_strip_sh_c(c: string) -> string {
+    pre = "/bin/sh -c "
+    if string_starts_with(c, pre) == 1 {
+        return string_substring(c, string_length(pre), string_length(c))
+    }
+    return c
+}
+
+// run_inventory — `aeo inventory`: the same live walk as a TABLE (name, image, caps),
+// and — when a composition is loaded — a "declared? yes/no" column (the coexistence
+// story: which running containers this composition manages vs which it doesn't).
+run_inventory() {
+    if host.family() == "bsd" {
+        println("aeo inventory: container walk is Linux-only in v1")
+        return
+    }
+    names = driver_linux.list_running("")
+    if string_length(names) == 0 {
+        println("aeo inventory: no running containers")
+        return
+    }
+    have_comp = 0
+    if compose.count() > 0 { have_comp = 1 }
+    if have_comp == 1 {
+        println("NAME                 IMAGE                                    MEM        DECLARED")
+    } else {
+        println("NAME                 IMAGE                                    MEM")
+    }
+    i = 0
+    n = string_length(names)
+    line = ""
+    while i <= n {
+        c = 10
+        if i < n { c = string_char_at(names, i) }
+        if c == 10 {
+            if string_length(line) > 0 {
+                _inventory_row(line, have_comp)
+            }
+            line = ""
+        } else {
+            line = "${line}${string_from_char(c)}"
+        }
+        i = i + 1
+    }
+}
+
+_inventory_row(name: string, have_comp: int) {
+    facts = driver_linux.extract_facts(name, "")
+    if string_length(facts) == 0 { return }
+    img = reconcile.field_of(facts, "img")
+    mem = reconcile.field_of(facts, "mem")
+    memh = extract.bytes_to_human(mem)
+    row = "${_pad(name, 20)} ${_pad(img, 40)} ${_pad(memh, 10)}"
+    if have_comp == 1 {
+        decl = "no"
+        if _is_declared(name) == 1 { decl = "yes" }
+        row = "${row} ${decl}"
+    }
+    println(row)
+}
+
+// 1 if `name` is a node in the loaded composition.
+_is_declared(name: string) -> int {
+    n = compose.count()
+    i = 0
+    while i < n {
+        if compose.name_at(i) == name { return 1 }
+        i = i + 1
+    }
+    return 0
+}
+
+// right-pad `s` to `w` chars (table columns). Truncates if longer.
+_pad(s: string, w: int) -> string {
+    n = string_length(s)
+    if n >= w { return s }
+    out = s
+    k = n
+    while k < w {
+        out = "${out} "
+        k = k + 1
+    }
+    return out
+}
+
 // run_apply_node — `aeo apply-node <compose.ae> <node>`: patch ONE node on a
 // standing tree (Formae-envy item 3, small blast radius). Re-render THAT node's
 // flags from the (edited) composition, diff against the live node, and apply only
@@ -2367,6 +2522,14 @@ main() {
     }
     if cmd == "apply-node" {
         run_apply_node()
+        return
+    }
+    if cmd == "extract" {
+        run_extract()
+        return
+    }
+    if cmd == "inventory" {
+        run_inventory()
         return
     }
 

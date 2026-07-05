@@ -133,6 +133,15 @@ into the code rather than reverted (with a recent refinement: resources whose
 
 ### 2. Extract — reality → code (brownfield adoption)
 
+**STATUS: BUILT + live-proven 2026-07-05.** `aeo extract` walks live containers and
+emits a valid composition (image/command/expose/limit + `attest()` pre-filled with the
+CURRENT image digest — the instant attestation baseline). `aeo inventory` is the same
+walk as a table with a `DECLARED?` column vs a given composition (the coexistence
+story). Round-trip proven: up → extract → the emitted `.ae` re-parses and `dry-run`
+plans it back; `/bin/sh -c` wrapper stripped, bytes→human (`128M`), podman default
+PidsLimit omitted. `lib/extract` (pure emitter, spec_extract.ae 7). Container kind v1;
+no `depends()` inference (edges unobservable — a follow-up). See `docs/extract.md`.
+
 **What Formae does:** `extract` generates infrastructure code from live cloud
 resources; `inventory` lists what exists, managed or not. This is what makes
 its "coexist with Terraform and ClickOps" pitch credible — Day 0 is optional.

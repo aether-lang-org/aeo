@@ -1,0 +1,77 @@
+// spec_extract.ae — the reality->code emitter (lib/extract, Formae-envy item 2).
+// Given per-container facts (as the runner's podman walk produces), render a valid
+// aeo composition. PURE — no host I/O — so the exact emitted shape is locked here;
+// the live podman walk + round-trip (up -> extract -> re-parse) is proven on a real
+// host.
+//
+//   sh test/run-spec.sh test/spec_extract.ae
+
+import aeocha
+import extract (render_composition, render_node, bytes_to_human)
+import std.string (string_contains)
+
+main() {
+    fw = aeocha.init()
+    aeocha.describe(fw, "lib/extract — reality->code emitter (§item2)") {
+
+        aeocha.describe("bytes_to_human — reverse of reconcile.mem_to_bytes") {
+            aeocha.it("exact power-of-1024 -> human unit") callback {
+                aeocha.expect_str(bytes_to_human("134217728")).to_equal_str("128M")
+                aeocha.expect_str(bytes_to_human("1073741824")).to_equal_str("1G")
+                aeocha.expect_str(bytes_to_human("268435456")).to_equal_str("256M")
+                aeocha.expect_str(bytes_to_human("4294967296")).to_equal_str("4G")
+            }
+            aeocha.it("0/empty -> 0; non-round -> raw bytes") callback {
+                aeocha.expect_str(bytes_to_human("0")).to_equal_str("0")
+                aeocha.expect_str(bytes_to_human("")).to_equal_str("0")
+                aeocha.expect_str(bytes_to_human("100000000")).to_equal_str("100000000")
+            }
+        }
+
+        aeocha.describe("render_node — one container block") {
+            aeocha.it("emits image + attest(digest) + limit{} for a confined node") callback {
+                n = render_node("web", "docker.io/library/alpine:latest", "sha256:abc123", "134217728", "16", "0", "sleep 600")
+                aeocha.expect_str(n).to_contain("container(\"web\")")
+                aeocha.expect_str(n).to_contain("image(\"docker.io/library/alpine:latest\")")
+                aeocha.expect_str(n).to_contain("attest(\"sha256:abc123\")")
+                aeocha.expect_str(n).to_contain("command(\"sleep 600\")")
+                aeocha.expect_str(n).to_contain("limit(\"web\")")
+                aeocha.expect_str(n).to_contain("limit_mem(\"128M\")")
+                aeocha.expect_str(n).to_contain("limit_maxproc(16)")
+            }
+            aeocha.it("OMITS empty fields (no cap -> no limit{}, no digest -> no attest)") callback {
+                n = render_node("plain", "alpine", "", "0", "0", "0", "")
+                aeocha.expect_str(n).to_contain("container(\"plain\")")
+                aeocha.expect_str(n).to_contain("image(\"alpine\")")
+                // no attest / limit / command / expose noise
+                aeocha.expect_int(string_contains(n, "attest")).to_equal(0)
+                aeocha.expect_int(string_contains(n, "limit")).to_equal(0)
+                aeocha.expect_int(string_contains(n, "command")).to_equal(0)
+                aeocha.expect_int(string_contains(n, "expose")).to_equal(0)
+            }
+            aeocha.it("emits expose() when a port is published") callback {
+                n = render_node("svc", "alpine", "", "0", "0", "8080", "")
+                aeocha.expect_str(n).to_contain("expose(8080)")
+            }
+            aeocha.it("pids-only cap still emits a limit{} block") callback {
+                n = render_node("p", "alpine", "", "0", "32", "0", "")
+                aeocha.expect_str(n).to_contain("limit(\"p\")")
+                aeocha.expect_str(n).to_contain("limit_maxproc(32)")
+                aeocha.expect_int(string_contains(n, "limit_mem")).to_equal(0)
+            }
+        }
+
+        aeocha.describe("render_composition — the .ae skeleton") {
+            aeocha.it("wraps nodes in import/exports/aeo_orchestration + system") callback {
+                node = render_node("web", "alpine", "", "0", "0", "0", "")
+                c = render_composition("extracted", node)
+                aeocha.expect_str(c).to_contain("import compose")
+                aeocha.expect_str(c).to_contain("exports ( aeo_orchestration )")
+                aeocha.expect_str(c).to_contain("aeo_orchestration() {")
+                aeocha.expect_str(c).to_contain("system(\"extracted\")")
+                aeocha.expect_str(c).to_contain("container(\"web\")")
+            }
+        }
+    }
+    aeocha.run_summary(fw)
+}

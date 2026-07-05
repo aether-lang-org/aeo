@@ -49,7 +49,18 @@ main() {
     exec_node = ""
     exec_cmd = ""
     if argc == 2 {
-        compose_path = aether_args_get(1)
+        // `aeo <compose.ae>` is bring-up; BUT `aeo extract` / `aeo inventory` are
+        // no-composition verbs whose single arg IS the command, not a file.
+        a1 = aether_args_get(1)
+        if a1 == "extract" {
+            cmd = "extract"
+        } else {
+            if a1 == "inventory" {
+                cmd = "inventory"
+            } else {
+                compose_path = a1
+            }
+        }
     } else {
         if argc >= 3 {
             cmd = aether_args_get(1)
@@ -117,15 +128,25 @@ main() {
         cmd = "dry-run"
     }
 
+    // extract/inventory walk LIVE host state and need no composition (inventory
+    // takes one OPTIONALLY, for its "declared?" column). If none was given, stage an
+    // empty stub so the build succeeds and the runner walks the host directly.
+    stub_compose = 0
     if compose_path == "" {
-        _diag("usage: aeo [up|down|status|check|smoke|suite|dry-run|snapshot|rollback|exec|restart|cutover|backup|prune|audit|pasta|reconcile|watch|apply-node] <compose.ae> [tag|node cmd...]")
-        exit(2)
+        if cmd == "extract" { stub_compose = 1 }
+        if cmd == "inventory" { stub_compose = 1 }
+    }
+    if compose_path == "" {
+        if stub_compose == 0 {
+            _diag("usage: aeo [up|down|status|check|smoke|suite|dry-run|snapshot|rollback|exec|restart|cutover|backup|prune|audit|pasta|reconcile|watch|apply-node|extract|inventory] <compose.ae> [tag|node cmd...]")
+            exit(2)
+        }
     }
     // check/smoke/suite are the declared-verification phases (the composition's
     // check()/smoke()/suite() spec refs): check = specs only, no deploy; smoke =
     // deploy + specs, leave standing; suite = deploy + specs, tear down.
     if _known_cmd(cmd) == 0 {
-        _diag("aeo: unknown subcommand '${cmd}' (want up|down|status|check|smoke|suite|dry-run|snapshot|rollback|exec|restart|cutover|backup|prune|audit|pasta|reconcile|watch|apply-node)")
+        _diag("aeo: unknown subcommand '${cmd}' (want up|down|status|check|smoke|suite|dry-run|snapshot|rollback|exec|restart|cutover|backup|prune|audit|pasta|reconcile|watch|apply-node|extract|inventory)")
         exit(2)
     }
 
@@ -156,12 +177,19 @@ main() {
         _diag("aeo: failed to stage lib/ from ${home}")
         exit(1)
     }
-    // Install the operator's compose.ae as the aeo_compose module.
+    // Install the operator's compose.ae as the aeo_compose module. For a
+    // no-composition extract/inventory, write an empty stub so the build succeeds
+    // (the runner then walks live host state directly).
     cmpdir = string_concat(libdst, "/aeo_compose")
     _ = mkdir_p(cmpdir)
-    if _cp(compose_path, string_concat(cmpdir, "/module.ae")) != 0 {
-        _diag("aeo: cannot read compose file '${compose_path}'")
-        exit(1)
+    if stub_compose == 1 {
+        stub = "exports ( aeo_orchestration )\naeo_orchestration() { }\n"
+        _ = write_atomic(string_concat(cmpdir, "/module.ae"), stub, string_length(stub))
+    } else {
+        if _cp(compose_path, string_concat(cmpdir, "/module.ae")) != 0 {
+            _diag("aeo: cannot read compose file '${compose_path}'")
+            exit(1)
+        }
     }
     // Copy the fixed runner to a top-level run.ae (entry outside lib/).
     if _cp(string_concat(home, "/lib/aeo/runner.ae"), string_concat(work, "/run.ae")) != 0 {
@@ -307,6 +335,8 @@ _known_cmd(c: string) -> int {
     if c == "reconcile" { return 1 }
     if c == "watch" { return 1 }
     if c == "apply-node" { return 1 }
+    if c == "extract" { return 1 }
+    if c == "inventory" { return 1 }
     return 0
 }
 
