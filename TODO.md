@@ -494,8 +494,33 @@ wired yet; mapped here as candidate kinds. Ordered by how cleanly they'd land:
           even though the cgroup caps ARE applied (inspect proves it). The message is
           about the FreeBSD rctl path and misfires on Linux — fix the runner to only
           emit it for the FreeBSD/rctl case.
+- [ ] **`aeo-supervisor` — host-resident holder of this-boot's trees (DESIGN, see
+      `docs/aeo-supervisor.md`).** Decided shape (2026-07-05): boot-scoped +
+      non-restoring (empty on OS boot, never restores last-boot's trees, no disk
+      state); NEVER crashes (if it does, ops reboots the box — no auto-restart,
+      Restart=no, which removes the re-adopt problem); supervisor-NOT-datastore (holds
+      the tree because it's the PARENT of every node, live handles not records);
+      `aeo up` hands to it BY DEFAULT, `--no-supervisor` = today's fire-and-exit,
+      default-up with no supervisor present = ERROR (not a silent downgrade). Kills the
+      pidfile fallback (§ driver_bwrap/firecracker) — the supervisor owns the pid — and
+      closes the orphan gap (`down` releases exactly what it holds, no composition
+      re-hand). Cross-init: install per host (systemd/OpenRC/runit/s6/sysvinit/rc.d,
+      Alpine musl) via the agent's TSR renderer; nodes held uniformly as the
+      supervisor's children. Hosts `watch`/reconcile. Composes with the aeo-agent
+      (per-guest deputy) — supervisor is per-HOST. Supersedes the `lib/persist`
+      adhere-to-native node-hold if built. Sequencing in the doc §8. NOT YET DECIDED
+      to build — this is captured design.
 - [ ] **`lib/persist` — one seam, adhere to each substrate's native supervisor for
-      HOLD-ALIVE.** Motivated by the firecracker fix (§ Firecracker gap #4): a bare
+      HOLD-ALIVE.** NOTE (2026-07-05): `docs/aeo-supervisor.md` proposes a DIFFERENT,
+      possibly-superseding answer to the same "what holds the tree between aeo runs"
+      question — a boot-scoped, never-crash, non-restoring aeo-OWNED resident
+      supervisor that becomes the PARENT of every node (so the pidfile fallback is
+      DELETED, not ported, and `aeo down` latches onto it instead of re-deriving from
+      the composition). If that design is built, this `lib/persist` "adhere to native
+      init for node-hold" work collapses — the supervisor holds nodes as its own
+      children; only INSTALLING the supervisor stays per-init. Decide between them
+      before building either. Original design below (adhere-to-native, no aeo daemon):
+      Motivated by the firecracker fix (§ Firecracker gap #4): a bare
       bg-child of the short-lived aeo front-door is SIGHUP-reaped when aeo's session
       scope tears down. driver_vm (kvm) and driver_firecracker BOTH independently
       solved this with `systemd-run --user`; that logic is now duplicated and
