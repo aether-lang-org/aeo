@@ -774,6 +774,17 @@ wired yet; mapped here as candidate kinds. Ordered by how cleanly they'd land:
 - [ ] aeo-agent: slices 2–4 (rewrite onto transport_http; container-build the
       Linux agent binary; driver push + init-aware TSR — systemd/OpenRC/sysvinit,
       see memory `aeo-agent-tsr-init-systems`). Slice 1 (lib/transport_http) done.
+        - **[ ] HTTPS agent conduit (when it goes TLS).** transport_http is plain
+          `http://<ip>:<port>` today (send_command/probe_health), though agent_auth's
+          design says the wire should run "under TLS." When the conduit moves to
+          `https://` with SELF-SIGNED guest certs (the natural choice for ephemeral
+          in-guest agents that can't get a CA-signed cert), the ready knob is
+          `client.set_insecure(req, 1)` — landed in aether 0.354 (#1012), documented
+          in 0.357. Wire it behind an explicit gate (e.g. `AEO_AGENT_INSECURE_TLS=1`,
+          code-visible grant) into send_command/send_command_status/probe_health.
+          NOT needed yet (no HTTPS-agent workflow exists) — noted so the migration
+          doesn't rediscover the blocker. (#1012's forward-proxy half is irrelevant to
+          aeo — the agent talks direct to a known peer.)
 - [ ] aeo-agent ON WINDOWS: the Bazzite→Chromebook→Win11 build/store/deploy
       pipeline — `docs/aeo-agent-windows-pipeline.md`. Blockers: agent body is
       Linux-bound (needs driver_windows/select arm), not on the conduit yet, and
