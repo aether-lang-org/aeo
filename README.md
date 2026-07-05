@@ -280,6 +280,8 @@ examples/             the substrate grid — twelve `db ◄ app` compositions (s
 examples/checks/      the per-example check()/smoke()/suite() aeocha specs
 lib/reconcile/        desired-vs-actual property diff (drift detection under `aeo watch`/`reconcile`)
 lib/extract/          reality->code emitter (`aeo extract`/`inventory` — live containers to a composition)
+lib/supervisor/       the in-memory tree registry the aeo-supervisord daemon holds (this-boot's trees)
+bin/aeo-supervisord   resident holder of this-boot's trees; `aeo up` adopts by default (`--no-supervisor` opts out)
 test/                 ~35 specs (fluent-aeocha style): driver/confinement/attest/audit/lifecycle/gpu/pasta/reconcile/policy/extract/conformance/ipfw + real-jail
 test/conformance-behavioral.sh  the live driver-conformance lifecycle (create->probe->confine->stop->verify-gone) per substrate
 ```

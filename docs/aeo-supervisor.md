@@ -1,9 +1,17 @@
 # aeo-supervisor — the resident holder of this-boot's trees
 
-Status: **DESIGN (2026-07-05)**, not built. Captures the decision to give aeo a
-host-resident supervisor so `aeo down`/`status`/`watch` latch onto a live registry
-instead of re-deriving handles from a re-handed composition (and so the pidfile
-fallback path can be deleted). Supersedes the "no bespoke root daemon" lean in
+Status: **BUILT + live-proven 2026-07-05** (container substrate). `lib/supervisor`
+(registry) + `bin/aeo-supervisord` (daemon) + front-door adopt/release + the
+init-aware installer (`bin/aeo-supervisor-install.sh`). Proven on CachyOS as a real
+systemd service: installer → `active`; `aeo up` → adopted; `aeo down` → released via
+the supervisor; and the ORPHAN-GAP CLOSURE (down with an empty `.ae` still tears down
+what the supervisor holds). Still container-only for the drivers wired into the daemon
+(jail/lxc/bwrap/nspawn/firecracker routing is present but the BSD/Alpine live-proof +
+moving `watch` into the daemon + deleting the pidfile path are follow-ups, §8).
+Captures the decision to give aeo a host-resident supervisor so `aeo down`/`status`/
+`watch` latch onto a live registry instead of re-deriving handles from a re-handed
+composition (and so the pidfile fallback path can be deleted). Supersedes the "no
+bespoke root daemon" lean in
 TODO.md's hold-alive note — that note's reasoning is folded in below; the piece it
 was missing is the *never-crash + boot-scoped + non-restoring* discipline, which is
 what makes a small resident supervisor honest rather than a Terraform-state trap.
