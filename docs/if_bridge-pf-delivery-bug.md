@@ -1,4 +1,51 @@
-# The FreeBSD `if_bridge` + pf delivery bug — plan to SOLVE it
+# The FreeBSD `if_bridge` + pf delivery bug — RESOLVED (it was ipfw, not pf)
+
+> ## ✅ RESOLVED 2026-07-05 on GhostBSD/FreeBSD **14.3-RELEASE-p2** (paul@192.168.0.204)
+>
+> **The root cause was never `if_bridge`+pf. It was GhostBSD's default-enabled
+> `ipfw`.** pf's per-member inter-VM confinement works correctly; the "red axis" was
+> a mis-attribution. The whole prior investigation (below) had an unseen confound: a
+> second firewall in the pfil path.
+>
+> **The airtight isolation (minimal 2-vnet-jail repro on a shared `if_bridge`,
+> jailA .10 / jailB .20, whitelist .10→.20:6379):**
+>
+> | pf | ipfw | `pfil_member` | whitelisted flow |
+> |----|------|---------------|------------------|
+> | ON (whitelist) | **ON** (GhostBSD default) | 1 | ❌ FAILS (SYN never crosses the bridge) |
+> | OFF | **OFF** | 1 | ✅ WORKS |
+> | **ON (whitelist)** | **OFF** | 1 | ✅ **WORKS** |
+> | OFF | ON | 1 | ❌ FAILS (fails even with pf off → proves it's NOT pf) |
+>
+> The decisive test: **`pfil_member=1` with pf DISABLED still dropped the packet** —
+> so pf was never the culprit. GhostBSD ships `ipfw` enabled (`net.inet.ip.fw.enable=1`)
+> with a default ruleset that knows nothing about the jail/guest subnet; once
+> `pfil_member=1` routes bridged L3 packets through pfil, **ipfw silently drops them**
+> (pf counters show zero drops; bridge shows zero Idrop — the packet is passed by pf
+> and lost by ipfw). Even a pf `pass all` failed while ipfw was on — ruling out the
+> pf ruleset entirely.
+>
+> **Full acceptance suite PASSES with ipfw off the bridge path + pf per-member whitelist:**
+> whitelisted .10→.20:6379 completes ✅; non-whitelisted :9999 blocked (block counter
+> Packets:2) ✅; explicitly-passed ICMP works ✅. **The red containment axis is GREEN.**
+>
+> **The fix aeo needs (not a topology rebuild):** ensure `ipfw` is not filtering the
+> guest bridge path. Options, cheapest first: (a) the driver disables ipfw
+> (`net.inet.ip.fw.enable=0`) or unloads it when it owns host networking; (b) add an
+> ipfw pass rule for the guest subnet; (c) document ipfw-off as a host prereq in
+> `bsd-host-setup.md`. NO L3-epair rebuild is required — the shared-bridge + pf
+> per-member design works once ipfw is out of the pfil path.
+>
+> **Corrects the prior FreeBSD-15 (.57) finding**, which reported the same symptom and
+> hypothesized an if_bridge return-path bug. That box almost certainly had the SAME
+> confound (an active ipfw in the pfil path) — the SYN-ACK-drop / dual-member
+> return-path theory below is superseded. Repro versions: FreeBSD 14.3-RELEASE-p2
+> GENERIC amd64, pf.ko + if_bridge.ko + ipfw.ko all loaded, `net.link.bridge.pfil_onlyip=1`.
+
+---
+
+_Original investigation (SUPERSEDED — kept for the trail; the "if_bridge return-path"
+diagnosis was wrong, confounded by ipfw). Read the RESOLVED banner above first._
 
 A pre-existing aeo networking bug on the GhostBSD box: pf decides correctly but
 `if_bridge` fails to carry the verdict onto a bridge member. This is the **one red

@@ -3,6 +3,17 @@
 Tracks the remaining work to make the per-VM `constrain{}` netpolicy *actually
 confine* traffic on the GhostBSD box.
 
+> ## ✅ RESOLVED 2026-07-05 — it was ipfw, not pf. See `docs/if_bridge-pf-delivery-bug.md`.
+> pf's per-member inter-VM deny-default + whitelist WORKS on FreeBSD 14.3. The
+> "inter-VM confinement doesn't complete" symptom below was GhostBSD's
+> default-enabled `ipfw` silently dropping bridged L3 packets in the pfil path, not a
+> pf or if_bridge fault. Proven with a minimal 2-jail repro: with ipfw off the bridge
+> path, the whitelisted flow completes and the non-whitelisted port is blocked
+> (block counter fires). aeo's fix is to keep ipfw off the guest bridge path (driver
+> disable/unload, an ipfw pass for the guest subnet, or a documented host prereq) —
+> NOT the L3-epair topology rebuild the notes below floated. The analysis below is
+> superseded but kept for the trail.
+
 ## ⚠️ UPDATE 2026-06-25 (behavioral test): the design is INCOMPLETE for inter-VM
 
 A live two-guest behavioral test (aeo-base .50 + a cloned testpeer .51, probing

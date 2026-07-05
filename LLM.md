@@ -46,7 +46,7 @@ Linux, a GhostBSD box for FreeBSD):
 | Audit trail (tamper-evident hash chain) | ✅ live — an edited log is caught by `aeo audit` |
 | FreeBSD jail boundary | ✅ live on GhostBSD |
 | rctl resource caps | ✅ live on GhostBSD |
-| pf inter-VM network delivery | ❌ the one red axis — a known if_bridge bug (the Linux per-flow netpolicy sidesteps it) |
+| pf inter-VM network delivery | ✅ live on FreeBSD 14.3 — deny-default + whitelist bites (whitelisted flow completes, non-whitelisted blocked). The old "red axis / if_bridge bug" was a MIS-ATTRIBUTION: GhostBSD's default-enabled `ipfw` was dropping the bridged packet, not pf. Fix = keep ipfw off the guest bridge path (`docs/if_bridge-pf-delivery-bug.md`). |
 
 Drivers all exist and the Linux ones (`containers`/`lxc`/`kvm`) are live-proven
 end-to-end via `aeo up` on Bazzite. The front-door, the actor runtime, the compose
