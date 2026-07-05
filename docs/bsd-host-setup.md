@@ -97,7 +97,7 @@ NOPASSWD sudo, scoped to the tools it needs:
 ```
 paul ALL=(ALL) NOPASSWD: /usr/local/sbin/vm, /usr/sbin/jail, /usr/sbin/jexec, /usr/sbin/jls, /sbin/ifconfig, /sbin/zfs, /sbin/zpool
 paul ALL=(ALL) NOPASSWD: /usr/bin/cu, /usr/sbin/kldload
-paul ALL=(ALL) NOPASSWD: /sbin/pfctl, /usr/sbin/tcpdump, /usr/sbin/service, /usr/sbin/sysctl
+paul ALL=(ALL) NOPASSWD: /sbin/pfctl, /usr/sbin/tcpdump, /usr/sbin/service, /usr/sbin/sysctl, /sbin/sysctl, /usr/bin/rctl
 paul ALL=(ALL) NOPASSWD: /usr/bin/tee, /bin/mkdir
 paul ALL=(ALL) NOPASSWD: /usr/bin/sed
 paul ALL=(ALL) NOPASSWD: /sbin/mdconfig, /sbin/mount, /sbin/umount, /usr/local/bin/fuse-ext2, /sbin/gpart, /usr/local/bin/qemu-img
@@ -154,6 +154,11 @@ expects pf + dnsmasq done manually, which setup-nat.sh does.
 > # OR, if you must keep ipfw: add a pass for the guest subnet BEFORE its denies
 > #   sudo ipfw add 100 allow ip from 172.16.0.0/24 to 172.16.0.0/24
 > ```
+> **aeo does this for you now:** when a BSD node with a `constrain{}` netpolicy comes
+> up, aeo detects an enabled ipfw and WARNS (naming the conflict + this fix); run with
+> **`AEO_IPFW_OFF=1`** and it disables ipfw automatically (needs the `/sbin/sysctl`
+> NOPASSWD grant below). It warns rather than mutating by default — a containment tool
+> must not silently disable a host firewall.
 > Diagnostic when a whitelisted flow still won't complete: `sysctl net.inet.ip.fw.enable`
 > and `kldstat | grep -i fw`. A packet "passed by pf but lost" = a SECOND pfil
 > consumer (ipfw/ipf) is eating it — check that before ever blaming if_bridge again.

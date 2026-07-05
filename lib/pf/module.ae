@@ -22,7 +22,7 @@ import std.string (string_length, string_char_at, string_substring, string_from_
 import std.fs (write_atomic)
 import ipam
 
-exports ( resolve, apply, flush, anchor_name, anchor_path )
+exports ( resolve, apply, flush, anchor_name, anchor_path, ipfw_conflict, ipfw_disable, _ipfw_warning )
 
 // resolve(system, rules) — replace every $<name> token in `rules` with the
 // ipam IP for (system, name). A token is `$` followed by [A-Za-z0-9_]+ (the
@@ -159,6 +159,76 @@ flush(vm: string) -> string {
 
 anchor_name(vm: string) -> string { return "aeo/${vm}" }
 anchor_path(vm: string) -> string { return "/etc/pf.anchors/aeo-${vm}" }
+
+// --- ipfw conflict preflight (the pf-redemption fix) -------------------------
+//
+// GhostBSD (and some FreeBSD installs) ship `ipfw` ENABLED by default. ipfw hooks
+// the SAME pfil framework pf uses, so once bridged guest L3 packets traverse pfil,
+// ipfw — which knows nothing about the guest subnet — SILENTLY DROPS them even
+// though pf passes them. This made the per-VM/jail netpolicy anchor "load but never
+// bite" (root-caused 2026-07-05 with a minimal 2-jail repro; see
+// docs/if_bridge-pf-delivery-bug.md). aeo's pf netpolicy CANNOT enforce while ipfw
+// is filtering the bridge path.
+//
+// Policy: WARN by default (a containment tool must not silently disable a host
+// firewall — same principle as reconcile's alert-not-mutate default). The runner
+// opt-in-disables ipfw when AEO_IPFW_OFF=1.
+
+// ipfw_conflict() — "" if ipfw is not a threat to the netpolicy (disabled or
+// absent), else a human warning string explaining the conflict + the fix. Reads
+// `net.inet.ip.fw.enable` (a plain sysctl -n, no sudo needed for a read).
+ipfw_conflict() -> string {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "sysctl -n net.inet.ip.fw.enable 2>/dev/null")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    return _ipfw_warning(out)
+}
+
+// _ipfw_warning(sysctl_out) — pure: the warning string for a given sysctl reading.
+// "1" (ipfw enabled) -> the warning; anything else ("", "0", sysctl-absent) -> "".
+// Pulled out so the decision is unit-testable without a host.
+_ipfw_warning(sysctl_out: string) -> string {
+    v = _trim_ws(sysctl_out)
+    if v != "1" {
+        return ""
+    }
+    return "ipfw is ENABLED (net.inet.ip.fw.enable=1) — it shares pfil with pf and will SILENTLY DROP bridged guest packets, so this pf netpolicy will load but NOT enforce. Disable ipfw on the guest bridge path: `sudo sysctl net.inet.ip.fw.enable=0` (+ `sysrc firewall_enable=NO`), or run aeo with AEO_IPFW_OFF=1 to have it disabled automatically. See docs/if_bridge-pf-delivery-bug.md."
+}
+
+// ipfw_disable() — the OPT-IN auto-fix (runner calls it only when AEO_IPFW_OFF=1):
+// `sudo -n /sbin/sysctl net.inet.ip.fw.enable=0`. Returns "" on success. Needs the
+// sysctl NOPASSWD grant (docs/bsd-host-setup.md).
+ipfw_disable() -> string {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "sudo -n /sbin/sysctl net.inet.ip.fw.enable=0 >/dev/null 2>&1")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    if status != 0 {
+        return "aeo: could not disable ipfw (need NOPASSWD /sbin/sysctl; see docs/bsd-host-setup.md)"
+    }
+    return ""
+}
+
+// trim leading/trailing whitespace + newline (sysctl -n leaves a trailing \n).
+_trim_ws(s: string) -> string {
+    n = string_length(s)
+    lo = 0
+    while lo < n {
+        c = string_char_at(s, lo)
+        if c != 32 { if c != 10 { if c != 13 { if c != 9 { break } } } }
+        lo = lo + 1
+    }
+    hi = n
+    while hi > lo {
+        c = string_char_at(s, hi - 1)
+        if c != 32 { if c != 10 { if c != 13 { if c != 9 { break } } } }
+        hi = hi - 1
+    }
+    return string_substring(s, lo, hi)
+}
 
 // --- helpers ---
 

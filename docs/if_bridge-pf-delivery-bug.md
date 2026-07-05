@@ -30,11 +30,20 @@
 > Packets:2) ✅; explicitly-passed ICMP works ✅. **The red containment axis is GREEN.**
 >
 > **The fix aeo needs (not a topology rebuild):** ensure `ipfw` is not filtering the
-> guest bridge path. Options, cheapest first: (a) the driver disables ipfw
-> (`net.inet.ip.fw.enable=0`) or unloads it when it owns host networking; (b) add an
-> ipfw pass rule for the guest subnet; (c) document ipfw-off as a host prereq in
-> `bsd-host-setup.md`. NO L3-epair rebuild is required — the shared-bridge + pf
+> guest bridge path. NO L3-epair rebuild is required — the shared-bridge + pf
 > per-member design works once ipfw is out of the pfil path.
+>
+> **NOW CODED (2026-07-05):** `lib/pf` gained `ipfw_conflict()` (probe
+> `net.inet.ip.fw.enable`) + `ipfw_disable()`, wired into the runner's
+> `_enforce_netpolicy`: when a BSD node with a `constrain{}` netpolicy comes up, aeo
+> **warns loudly** if ipfw is on (a containment tool must not silently disable a host
+> firewall — the reconcile alert-not-mutate default), naming the conflict + the fix;
+> with **`AEO_IPFW_OFF=1`** it disables ipfw automatically so the pf anchor bites.
+> Live-proven on FreeBSD 14.3: RUN 1 (ipfw on, no opt-in) warns + leaves ipfw on; RUN 2
+> (`AEO_IPFW_OFF=1`) disables ipfw (`net.inet.ip.fw.enable` 1→0) + loads the anchor.
+> spec_ipfw_preflight.ae (4) locks the pure decision. Needs the `/sbin/sysctl` NOPASSWD
+> grant. (Manual alternative still: `sysctl net.inet.ip.fw.enable=0` + `sysrc
+> firewall_enable=NO`, or an ipfw pass for the guest subnet.)
 >
 > **Corrects the prior FreeBSD-15 (.57) finding**, which reported the same symptom and
 > hypothesized an if_bridge return-path bug. That box almost certainly had the SAME

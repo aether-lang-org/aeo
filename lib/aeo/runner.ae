@@ -1004,6 +1004,22 @@ _enforce_netpolicy(nm: string) {
         }
         return
     }
+    // IPFW PREFLIGHT (the pf-redemption fix): ipfw shares pfil with pf and silently
+    // eats bridged guest packets, so the anchor would load-but-not-bite while ipfw is
+    // on. Warn loudly by default; AEO_IPFW_OFF=1 opts into disabling it.
+    ipfw = pf.ipfw_conflict()
+    if ipfw != "" {
+        if _envc("AEO_IPFW_OFF") == "1" {
+            derr = pf.ipfw_disable()
+            if derr != "" {
+                println("aeo: [${nm}] ${derr}")
+            } else {
+                println("aeo: [${nm}] ipfw disabled on the bridge path (AEO_IPFW_OFF=1) — pf netpolicy can now enforce")
+            }
+        } else {
+            println("aeo: [${nm}] WARNING ${ipfw}")
+        }
+    }
     rules = compose.pf_rules_for(nm)
     err = pf.apply(compose.get_system(nm), nm, rules)
     if err != "" {

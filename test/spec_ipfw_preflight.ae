@@ -1,0 +1,38 @@
+// spec_ipfw_preflight.ae — the ipfw-conflict preflight decision (lib/pf).
+//
+// GhostBSD ships ipfw enabled; it shares pfil with pf and silently drops bridged
+// guest packets, so the pf netpolicy anchor loads but never bites (root-caused
+// 2026-07-05, docs/if_bridge-pf-delivery-bug.md). aeo warns by default; AEO_IPFW_OFF=1
+// disables it. This locks the PURE decision — given a `net.inet.ip.fw.enable` reading,
+// warn or not. The live disable + enforce is proven on a FreeBSD host.
+//
+//   sh test/run-spec.sh test/spec_ipfw_preflight.ae
+
+import aeocha
+import pf (_ipfw_warning)
+import std.string (string_contains)
+
+main() {
+    fw = aeocha.init()
+    aeocha.describe(fw, "lib/pf — ipfw-conflict preflight decision") {
+
+        aeocha.describe("_ipfw_warning — warn iff ipfw is enabled") {
+            aeocha.it("enabled (sysctl=1) -> a warning naming ipfw + the fix") callback {
+                w = _ipfw_warning("1\n")
+                aeocha.expect_int(string_contains(w, "ipfw is ENABLED")).to_equal(1)
+                aeocha.expect_int(string_contains(w, "AEO_IPFW_OFF")).to_equal(1)
+            }
+            aeocha.it("disabled (sysctl=0) -> no warning") callback {
+                aeocha.expect_str(_ipfw_warning("0\n")).to_equal_str("")
+            }
+            aeocha.it("absent / no ipfw (empty sysctl) -> no warning") callback {
+                aeocha.expect_str(_ipfw_warning("")).to_equal_str("")
+            }
+            aeocha.it("tolerates whitespace/newline around the reading") callback {
+                aeocha.expect_int(string_contains(_ipfw_warning("  1 \n"), "ENABLED")).to_equal(1)
+                aeocha.expect_str(_ipfw_warning("  0 \n")).to_equal_str("")
+            }
+        }
+    }
+    aeocha.run_summary(fw)
+}
