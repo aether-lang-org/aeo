@@ -19,13 +19,13 @@
 // All builders are pure string/argv assembly so they can be unit-tested
 // without a daemon; the exec is isolated in up/down/probe.
 
-import std.os (run_capture, os_which, getenv)
+import std.os (run_capture, os_which)
 import std.list
 import std.string (string_length, string_contains, string_char_at, string_substring, string_index_of)
 import std.fs (write_atomic)
 
 exports (
-    name, engine_resolve, kata_runtime_flag,
+    name, engine_resolve,
     up, up_net, up_confined, up_green, alias_move, network_ensure, network_ensure_internal, down, probe, inspect_argv, inspect_state, list_running, extract_argv, extract_facts, image_digest, exec_capture, build, build_entrypoint, built_tag,
     ps_running_argv, ps_all_running_argv, running_names, run_argv, run_argv_net, run_argv_confined, stop_argv, rm_argv, exec_health_argv,
     net_disconnect_argv, net_connect_alias_argv,
@@ -40,14 +40,6 @@ name() -> string {
 // Resolve the container engine binary. `pref` is a preference ("" =
 // auto). Returns the absolute path, or "" if none found.
 engine_resolve(pref: string) -> string {
-    // "kata" is NOT a standalone engine binary — it's an OCI RUNTIME that podman
-    // delegates to (`podman run --runtime <kata>`). So engine("kata") resolves to
-    // PODMAN; the --runtime flag is added separately (kata_runtime_flag). This is why
-    // a Kata container reuses the ENTIRE driver_linux path (confinement, nets, attest,
-    // supervisor adoption) — it IS a podman container, just VM-isolated by the runtime.
-    if pref == "kata" {
-        return os_which("podman")
-    }
     if pref != "" {
         p = os_which(pref)
         return p
@@ -57,21 +49,6 @@ engine_resolve(pref: string) -> string {
         return p
     }
     return os_which("docker")
-}
-
-// kata_runtime_flag(engine_pref) — the `--runtime <kata-runtime>` tokens to splice
-// into a `podman run` when the node declares engine("kata"), else "". The runtime
-// name defaults to `kata` (podman's registered OCI runtime name); AEO_KATA_RUNTIME
-// overrides it (e.g. `kata-runtime`, `io.containerd.kata.v2`, or an absolute path).
-kata_runtime_flag(engine_pref: string) -> string {
-    if engine_pref != "kata" {
-        return ""
-    }
-    rt = getenv("AEO_KATA_RUNTIME")
-    if string_length(rt) == 0 {
-        rt = "kata"
-    }
-    return "--runtime ${rt}"
 }
 
 // --- pure argv builders (one per engine subcommand) ------------------
@@ -470,17 +447,6 @@ up_confined(res_name: string, image: string, cmd: string, expose: int, net: stri
     // Already running? idempotent no-op.
     if probe(res_name, "", engine_pref) == 1 {
         return ""
-    }
-    // engine("kata") -> add `--runtime <kata>` so podman boots the container inside a
-    // Kata microVM (VM isolation, container API). It rides the SAME confine token
-    // splice as everything else — no new argv plumbing.
-    kf = kata_runtime_flag(engine_pref)
-    if string_length(kf) > 0 {
-        if string_length(confine) > 0 {
-            confine = "${kf} ${confine}"
-        } else {
-            confine = kf
-        }
     }
     av = run_argv_confined(res_name, image, cmd, expose, net, env, confine)
     out, status, err = run_capture(eng, av, null)
