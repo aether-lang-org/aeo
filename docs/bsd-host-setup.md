@@ -5,26 +5,38 @@ host. This is the authoritative env-setup record — keep it current as the
 setup evolves.
 
 > ### Re-imaging to a new box / GhostBSD version? Re-check these (NIC + version drift)
-> This doc was written for the .57 box (FreeBSD 15, NIC `re0`). Two other boxes have
+> This doc was written for the .57 box (FreeBSD 15, NIC `re0`). Other boxes have
 > since been used, and the specifics DRIFT per install — before following the steps
 > below, confirm the current values and substitute them:
-> - **Uplink NIC name** — `re0` on .57, but `em0` on the .204 NUC (2026-07-05). Find
+> - **Uplink NIC name** — `re0` on .57, but `em0` on the .204 NUC. Find
 >   it with `netstat -rn -f inet | awk '/^default/{print $NF}'` (or `route -n get default`);
 >   every pf ssh-rail rule and `nat on <NIC>` must use the REAL name.
 > - **FreeBSD version** — `freebsd-version`; the AMD Ryzen guest-boot fix (§5) and pf
->   path (`/sbin/pfctl`) were version-specific once; re-verify on a new base.
-> - **ipfw** — GhostBSD enables it by default; it must be off the guest bridge path
->   (see the ⚠️ box in the pf-anchor section). This is the fix that took the pf
->   containment axis from red to green — do not skip it on a fresh install.
+>   path (`/sbin/pfctl`) were version-specific once; re-verify on a new base. The
+>   base-dev-files and jail-binary footguns below FLIP between 14 and 15 — read §0.
+> - **base dev files (14 vs 15 — they FLIP)** — GhostBSD/FreeBSD **14.3** ships
+>   WITHOUT `/usr/include` + `crt1.o` (must extract from base.txz); GhostBSD 26 /
+>   FreeBSD **15.0** ships WITH them but WITHOUT the `jail`/`jexec`/`jls` base
+>   binaries. Different missing pieces, same fix (extract from base.txz). See §0.
+> - **ipfw** — GhostBSD enables it by default. On the guest BRIDGE path it must be
+>   off (see the ⚠️ box in the pf-anchor section — the pf-redemption fix). On the
+>   JAIL path (shared host stack) the stock GhostBSD kernel is compiled
+>   `IPFIREWALL_DEFAULT_TO_ACCEPT`, so it's default-allow and does NOT block jail
+>   traffic or lock you out — verify with `sudo ipfw list 65535`.
 > - **rctl** — `kern.racct.enable=1` needs `/boot/loader.conf` + a reboot (§ rctl).
 > - **ssh access on a fresh GhostBSD** — desktop installs often offer only
 >   `keyboard-interactive` (not `password`) auth and may firewall inbound; enable sshd
->   + install your pubkey early (see memory `ghostbsd-freebsd14-box`).
+>   + install your pubkey early (see memory `ghostbsd-freebsd14-box`). A fresh
+>   GhostBSD 26 desktop reboot is SLOW to bring sshd up (graphical stack first) —
+>   "Connection refused" for a few minutes post-reboot is normal, not a hang.
 
-Reference box (this doc's original): `paul@192.168.0.57` — GhostBSD on
-**FreeBSD 15.0-RELEASE-p2**, **AMD Ryzen 7 5800U** (Zen 3), ZFS root (`zroot`),
-wired NIC `re0` (192.168.0.57), `wlan0` no-carrier. A second box
-(`paul@192.168.0.204`, FreeBSD 14.3, NIC `em0`) was where pf was redeemed.
+Reference boxes:
+- `paul@192.168.0.57` — GhostBSD on **FreeBSD 15.0-RELEASE-p2**, **AMD Ryzen 7 5800U**
+  (Zen 3), ZFS root (`zroot`), NIC `re0`. The doc's original bhyve host.
+- `paul@192.168.0.204` — reimaged to **GhostBSD 26 / FreeBSD 15.0-RELEASE-p2**
+  (2026-07-07; was FreeBSD 14.3 before), NIC `em0`. Where pf was redeemed (on 14.3)
+  and where the **jails example is live-proven on 15** (`aeo check`/`up`/`suite` all
+  green: two rctl-capped jails boot, the jail boundary contains, teardown is clean).
 
 Versions in use (on .57): bhyve from base (15.0), `vm-bhyve 1.7.3`,
 `edk2-bhyve-g202508` (UEFI firmware), `dnsmasq 2.92`, `qemu 11.0.0`
@@ -32,22 +44,39 @@ Versions in use (on .57): bhyve from base (15.0), `vm-bhyve 1.7.3`,
 
 ---
 
-## 0. Building the ae toolchain + aeo on GhostBSD (4 footguns)
+## 0. Building the ae toolchain + aeo on GhostBSD
 
-GhostBSD is a desktop distro and ships **without the base development files**, so a
-fresh box can't compile anything until you fix that. In order (verified on FreeBSD
-14.3, memory `ae-toolchain-build-freebsd`):
+GhostBSD is a desktop distro that ships a STRIPPED base — but *which* pieces are
+missing **flips between FreeBSD 14 and 15**, so check both before you build:
+
+| piece | GhostBSD/FreeBSD **14.3** | GhostBSD 26 / FreeBSD **15.0** |
+|---|---|---|
+| base dev files (`/usr/include`, `crt1.o`, `libgcc_s`) | **MISSING** — extract from base.txz | **present** ✓ |
+| jail binaries (`jail`/`jexec`/`jls`, `libjail`) | present | **MISSING** — extract from base.txz |
+
+Both gaps have the **same fix** (pull the missing paths out of the matching
+`base.txz`); you just extract different members. Verify each on the box first:
+```sh
+ls /usr/include/stdio.h /usr/lib/crt1.o   # dev files (14.3: absent; 15.0: present)
+ls /usr/sbin/jail                         # jail bin  (14.3: present; 15.0: absent)
+```
 
 ```sh
 # git needs a matching pcre2 (version skew on a fresh box):
 sudo pkg install -y git pcre2 gmake
 git clone https://github.com/aether-lang-org/aether.git   # https, not git@ (no key)
 git clone https://github.com/aether-lang-org/aeo.git
+git clone https://github.com/aether-lang-org/aeb.git      # optional: the build tool
+git clone https://github.com/aether-lang-org/aeocha.git   # REQUIRED for `aeo check/suite`
+                                                          #   (expected as aeo's sibling)
 
-# THE BIG ONE: base dev files are missing (/usr/include empty, no crt1.o/libgcc_s).
-# Fetch the matching base.txz and extract the dev bits:
+# Extract whatever base.txz members THIS version is missing (see the table above):
 fetch https://download.freebsd.org/releases/amd64/$(freebsd-version | sed 's/-p[0-9]*//')/base.txz
+# 14.3 (dev files absent):
 sudo tar -xf base.txz -C / ./usr/include './usr/lib/*' './lib/*'   # a few .so unlink-fails are harmless
+# 15.0 (jail bins absent — needed to run the jails example):
+sudo tar -xf base.txz -C / ./usr/sbin/jail ./usr/sbin/jexec ./usr/sbin/jls \
+                          './lib/libjail*' './usr/lib/libjail*'
 
 # build: GNU make + clang-as-cc (no gcc on FreeBSD)
 cd aether && gmake CC=cc
@@ -58,10 +87,19 @@ cp build/libaether.a ~/.local/lib/aether/
 export PATH=$HOME/.local/bin:$PATH AETHER_HOME=$HOME/.local AE_CC=cc CC=cc  # AE_CC=cc: ae links via gcc by default
 
 cd ../aeo && ae build bin/aeo.ae -o ~/.local/bin/aeo --lib lib   # AE_CC=cc must be set
+# (aeb, if you cloned it, installs its own way:)
+cd ../aeb && gmake install PREFIX=$HOME/.local
 ```
 
-`AE_CC=cc` is load-bearing for every `ae build` / `aeo` invocation (ae shells out to
-`gcc` for the final link otherwise, which fails silently as "Build failed").
+Two env vars are load-bearing at RUN time, not just build time:
+- **`AE_CC=cc`** — ae shells out to `gcc` for the final link otherwise, which fails
+  silently as "Build failed". Needed for every `ae build` / `aeo` invocation.
+- **`AEO_HOME=$HOME/aeo`** — `aeo check`/`up`/`suite` need it pointed at the aeo tree
+  holding `lib/`, else `aeo: AEO_HOME is not set`. (Distinct from `AETHER_HOME`.)
+
+Verified end-to-end on GhostBSD 26 / FreeBSD 15.0 (2026-07-07): **aether 0.361.0**,
+**aeb git v0.226**, and **aeo** all build clean with `gmake CC=cc` / `ae build`;
+`freebsd-version` = `15.0-RELEASE-p2`; base clang is 19.1.7.
 
 ---
 
@@ -221,6 +259,60 @@ they aren't enforced (an `rctl: RACCT disabled` error, surfaced as a non-fatal
 v0 caps **jail** nodes (`jail:<name>` subject); bhyve-VM nodes (a hypervisor
 process) are a later thickening (PID targeting) — aeo says so loudly rather than
 silently skipping. `aeo down` removes the node's rules (`rctl -r jail:<name>`).
+
+## 4c. The jails example — the live-provable BSD path (`silly_addition_jails.ae`)
+
+The jails demo is the **unblocked** BSD containment path: jails share the host
+network stack, so none of the bhyve bridge/NAT/ipfw grief (§4/§5) applies. It's the
+one to reach for to prove a fresh box. Two jails (`db` ← `app`, a dependency edge),
+each with an rctl `limit{}` cap. **Live-proven on GhostBSD 26 / FreeBSD 15.0
+(2026-07-07):**
+
+```sh
+export AEO_HOME=$HOME/aeo AE_CC=cc CC=cc
+# 1) provision the two jail roots (aeo orchestrates a userland it doesn't ship):
+sudo sh test/setup-jail-root.sh db
+sudo sh test/setup-jail-root.sh app
+# 2) the three verbs:
+aeo check examples/silly_addition_jails.ae            # 3 passing (data model, no deploy)
+sudo -E aeo up    examples/silly_addition_jails.ae    # boots 2 jails + applies rctl
+sudo -E aeo suite examples/silly_addition_jails.ae    # deploy + 2 passing + teardown
+sudo -E aeo down  examples/silly_addition_jails.ae    # (if you used `up`)
+```
+Proven at `up`: `jls` lists JID 1 `db` (172.16.0.10) + JID 2 `app` (172.16.0.11);
+`rctl` shows `jail:db:memoryuse:deny=512M`/`maxproc:deny=32` +
+`jail:app:memoryuse:deny=1G`/`maxproc:deny=128` (kernel-enforced); and the boundary
+holds — `jexec db /rescue/ls /` shows only the jail's `bin dev etc rescue tmp`, NOT
+the host's `boot home usr var zroot …`. `suite` tears down cleanly (empty `jls`, zero
+`jail:` rctl rules after).
+
+> ### ⚠️ A persistent jail workload MUST detach its stdio (or `aeo up` busy-spins)
+> aeo boots a jail with `jail -c … persist exec.start=<cmd>`, shelled through
+> `run_capture` (which reads the command's stdout via a pipe). If `exec.start` is a
+> **long-lived** process that keeps fd 1 open (e.g. a bare `while :; do sleep; done`),
+> that inherited descriptor keeps the capture pipe open, so `aeo up` **blocks reading
+> it forever** — and the Aether actor runtime then hot-loops on `sched_yield()`,
+> pegging every core (observed load 15+ on a 4-core box; `procstat -k` shows one thread
+> in `pipe_read`, the rest spinning). PROVEN + fixed on FreeBSD 15 (2026-07-07).
+>
+> **Fix (in the composition):** background the payload and redirect its stdio, so the
+> create call inherits nothing:
+> ```
+> command("/rescue/sh -c '(while :; do /rescue/sleep 60; done) >/dev/null 2>&1 &'")
+> ```
+> `silly_addition_jails.ae` now does this. Any persistent jail payload wants the same
+> — detach descriptors from the `jail -c` capture.
+>
+> (Separately, FreeBSD 15's `/rescue` **dropped `/rescue/true`** — `true` is a shell
+> builtin now — so the old `while /rescue/true; …` form also prints a benign
+> `/rescue/true: not found`. Use `while :;` (builtin), as above. Harmless on 14.x.)
+
+Prereqs recap for this path (all covered above): jail binaries present (§0 — extract
+from base.txz on FreeBSD 15), `kern.racct.enable=1` + reboot for the rctl caps (§4b),
+pool named `zroot` (the example's `dataset("zroot/jails/…")`), and `aeocha` cloned as
+aeo's sibling for the check/suite specs (§0). ipfw needs no attention here — the
+shared-stack jail path isn't governed by the guest-bridge pfil concern, and this
+kernel's ipfw is default-allow anyway.
 
 ## 5. AMD Ryzen guest-boot fix (REQUIRED — patched image)
 

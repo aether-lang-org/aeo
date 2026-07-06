@@ -54,7 +54,12 @@ aeo_orchestration() {
             ip("172.16.0.10")
             // A trivial long-lived workload via the static /rescue shell, so the
             // jail stays up + jls/jexec can probe it. A real op runs a store here.
-            command("/rescue/sh -c 'while /rescue/true; do /rescue/sleep 60; done'")
+            // NOTE the `>/dev/null 2>&1 &`: the workload MUST detach its stdio and
+            // background, else the fd it inherits keeps `jail -c`'s capture pipe open
+            // and `aeo up` blocks reading it forever (the actor runtime then busy-
+            // spins on sched_yield — proven on FreeBSD 15). A persistent jail payload
+            // always wants its descriptors detached from the create call.
+            command("/rescue/sh -c '(while :; do /rescue/sleep 60; done) >/dev/null 2>&1 &'")
             health("/rescue/test -d /")
         }
         // rctl caps: db may use 512M + at most 32 procs. A fork bomb is DENIED by
@@ -68,7 +73,12 @@ aeo_orchestration() {
         app = jail("app") {
             dataset("zroot/jails/app")
             ip("172.16.0.11")
-            command("/rescue/sh -c 'while /rescue/true; do /rescue/sleep 60; done'")
+            // NOTE the `>/dev/null 2>&1 &`: the workload MUST detach its stdio and
+            // background, else the fd it inherits keeps `jail -c`'s capture pipe open
+            // and `aeo up` blocks reading it forever (the actor runtime then busy-
+            // spins on sched_yield — proven on FreeBSD 15). A persistent jail payload
+            // always wants its descriptors detached from the create call.
+            command("/rescue/sh -c '(while :; do /rescue/sleep 60; done) >/dev/null 2>&1 &'")
             health("/rescue/test -d /")
             depends("db")    // app starts after db is up (dependency-ordered)
         }
