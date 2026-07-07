@@ -28,11 +28,17 @@
 // injected cap (the build receives authority), lifecycle supervision, and
 // subcommands — none of which `ae run compose.ae` could provide.
 
-import std.os (run_capture, run_supervised, getenv, argv0)
+import std.os (run_capture, run_supervised, getenv, argv0, os_which)
+import std.os   // bare TOO: without it, lib/host's `platform()` miscompiles into an
+                // undefined `os_platform` when the ENTRY file's std.os import is
+                // selective (the aeocha bare-import class of merge quirk)
+import host (family, profile)
+import driver_linux (engine_resolve)
+import secrets
 import std.fs (write_atomic, mkdir_p)
 import std.list
-import std.string (string_length, string_concat)
-import std.io (stderr_write)
+import std.string (string_length, string_concat, string_trim, string_char_at, string_substring)
+import std.io (stderr_write, println)
 
 extern aether_args_count() -> int
 extern aether_args_get(index: int) -> string
@@ -49,8 +55,8 @@ main() {
     exec_node = ""
     exec_cmd = ""
     if argc == 2 {
-        // `aeo <compose.ae>` is bring-up; BUT `aeo extract` / `aeo inventory` are
-        // no-composition verbs whose single arg IS the command, not a file.
+        // `aeo <compose.ae>` is bring-up; BUT `aeo extract` / `aeo inventory` /
+        // `aeo doctor` are no-composition verbs whose single arg IS the command.
         a1 = aether_args_get(1)
         if a1 == "extract" {
             cmd = "extract"
@@ -58,7 +64,11 @@ main() {
             if a1 == "inventory" {
                 cmd = "inventory"
             } else {
-                compose_path = a1
+                if a1 == "doctor" {
+                    cmd = "doctor"
+                } else {
+                    compose_path = a1
+                }
             }
         }
     } else {
@@ -128,6 +138,21 @@ main() {
         cmd = "dry-run"
     }
 
+    // secrets: key management + seal/unseal — handled right here, no composition
+    // build. arg2 is the action, arg3 the value.
+    //   aeo secrets keygen           mint the key file (0600, idempotent)
+    //   aeo secrets seal [value]     print a sealed envelope (value from argv, or
+    //                                AEO_SECRET_VALUE to keep it off ps/history)
+    //   aeo secrets unseal <env>     print the plaintext (fail-closed)
+    if cmd == "secrets" {
+        exit(_secrets_cmd(compose_path, tag))
+    }
+    // doctor: the host capability report — which kinds can run HERE, what's
+    // missing, and how to fix it. Compose-less like secrets.
+    if cmd == "doctor" {
+        exit(_doctor())
+    }
+
     // extract/inventory walk LIVE host state and need no composition (inventory
     // takes one OPTIONALLY, for its "declared?" column). If none was given, stage an
     // empty stub so the build succeeds and the runner walks the host directly.
@@ -138,7 +163,7 @@ main() {
     }
     if compose_path == "" {
         if stub_compose == 0 {
-            _diag("usage: aeo [up|down|status|check|smoke|suite|dry-run|snapshot|rollback|exec|restart|cutover|backup|prune|audit|pasta|reconcile|watch|apply-node|extract|inventory] <compose.ae> [tag|node cmd...]")
+            _diag("usage: aeo [up|down|status|check|smoke|suite|dry-run|snapshot|rollback|exec|restart|cutover|backup|prune|audit|pasta|reconcile|watch|apply-node|extract|inventory] <compose.ae> [tag|node cmd...]  |  aeo doctor  |  aeo secrets keygen|seal|unseal")
             exit(2)
         }
     }
@@ -168,70 +193,110 @@ main() {
     if string_length(work) == 0 {
         work = "/tmp/aeo-build"
     }
-    _ = _rmrf(work)
-    _ = mkdir_p(work)
-    libdst = string_concat(work, "/lib")
 
-    // cp -r $AEO_HOME/lib/. $work/lib   (shell out — aeo shells freely)
-    if _cp_r(string_concat(home, "/lib"), libdst) != 0 {
-        _diag("aeo: failed to stage lib/ from ${home}")
-        exit(1)
-    }
-    // Install the operator's compose.ae as the aeo_compose module. For a
-    // no-composition extract/inventory, write an empty stub so the build succeeds
-    // (the runner then walks live host state directly).
-    cmpdir = string_concat(libdst, "/aeo_compose")
-    _ = mkdir_p(cmpdir)
+    // --- build cache: skip the restage+recompile when NOTHING changed ---
+    // Every invocation used to pay the full stage (rm -rf + cp lib) + `ae
+    // build` — seconds of latency on every `aeo status` in a watch loop. Now a
+    // content hash over ALL build inputs — the compose file, every file under
+    // $AEO_HOME/lib (runner included), and the `ae` toolchain version — is
+    // compared against the cached build's recorded hash; on a match the staged
+    // binary is reused as-is. This is NOT a build-graph cache (that's aeb's
+    // line): it is one artifact keyed on the full input closure, so it can
+    // never serve a stale mix (the `ae run` staleness bug run-spec.sh dodges).
+    // A stub composition (extract/inventory) hashes /dev/null — its staged
+    // module is a constant. AEO_REBUILD=1 forces; hashing unavailable -> build.
+    hash_src = compose_path
     if stub_compose == 1 {
-        stub = "exports ( aeo_orchestration )\naeo_orchestration() { }\n"
-        _ = write_atomic(string_concat(cmpdir, "/module.ae"), stub, string_length(stub))
-    } else {
-        if _cp(compose_path, string_concat(cmpdir, "/module.ae")) != 0 {
-            _diag("aeo: cannot read compose file '${compose_path}'")
-            exit(1)
+        hash_src = "/dev/null"
+    }
+    inputs_hash = _inputs_hash(home, hash_src)
+    force = getenv("AEO_REBUILD")
+    cached = 0
+    if string_length(inputs_hash) > 0 {
+        if string_length(force) == 0 {
+            if _cache_fresh(work, inputs_hash) == 1 {
+                cached = 1
+            }
         }
     }
-    // Copy the fixed runner to a top-level run.ae (entry outside lib/).
-    if _cp(string_concat(home, "/lib/aeo/runner.ae"), string_concat(work, "/run.ae")) != 0 {
-        _diag("aeo: missing runner at ${home}/lib/aeo/runner.ae")
-        exit(1)
-    }
 
-    // --- build ---
-    // Build to a `.new` path, then rename onto `bin`. Reason: `ae build -o
-    // X` followed by an immediate exec of X fails ETXTBSY (exit 127) —
-    // the linker child still holds a write handle to X when run_supervised
-    // tries to exec it. Rename gives the exec a fresh inode the build
-    // never touched. (Found the hard way; see memory.)
+    if cached == 1 {
+        _diag("aeo: composition unchanged — using cached build")
+    } else {
+        // Clear the staging dir first: staging into a leftover dir from a prior
+        // run would mix compositions (the previous operator's aeo_compose module
+        // + a cached aeo-run binary would leak into this run). Start clean.
+        _ = _rmrf(work)
+        _ = mkdir_p(work)
+        libdst = string_concat(work, "/lib")
+
+        // cp -r $AEO_HOME/lib/. $work/lib   (shell out — aeo shells freely)
+        if _cp_r(string_concat(home, "/lib"), libdst) != 0 {
+            _diag("aeo: failed to stage lib/ from ${home}")
+            exit(1)
+        }
+        // Install the operator's compose.ae as the aeo_compose module. For a
+        // no-composition extract/inventory, write an empty stub so the build succeeds
+        // (the runner then walks live host state directly).
+        cmpdir = string_concat(libdst, "/aeo_compose")
+        _ = mkdir_p(cmpdir)
+        if stub_compose == 1 {
+            stub = "exports ( aeo_orchestration )\naeo_orchestration() { }\n"
+            _ = write_atomic(string_concat(cmpdir, "/module.ae"), stub, string_length(stub))
+        } else {
+            if _cp(compose_path, string_concat(cmpdir, "/module.ae")) != 0 {
+                _diag("aeo: cannot read compose file '${compose_path}'")
+                exit(1)
+            }
+        }
+        // Copy the fixed runner to a top-level run.ae (entry outside lib/).
+        if _cp(string_concat(home, "/lib/aeo/runner.ae"), string_concat(work, "/run.ae")) != 0 {
+            _diag("aeo: missing runner at ${home}/lib/aeo/runner.ae")
+            exit(1)
+        }
+
+        // --- build ---
+        // Build to a `.new` path, then rename onto `bin`. Reason: `ae build -o
+        // X` followed by an immediate exec of X fails ETXTBSY (exit 127) —
+        // the linker child still holds a write handle to X when run_supervised
+        // tries to exec it. Rename gives the exec a fresh inode the build
+        // never touched. (Found the hard way; see memory.)
+        binnew = string_concat(work, "/aeo-run.new")
+        bav = list_new()
+        list_add(bav, "build")
+        list_add(bav, string_concat(work, "/run.ae"))
+        list_add(bav, "-o")
+        list_add(bav, binnew)
+        list_add(bav, "--lib")
+        list_add(bav, libdst)
+        _diag("aeo: building composition")
+        bout, bstatus, berr = run_capture("ae", bav, null)
+        list_free(bav)
+        if berr != "" {
+            _diag("aeo: build spawn failed: ${berr}")
+            exit(1)
+        }
+        if bstatus != 0 {
+            _diag("aeo: composition failed to build:")
+            _diag(bout)
+            exit(1)
+        }
+        // Recompute the paths: binnew was passed to list_add above and
+        // list_free(bav) released that shared buffer, so the original binnew
+        // now dangles (heap-string-into-list ownership — aeb/LLM.md). Fresh
+        // concats for the rename.
+        if _mv(string_concat(work, "/aeo-run.new"), string_concat(work, "/aeo-run")) != 0 {
+            _diag("aeo: failed to finalize built binary")
+            exit(1)
+        }
+        // Record the inputs hash LAST — a hash file only ever describes a
+        // completed build (a failed/interrupted build leaves no hash, so the
+        // next run rebuilds). "" hash (no sha tool) records nothing.
+        if string_length(inputs_hash) > 0 {
+            _werr = write_atomic("${work}/.aeo-inputs-hash", inputs_hash, string_length(inputs_hash))
+        }
+    }
     bin = string_concat(work, "/aeo-run")
-    binnew = string_concat(work, "/aeo-run.new")
-    bav = list_new()
-    list_add(bav, "build")
-    list_add(bav, string_concat(work, "/run.ae"))
-    list_add(bav, "-o")
-    list_add(bav, binnew)
-    list_add(bav, "--lib")
-    list_add(bav, libdst)
-    _diag("aeo: building composition")
-    bout, bstatus, berr = run_capture("ae", bav, null)
-    list_free(bav)
-    if berr != "" {
-        _diag("aeo: build spawn failed: ${berr}")
-        exit(1)
-    }
-    if bstatus != 0 {
-        _diag("aeo: composition failed to build:")
-        _diag(bout)
-        exit(1)
-    }
-    // Recompute the paths: binnew was passed to list_add above and
-    // list_free(bav) released that shared buffer, so the original binnew
-    // now dangles (heap-string-into-list ownership — aeb/LLM.md). Fresh
-    // concats for the rename.
-    if _mv(string_concat(work, "/aeo-run.new"), string_concat(work, "/aeo-run")) != 0 {
-        _diag("aeo: failed to finalize built binary")
-        exit(1)
-    }
 
     // --- run supervised, passing the subcommand via AEO_CMD ---
     // run_supervised inherits our env; we set AEO_CMD for the child. Own
@@ -308,6 +373,277 @@ main() {
         exit(code)
     }
     exit(code)
+}
+
+// aeo secrets <action> [value] — the operator door to lib/secrets. Envelope /
+// plaintext go to STDOUT (data); everything else to stderr. Returns exit code.
+_secrets_cmd(action: string, value: string) -> int {
+    if action == "keygen" {
+        path, kerr = secrets.keygen()
+        if kerr != "" {
+            _diag(kerr)
+            return 1
+        }
+        _diag("aeo: secrets key ready at ${path} (0600; existing key kept)")
+        return 0
+    }
+    if action == "seal" {
+        v = value
+        if string_length(v) == 0 {
+            v = getenv("AEO_SECRET_VALUE")
+        }
+        if string_length(v) == 0 {
+            _diag("usage: aeo secrets seal <value>   (or AEO_SECRET_VALUE=... aeo secrets seal)")
+            return 2
+        }
+        env, serr = secrets.seal_value(v)
+        if serr != "" {
+            _diag(serr)
+            return 1
+        }
+        println(env)
+        return 0
+    }
+    if action == "unseal" {
+        if string_length(value) == 0 {
+            _diag("usage: aeo secrets unseal <envelope>")
+            return 2
+        }
+        plain, uerr = secrets.unseal_value(value)
+        if uerr != "" {
+            _diag(uerr)
+            return 1
+        }
+        println(plain)
+        return 0
+    }
+    _diag("aeo: unknown secrets action '${action}' (want keygen|seal|unseal)")
+    return 2
+}
+
+// --- doctor ---------------------------------------------------------------------
+
+// aeo doctor — report, per kind, whether THIS host can run it and what's
+// missing if not. The interactive twin of the eval-time fast-fail gate: the
+// gate refuses an impossible composition loudly; doctor answers "what CAN I
+// write here?" before a composition exists. All checks are local + fast.
+_doctor() -> int {
+    println("aeo doctor — host capability report")
+    hp = profile()
+    println("  ${hp}")
+    fam = family()
+    eng = engine_resolve("")
+    if string_length(eng) > 0 {
+        println("  container engine: ${eng}")
+    } else {
+        println("  container engine: NONE (install podman or docker)")
+    }
+    println("")
+    println("  kind         verdict")
+    _verdict_engine("container", eng)
+    _verdict_linux_bin("lxc", "lxc-create", fam, "install lxc")
+    _verdict_kvm(fam)
+    _verdict_linux_bin("bwrap", "bwrap", fam, "apt/dnf install bubblewrap")
+    _verdict_linux_bin("nspawn", "systemd-nspawn", fam, "systemd host required")
+    _verdict_fc(fam)
+    _verdict_linux_bin("kata", "nerdctl", fam, "install nerdctl + kata (containerd shim-v2)")
+    _verdict_bsd("jail", fam)
+    _verdict_bsd("bhyve", fam)
+    println("")
+    k = secrets.load_key()
+    if string_length(k) > 0 {
+        kp = secrets.key_path()
+        println("  secrets: key present (${kp})")
+    } else {
+        println("  secrets: no key — run `aeo secrets keygen` to enable sealed values")
+    }
+    return 0
+}
+
+_verdict_engine(kind: string, eng: string) {
+    if string_length(eng) > 0 {
+        println("  ${_pad(kind)} OK  via ${eng}")
+    } else {
+        println("  ${_pad(kind)} --  no container engine on PATH (install podman or docker)")
+    }
+}
+_verdict_linux_bin(kind: string, binname: string, fam: string, hint: string) {
+    if fam != "linux" {
+        println("  ${_pad(kind)} --  needs a Linux host")
+        return
+    }
+    p = _which(binname)
+    if string_length(p) > 0 {
+        println("  ${_pad(kind)} OK  via ${p}")
+    } else {
+        println("  ${_pad(kind)} --  ${binname} not found (${hint})")
+    }
+}
+_verdict_kvm(fam: string) {
+    if fam != "linux" {
+        println("  ${_pad2()} --  needs a Linux host")
+        return
+    }
+    q = _which("qemu-system-x86_64")
+    if string_length(q) == 0 {
+        println("  ${_pad2()} --  qemu-system-x86_64 not found (install qemu)")
+        return
+    }
+    if _path_exists("/dev/kvm") == 0 {
+        println("  ${_pad2()} --  /dev/kvm missing (no KVM on this kernel)")
+        return
+    }
+    println("  ${_pad2()} OK  via ${q}")
+}
+_pad2() -> string {
+    return _pad("kvm")
+}
+_verdict_fc(fam: string) {
+    kind = "firecracker"
+    if fam != "linux" {
+        println("  ${_pad(kind)} --  needs a Linux host")
+        return
+    }
+    f = _which("firecracker")
+    if string_length(f) == 0 {
+        println("  ${_pad(kind)} --  firecracker not found")
+        return
+    }
+    if _path_exists("/dev/kvm") == 0 {
+        println("  ${_pad(kind)} --  /dev/kvm missing (no KVM on this kernel)")
+        return
+    }
+    println("  ${_pad(kind)} OK  via ${f}")
+}
+_verdict_bsd(kind: string, fam: string) {
+    if fam == "bsd" {
+        println("  ${_pad(kind)} OK  FreeBSD host")
+    } else {
+        println("  ${_pad(kind)} --  needs a FreeBSD host")
+    }
+}
+
+// left-pad a kind name to a fixed column (12 chars).
+_pad(k: string) -> string {
+    out = k
+    while string_length(out) < 12 {
+        out = "${out} "
+    }
+    return out
+}
+
+// NULL-SAFE which: os_which returns null (not "") for a missing binary.
+_which(binname: string) -> string {
+    p = os_which(binname)
+    if p == null {
+        return ""
+    }
+    return p
+}
+
+_path_exists(p: string) -> int {
+    av = list_new()
+    list_add(av, "-e")
+    list_add(av, p)
+    out, status, err = run_capture("/bin/test", av, null)
+    list_free(av)
+    if err != "" {
+        return 0
+    }
+    if status == 0 {
+        return 1
+    }
+    return 0
+}
+
+// --- build-cache helpers -----------------------------------------------------
+
+// Content hash of the FULL build-input closure: the compose file, EVERY file
+// under $AEO_HOME/lib (runner + all modules), and the `ae` toolchain version —
+// one shell pipeline. Covering the whole closure is what makes the cache safe:
+// any lib edit, compose edit, or toolchain bump changes the hash and forces a
+// rebuild (the staleness class the `ae run` cache had). Returns "" when no sha
+// tool is available — the caller then always rebuilds (fail-open to
+// correctness, never to staleness).
+//
+// NB the command string is escape-free ON PURPOSE: inside an INTERPOLATED
+// Aether string, `\\n` collapses to a real newline (unlike a plain string,
+// where it stays a literal backslash-n) — a `tr '\\n' ...` here shipped a
+// broken quote to the shell. No backslashes, no problem; lib paths are
+// repo-controlled (no spaces), so plain `xargs cat` is fine.
+_inputs_hash(home: string, compose_path: string) -> string {
+    tool = _sha_tool()
+    if string_length(tool) == 0 {
+        return ""
+    }
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "{ cat \"${compose_path}\"; find \"${home}/lib\" -type f | LC_ALL=C sort | xargs cat; ae --version; } 2>/dev/null | ${tool}")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    if err != "" {
+        return ""
+    }
+    if status != 0 {
+        return ""
+    }
+    return _first_field(string_trim(out))
+}
+
+// The host's SHA-256 pipe command: coreutils `sha256sum` (Linux), else
+// `shasum -a 256` (macOS/BSD perl shasum). "" if neither exists.
+_sha_tool() -> string {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "command -v sha256sum >/dev/null 2>&1 && echo sha256sum && exit 0; command -v shasum >/dev/null 2>&1 && echo shasum-a256; exit 0")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    if err != "" {
+        return ""
+    }
+    got = string_trim(out)
+    if got == "sha256sum" {
+        return "sha256sum"
+    }
+    if got == "shasum-a256" {
+        return "shasum -a 256"
+    }
+    return ""
+}
+
+// First whitespace-delimited field of `s` ("HEX  -" -> "HEX").
+_first_field(s: string) -> string {
+    i = 0
+    n = string_length(s)
+    while i < n {
+        if string_char_at(s, i) == 32 {
+            return string_substring(s, 0, i)
+        }
+        i = i + 1
+    }
+    return s
+}
+
+// 1 iff the staged binary exists AND its recorded inputs hash matches `want`.
+// One quiet shell: the recorded hash prints only when the binary is present,
+// so a half-built dir (binary missing, stale hash file) can never hit.
+_cache_fresh(work: string, want: string) -> int {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "test -x \"${work}/aeo-run\" && cat \"${work}/.aeo-inputs-hash\" 2>/dev/null")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    if err != "" {
+        return 0
+    }
+    if status != 0 {
+        return 0
+    }
+    got = string_trim(out)
+    if got == want {
+        return 1
+    }
+    return 0
 }
 
 // Diagnostic line -> stderr (NOT stdout). The front-door rebuilds the

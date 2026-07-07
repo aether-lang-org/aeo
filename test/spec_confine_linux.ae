@@ -25,6 +25,22 @@ main() {
                 aeocha.expect_str(_kv_value("memoryuse=1G, maxproc=8", "maxproc")).to_equal_str("8")
                 aeocha.expect_str(_kv_value("memoryuse=1G", "maxproc")).to_equal_str("")
             }
+            aeocha.it("pcpu (rctl %) renders to --cpus cores, integer math") callback {
+                aeocha.expect_str(cgroup_flags("pcpu=150")).to_equal_str("--cpus 1.5")
+                aeocha.expect_str(cgroup_flags("pcpu=100")).to_equal_str("--cpus 1")
+                aeocha.expect_str(cgroup_flags("pcpu=50")).to_equal_str("--cpus 0.5")
+                aeocha.expect_str(cgroup_flags("pcpu=25")).to_equal_str("--cpus 0.25")
+                aeocha.expect_str(cgroup_flags("pcpu=5")).to_equal_str("--cpus 0.05")
+                aeocha.expect_str(cgroup_flags("pcpu=175")).to_equal_str("--cpus 1.75")
+            }
+            aeocha.it("bogus pcpu renders NO cpu flag (never a garbage cap)") callback {
+                aeocha.expect_str(cgroup_flags("pcpu=abc")).to_equal_str("")
+                aeocha.expect_str(cgroup_flags("pcpu=0")).to_equal_str("")
+            }
+            aeocha.it("pcpu composes with the other caps") callback {
+                got = cgroup_flags("memoryuse=512M, pcpu=150, maxproc=32")
+                aeocha.expect_str(got).to_equal_str("--memory 512M --pids-limit 32 --cpus 1.5")
+            }
         }
 
         aeocha.describe("axis 2 — seccomp/cap-drop (the Capsicum peer)") {

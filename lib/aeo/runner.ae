@@ -19,6 +19,9 @@
 
 import std.config
 import std.string (string_length, string_substring, string_index_of, string_char_at, string_from_char, string_starts_with)
+import std.string   // bare TOO: the compiler emits qualified `string.copy` for
+                    // some string-return/copy shapes, and a selective-only
+                    // import leaves it unresolved (the aeocha bare-import class)
 import std.list
 import driver_linux
 import driver_lxc
@@ -42,6 +45,7 @@ import extract
 import transport_http (post_path, probe_health)
 import attest
 import audit
+import secrets
 import resource (set_state, get_state, STATE_DOWN, STATE_BOOTING, STATE_UP, STATE_FAILED)
 import host (family, profile)
 import aeo_compose (aeo_orchestration)
@@ -1079,63 +1083,390 @@ _enforce_limits(nm: string) {
 }
 
 // ---- teardown engine ----
-// Reverse declaration order: the last-declared (most-dependent) tier stops
-// first, the first-declared (its dependency) stops last.
+// LEVEL-PARALLEL teardown — the reverse mirror of run_up. Nodes are processed
+// in REVERSE topological levels (most-dependent first), computed over BOTH
+// edges a node can have: its depends() chain AND its containment host (a
+// nested node always tears down a level before its guest). Same invariant the
+// old reverse-declaration walk gave — every dependent is gone before its
+// dependency is halted — minus the serialization. Within a level:
+//   1. per-node BSD cleanup first (pf anchor flush + rctl cap removal) —
+//      fast, best-effort, unchanged;
+//   2. engine containers are halted in ONE parallel sweep per engine
+//      (driver_linux.down_many): the per-container stop grace is paid once
+//      per LEVEL, not once per node (measured 15.6s -> 6.3s at width 3);
+//   3. every other kind fans out its actor Halt (per-node behaviour
+//      byte-for-byte unchanged — sudo-gated downs stay per-node);
+//   4. wait_for_idle() is the LEVEL BARRIER (state can't be — Configure sets
+//      STATE_DOWN before Halt even runs);
+//   5. ONE level poller verifies disappearance — the without() windows run
+//      CONCURRENTLY, so a level of lingering nodes costs max(window), not sum.
 run_down() {
     n = compose.count()
-    i = n - 1
-    while i >= 0 {
-        nm = compose.name_at(i)
-        // Drop this VM's pf anchor BEFORE halting it, so no stale deny rules
-        // outlive the node (its address returns to the ipam pool). FreeBSD-only
-        // + best-effort: a flush failure doesn't block teardown.
-        if compose.get_netpolicy(nm) != "" {
-            if host.family() == "bsd" {
-                _fe = pf.flush(nm)
-            }
+    maxd = 0
+    i = 0
+    while i < n {
+        d = _teardown_depth(compose.name_at(i))
+        if d > maxd {
+            maxd = d
         }
-        // Drop this node's rctl caps too (jail subject), so a torn-down node's
-        // limits don't linger. Best-effort, FreeBSD-only.
-        if compose.get_rctl(nm) != "" {
-            if host.family() == "bsd" {
-                if compose.get_kind(nm) == "jail" {
-                    _re = rctl.remove(nm, "jail")
+        i = i + 1
+    }
+    lvl = maxd
+    while lvl >= 0 {
+        halted = list_new()
+        i = n - 1
+        while i >= 0 {             // reverse declaration order within the level
+            nm = compose.name_at(i)
+            if _teardown_depth(nm) == lvl {
+                // Drop this node's pf anchor BEFORE halting it, so no stale deny
+                // rules outlive the node (its address returns to the ipam pool).
+                // FreeBSD-only + best-effort: a flush failure doesn't block teardown.
+                if compose.get_netpolicy(nm) != "" {
+                    if host.family() == "bsd" {
+                        _fe = pf.flush(nm)
+                    }
                 }
+                // Drop its rctl caps too (jail subject) — best-effort, FreeBSD-only.
+                if compose.get_rctl(nm) != "" {
+                    if host.family() == "bsd" {
+                        if compose.get_kind(nm) == "jail" {
+                            _re = rctl.remove(nm, "jail")
+                        }
+                    }
+                }
+                if _engine_downable(nm) == 0 {
+                    a = spawn(Resource())
+                    a ! Configure { in_name: nm, in_kind: compose.get_kind(nm) }
+                    a ! Halt {}
+                }
+                _ = list_add(halted, nm)
             }
+            i = i - 1
         }
-        a = spawn(Resource())
-        a ! Configure { in_name: nm, in_kind: compose.get_kind(nm) }
-        a ! Halt {}
-        _await_down(nm, 60)
-        // without(d): the FluentSelenium retry-until-GONE twin. After Halt flips
-        // aeo's own state, VERIFY the node actually disappeared (driver probe stops
-        // finding it), waiting up to the declared window. A node that lingers past
-        // it is reported — teardown is no longer fire-and-assume.
-        _await_gone(nm, compose.get_kind(nm), compose.get_without_ms(nm))
-        i = i - 1
+        // (2) one parallel sweep per DISTINCT engine among the level's
+        // engine-downable nodes; down_many blocks until every stop+rm in the
+        // sweep completed (`wait`), so those nodes are DOWN when it returns.
+        _down_engine_groups(halted)
+        // (3) BARRIER: drain the level's actor Halts before the next (lower)
+        // level is touched. NB state can't be the barrier — Configure sets
+        // STATE_DOWN immediately, before Halt even runs — but wait_for_idle
+        // blocks until every dispatched handler (each driver_down) completed.
+        wait_for_idle()
+        // (4) verify the whole level's disappearance concurrently.
+        _await_level_gone(halted)
+        list_free(halted)
+        lvl = lvl - 1
     }
     wait_for_idle()
 }
 
-// _await_gone — poll until the node is genuinely gone (driver_probe == 0), up to
-// `window_ms`. window 0 (no without() declared) -> skip (back-compat: the old
-// state-flip teardown). A node still present at the deadline is logged loudly.
-_await_gone(nm: string, k: string, window_ms: int) {
-    if window_ms <= 0 {
+// Topological teardown depth of `nm`: 1 + max over its two possible parent
+// edges (depends() target, containment host), 0 with neither. Bounded by the
+// node count (eval-time gating already rejects self/undeclared deps; a
+// malformed cycle saturates the guard instead of looping).
+_teardown_depth(nm: string) -> int {
+    return _td_depth(nm, compose.count() + 1)
+}
+_td_depth(nm: string, guard: int) -> int {
+    if guard <= 0 {
+        return 0
+    }
+    d = 0
+    dep = compose.get_depends(nm)
+    if dep != "" {
+        dd = _td_depth(dep, guard - 1) + 1
+        if dd > d {
+            d = dd
+        }
+    }
+    h = compose.get_host(nm)
+    if h != "" {
+        hd = _td_depth(h, guard - 1) + 1
+        if hd > d {
+            d = hd
+        }
+    }
+    return d
+}
+
+// 1 iff `nm` tears down through driver_linux's shared container engine
+// (driver_down's container/default arm with a podman/docker-class engine) —
+// the nodes down_many can sweep in one call. Dedicated-driver kinds and the
+// Windows-engine containers (wslc / wsl_podman) stay per-node.
+_engine_downable(nm: string) -> int {
+    k = compose.get_kind(nm)
+    if k != "container" {
+        if _kind_has_driver(k) == 1 {
+            return 0
+        }
+        return 1                        // unknown kind -> driver_linux default arm
+    }
+    eng = compose.get_engine(nm)
+    if eng == "wslc" {
+        return 0
+    }
+    if eng == "wsl_podman" {
+        return 0
+    }
+    return 1
+}
+
+// 1 iff `k` has a dedicated (non-container-engine) driver arm in driver_down.
+_kind_has_driver(k: string) -> int {
+    if k == "jail" {
+        return 1
+    }
+    if k == "bhyve" {
+        return 1
+    }
+    if k == "kvm" {
+        return 1
+    }
+    if k == "lxc" {
+        return 1
+    }
+    if k == "bwrap" {
+        return 1
+    }
+    if k == "nspawn" {
+        return 1
+    }
+    if k == "firecracker" {
+        return 1
+    }
+    if k == "kata" {
+        return 1
+    }
+    return 0
+}
+
+// (2) of run_down: sweep the level's engine-downable nodes, one down_many per
+// DISTINCT engine preference, then record their state (no actor did it).
+_down_engine_groups(halted: ptr) {
+    m = list_size(halted)
+    prefs = list_new()
+    i = 0
+    while i < m {
+        nm = list_get_raw(halted, i)
+        if _engine_downable(nm) == 1 {
+            pref = compose.get_engine(nm)
+            if _list_has(prefs, pref) == 0 {
+                _ = list_add(prefs, pref)
+            }
+        }
+        i = i + 1
+    }
+    p = 0
+    np = list_size(prefs)
+    while p < np {
+        names = _names_for_pref(halted, prefs, p)
+        if string_length(names) > 0 {
+            derr = _down_many_for_pref(names, prefs, p)
+            if derr != "" {
+                println("aeo: batch teardown: ${derr}")
+            }
+        }
+        p = p + 1
+    }
+    list_free(prefs)
+    i = 0
+    while i < m {
+        nm = list_get_raw(halted, i)
+        if _engine_downable(nm) == 1 {
+            set_state(nm, STATE_DOWN())
+        }
+        i = i + 1
+    }
+}
+
+// space-joined engine-downable node names matching the p-th engine pref.
+// (list_get results only ever flow as raw ptrs into string params — never
+// interpolated: the list_get footgun.)
+_names_for_pref(halted: ptr, prefs: ptr, p: int) -> string {
+    pref = list_get_raw(prefs, p)
+    names = ""
+    m = list_size(halted)
+    i = 0
+    while i < m {
+        nm = list_get_raw(halted, i)
+        if _engine_downable(nm) == 1 {
+            if _eq(compose.get_engine(nm), pref) == 1 {
+                names = _sp_join(names, nm)
+            }
+        }
+        i = i + 1
+    }
+    return names
+}
+_down_many_for_pref(names: string, prefs: ptr, p: int) -> string {
+    pref = list_get_raw(prefs, p)
+    return driver_linux.down_many(names, pref)
+}
+
+// membership test over a string list (raw ptrs passed as string params).
+_list_has(lst: ptr, s: string) -> int {
+    n = list_size(lst)
+    i = 0
+    while i < n {
+        if _eq(list_get_raw(lst, i), s) == 1 {
+            return 1
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+_sp_join(acc: string, piece: string) -> string {
+    if string_length(acc) == 0 {
+        return piece
+    }
+    return "${acc} ${piece}"
+}
+
+// _await_level_gone — the without(d) retry-until-GONE verification for a whole
+// level in ONE poller. Per-node window semantics preserved: a node with no
+// without() is skipped (back-compat) — except engine-swept nodes, which get a
+// small floor window so a failed rm still surfaces (their per-node stop/rm
+// output was discarded; this is the honest failure detector). Engine nodes are
+// gone-checked against ONE `ps` per engine per tick (the _alive_set shape);
+// everything else keeps its per-node driver probe. A node still present at its
+// deadline is reported loudly — teardown is not fire-and-assume.
+_await_level_gone(halted: ptr) {
+    m = list_size(halted)
+    budget = 0
+    i = 0
+    while i < m {
+        w = _gone_window(list_get_raw(halted, i))
+        if w > budget {
+            budget = w
+        }
+        i = i + 1
+    }
+    if budget <= 0 {
         return
     }
     waited = 0
     step = 250
-    while waited < window_ms {
-        // probe with no health string: 1 if still up/present, 0 if gone.
-        if driver_probe(nm, k, "") == 0 {
-            println("aeo: [${nm}] gone (verified within without window)")
+    while waited < budget {
+        alive = _gone_alive_set(halted)
+        pending = 0
+        i = 0
+        while i < m {
+            nm = list_get_raw(halted, i)
+            if _gone_state(nm) == 0 {          // not yet verified/skipped
+                w = _gone_window(nm)
+                gone = 0
+                if _engine_gonecheckable(nm) == 1 {
+                    if string_index_of(alive, " ${nm} ") < 0 {
+                        gone = 1
+                    }
+                } else {
+                    if driver_probe(nm, compose.get_kind(nm), "") == 0 {
+                        gone = 1
+                    }
+                }
+                if gone == 1 {
+                    _mark_gone(nm)
+                    println("aeo: [${nm}] gone (verified within without window)")
+                } else {
+                    if waited + step >= w {
+                        // this node's own window is exhausted — report + stop
+                        // polling it; the level keeps verifying the others.
+                        _mark_gone(nm)
+                        println("aeo: [${nm}] WARNING still present after without window (${string_from_int(w)}ms) — lingering")
+                    } else {
+                        pending = 1
+                    }
+                }
+            }
+            i = i + 1
+        }
+        if pending == 0 {
             return
         }
         sleep(step)
         waited = waited + step
     }
-    println("aeo: [${nm}] WARNING still present after without window (${string_from_int(window_ms)}ms) — lingering")
+}
+
+// A node's gone-verification window: its declared without() ms; engine-swept
+// nodes get a 2s floor (failure visibility), non-engine nodes without a
+// without() keep the old skip (window 0).
+_gone_window(nm: string) -> int {
+    w = compose.get_without_ms(nm)
+    if _engine_downable(nm) == 1 {
+        if w < 2000 {
+            w = 2000
+        }
+    }
+    return w
+}
+
+// gone-verified bookkeeping via the config bridge (main-side state, like
+// set_state). 0 = still pending, 1 = verified or reported.
+_gone_state(nm: string) -> int {
+    if config.get("aeo.gone.${nm}") == "1" {
+        return 1
+    }
+    // window-0 non-engine nodes are "skipped" — treat as verified silently.
+    if _gone_window(nm) <= 0 {
+        return 1
+    }
+    return 0
+}
+_mark_gone(nm: string) {
+    config.put("aeo.gone.${nm}", "1")
+}
+
+// 1 iff `nm` can be gone-checked from the batched engine `ps` — engine-downable
+// AND top-level (a NESTED container's probe goes through the guest's agent, so
+// it keeps the per-node driver_probe path).
+_engine_gonecheckable(nm: string) -> int {
+    if _engine_downable(nm) == 0 {
+        return 0
+    }
+    if compose.get_host(nm) != "" {
+        return 0
+    }
+    return 1
+}
+
+// The " a b c "-padded set of still-running engine containers relevant to this
+// level — ONE `ps` per DISTINCT engine present, per tick (the teardown twin of
+// _alive_set).
+_gone_alive_set(halted: ptr) -> string {
+    s = " "
+    m = list_size(halted)
+    prefs = list_new()
+    i = 0
+    while i < m {
+        nm = list_get_raw(halted, i)
+        if _engine_gonecheckable(nm) == 1 {
+            if _gone_state(nm) == 0 {
+                pref = compose.get_engine(nm)
+                if _list_has(prefs, pref) == 0 {
+                    _ = list_add(prefs, pref)
+                }
+            }
+        }
+        i = i + 1
+    }
+    p = 0
+    np = list_size(prefs)
+    while p < np {
+        running = _running_for_pref(prefs, p)
+        s = "${s}${_nl2sp(running)} "
+        p = p + 1
+    }
+    list_free(prefs)
+    return s
+}
+
+// running_names for the p-th pref in the list (raw ptr passed as a string arg —
+// never interpolated).
+_running_for_pref(prefs: ptr, p: int) -> string {
+    pref = list_get_raw(prefs, p)
+    return driver_linux.running_names(pref)
 }
 
 
@@ -2257,12 +2588,16 @@ _agent_path_on() -> int {
     return 1
 }
 // Per-guest couriered secret: AEO_TOKEN_<host>, else the shared AEO_TOKEN.
+// The value may be a SEALED envelope (lib/secrets) — the operator keeps
+// ciphertext in env/state; it becomes plaintext HERE, the boundary where the
+// courier uses it. secrets.resolve is fail-closed: sealed-but-unresolvable
+// yields "" (no token -> the agent path denies), never the raw envelope.
 _agent_token(host: string) -> string {
     v = _envc(_envkey("AEO_TOKEN_", host))
     if string_length(v) > 0 {
-        return v
+        return secrets.resolve(v)
     }
-    return _envc("AEO_TOKEN")
+    return secrets.resolve(_envc("AEO_TOKEN"))
 }
 // Host-side forwarded port to the guest's agent (:9450 in-guest). Per-guest
 // AEO_AGENT_PORT_<host>, else AEO_AGENT_PORT, else the convention default 9450.
@@ -2341,7 +2676,20 @@ _preflight() -> string {
             if _wsl_engined(nm, k) == 0 {
                 runnable = _kind_runnable(k, fam)
                 if runnable == 0 {
-                    return "aeo: resource '${nm}' kind '${k}' cannot run on a ${fam} host"
+                    return "aeo: resource '${nm}' kind '${k}' cannot run on this host (family: ${fam})"
+                }
+                // container kinds are ENGINE-gated: fast-fail here (eval time)
+                // when no engine binary resolves, instead of three nodes deep.
+                // WSL engines gate through their own driver's available().
+                if k == "container" {
+                    ceng = compose.get_engine(nm)
+                    if ceng != "wslc" {
+                        if ceng != "wsl_podman" {
+                            if driver_linux.engine_resolve(ceng) == "" {
+                                return "aeo: resource '${nm}' kind 'container' cannot run here — no container engine on PATH (install podman or docker)"
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -2453,9 +2801,14 @@ _kind_runnable(k: string, fam: string) -> int {
     if k == "container" {
         // A `container` realized by a WSL engine (wslc / wsl_podman) runs on a
         // WINDOWS host, not Linux — the driver's own available() is the real
-        // gate there, so don't linux-block it. podman/docker/"" containers need
-        // a Linux host.
-        return _eq(fam, "linux")
+        // gate there, so don't linux-block it. podman/docker/"" containers are
+        // ENGINE-gated, not family-gated: the engine runs wherever its binary
+        // resolves (Linux natively; macOS via Docker Desktop / podman machine),
+        // so "can this host execute this kind" == "does the engine resolve".
+        // This also upgrades Linux-without-an-engine from a mid-bring-up
+        // failure to the eval-time fast-fail every other impossible kind gets —
+        // and it makes aeo demoable on a stock Mac.
+        return 1
     }
     if k == "kvm" {
         return _eq(fam, "linux")
