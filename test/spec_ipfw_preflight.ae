@@ -11,6 +11,9 @@
 import aeocha
 import pf (_ipfw_warning)
 import std.string (string_contains)
+import std.string   // bare TOO: this ae build emits qualified `string.copy` for
+                    // some string-return shapes; selective-only leaves it unresolved
+
 
 main() {
     fw = aeocha.init()

@@ -21,12 +21,15 @@
 
 import std.os (run_capture, os_which)
 import std.list
-import std.string (string_length, string_contains, string_char_at, string_substring, string_index_of)
+import std.string (string_length, string_contains, string_char_at, string_substring, string_index_of, string_ends_with)
+import std.string   // bare TOO: the compiler emits qualified `string.copy` for
+                    // some string-return shapes (engine_resolve's guarded
+                    // returns); selective-only leaves it unresolved downstream
 import std.fs (write_atomic)
 
 exports (
     name, engine_resolve,
-    up, up_net, up_confined, up_green, alias_move, network_ensure, network_ensure_internal, down, probe, inspect_argv, inspect_state, list_running, extract_argv, extract_facts, image_digest, exec_capture, build, build_entrypoint, built_tag,
+    up, up_net, up_confined, up_green, alias_move, network_ensure, network_ensure_internal, down, down_many, down_many_command, probe, inspect_argv, inspect_state, list_running, extract_argv, extract_facts, image_digest, exec_capture, build, build_entrypoint, built_tag,
     ps_running_argv, ps_all_running_argv, running_names, run_argv, run_argv_net, run_argv_confined, stop_argv, rm_argv, exec_health_argv,
     net_disconnect_argv, net_connect_alias_argv,
     pasta_dropin_path, pasta_dropin_content, pasta_forwarder_ensure, pasta_forwarder_active, pasta_forwarder_clear,
@@ -39,16 +42,30 @@ name() -> string {
 
 // Resolve the container engine binary. `pref` is a preference ("" =
 // auto). Returns the absolute path, or "" if none found.
+// NULL-SAFE: os_which returns null (not "") for a missing binary, and null
+// passes a `!= ""` test — the un-guarded podman miss used to return NULL here,
+// so every docker-only host (no podman) ran `(null) run ...` and failed exit
+// 127. Same class as the getenv footgun; bwrap/firecracker's available()
+// already guard it.
 engine_resolve(pref: string) -> string {
     if pref != "" {
         p = os_which(pref)
+        if p == null {
+            return ""
+        }
         return p
     }
     p = os_which("podman")
-    if p != "" {
-        return p
+    if p != null {
+        if p != "" {
+            return p
+        }
     }
-    return os_which("docker")
+    d = os_which("docker")
+    if d == null {
+        return ""
+    }
+    return d
 }
 
 // --- pure argv builders (one per engine subcommand) ------------------
@@ -122,10 +139,19 @@ run_argv_net(res_name: string, image: string, cmd: string, expose: int, net: str
 // the default join). When deny_egress sets --network none, host port publish (-p)
 // is also dropped (none = no network at all).
 run_argv_confined(res_name: string, image: string, cmd: string, expose: int, net: string, env: string, confine: string) -> ptr {
+    return _run_argv_core(res_name, image, cmd, expose, net, env, confine, 1)
+}
+
+// The engine-portable core. `with_replace` 1 emits podman's `--replace`
+// (in-place idempotency); 0 omits it — docker has no such flag, so the docker
+// path gets its idempotency from a pre-`rm -f` in up_confined/up_green instead.
+_run_argv_core(res_name: string, image: string, cmd: string, expose: int, net: string, env: string, confine: string, with_replace: int) -> ptr {
     av = list_new()
     list_add(av, "run")
     list_add(av, "-d")
-    list_add(av, "--replace")
+    if with_replace == 1 {
+        list_add(av, "--replace")
+    }
     list_add(av, "--name")
     list_add(av, res_name)
     confine_has_net = string_contains(confine, "--network")
@@ -211,7 +237,10 @@ network_ensure(net: string, engine_pref: string) -> string {
     }
     av = list_new()
     list_add(av, "-c")
-    list_add(av, "${eng} network exists ${net} 2>/dev/null || ${eng} network create ${net} >/dev/null 2>&1")
+    // `network inspect` is the ENGINE-PORTABLE existence test (`network exists`
+    // is podman-only; docker's unknown-subcommand failure made every ensure
+    // re-run `create`, which errors once the net exists).
+    list_add(av, "${eng} network inspect ${net} >/dev/null 2>&1 || ${eng} network create ${net} >/dev/null 2>&1")
     out, status, err = run_capture("/bin/sh", av, null)
     list_free(av)
     if status != 0 {
@@ -231,7 +260,7 @@ network_ensure_internal(net: string, engine_pref: string) -> string {
     }
     av = list_new()
     list_add(av, "-c")
-    list_add(av, "${eng} network exists ${net} 2>/dev/null || ${eng} network create --internal ${net} >/dev/null 2>&1")
+    list_add(av, "${eng} network inspect ${net} >/dev/null 2>&1 || ${eng} network create --internal ${net} >/dev/null 2>&1")
     out, status, err = run_capture("/bin/sh", av, null)
     list_free(av)
     if status != 0 {
@@ -448,7 +477,10 @@ up_confined(res_name: string, image: string, cmd: string, expose: int, net: stri
     if probe(res_name, "", engine_pref) == 1 {
         return ""
     }
-    av = run_argv_confined(res_name, image, cmd, expose, net, env, confine)
+    // podman gets `--replace` (in-place idempotency); docker has no such flag,
+    // so its path pre-clears any stopped leftover and runs a replace-less argv.
+    with_replace = _pre_clear_for(eng, res_name)
+    av = _run_argv_core(res_name, image, cmd, expose, net, env, confine, with_replace)
     out, status, err = run_capture(eng, av, null)
     list_free(av)
     if err != "" {
@@ -458,6 +490,27 @@ up_confined(res_name: string, image: string, cmd: string, expose: int, net: stri
         return "aeo: '${eng} run' failed for '${res_name}' (exit ${status}): ${out}"
     }
     return ""
+}
+
+// The docker half of `--replace`: quiet-shell `rm -f` any leftover (absent =
+// no-op; run_capture inherits child stderr, hence the redirect). Returns the
+// with_replace flag for _run_argv_core: 0 on docker, 1 (use --replace) on podman.
+_pre_clear_for(eng: string, res_name: string) -> int {
+    if _is_docker(eng) == 0 {
+        return 1
+    }
+    rmav = list_new()
+    list_add(rmav, "-c")
+    list_add(rmav, "${eng} rm -f ${res_name} >/dev/null 2>&1")
+    _ro, _rs, _re = run_capture("/bin/sh", rmav, null)
+    list_free(rmav)
+    return 0
+}
+
+// 1 iff the resolved engine binary is docker (path suffix — engine_resolve
+// returns absolute paths).
+_is_docker(eng: string) -> int {
+    return string_ends_with(eng, "docker")
 }
 
 // up_green — stand the GREEN container up beside blue for a cutover: same image/
@@ -480,7 +533,8 @@ up_green(green_name: string, image: string, cmd: string, net: string, env: strin
     }
     // expose=0: blue owns the published host port; green joins the net for the
     // in-cluster alias cut only.
-    av = run_argv_confined(green_name, image, cmd, 0, net, env, confine)
+    with_replace = _pre_clear_for(eng, green_name)
+    av = _run_argv_core(green_name, image, cmd, 0, net, env, confine, with_replace)
     out, status, err = run_capture(eng, av, null)
     list_free(av)
     if err != "" {
@@ -520,6 +574,42 @@ down(res_name: string, engine_pref: string) -> string {
         return "aeo: '${eng} rm' failed for '${res_name}' (exit ${status}): ${out}"
     }
     return ""
+}
+
+// down_many — tear a whole LEVEL of containers down in ONE engine sweep: each
+// node's stop+rm runs as a BACKGROUND job in a single `sh -c "... & ...; wait"`,
+// so the per-container stop grace (`stop -t 5` — up to 5s each while the
+// workload handles SIGTERM) is paid ONCE per level, not once per node. Serial
+// teardown of N slow-stopping containers is O(N×grace); this is O(grace) —
+// measured 15.6s -> 6.3s at width 3 against real SIGTERM-ignoring containers.
+// `names` is space-separated (aeo resource names — shell-safe by construction:
+// they're already used bare as container names and env-var key material).
+// Per-node stop/rm output is discarded — the ENGINE's gone-verification poller
+// is the honest failure detector (teardown verifies disappearance), and it
+// reports any lingering node loudly. Absent containers are non-events (rm -f).
+down_many(names: string, engine_pref: string) -> string {
+    eng = engine_resolve(engine_pref)
+    if eng == "" {
+        return "aeo: no container engine found (need podman or docker on PATH)"
+    }
+    if string_length(names) == 0 {
+        return ""
+    }
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, down_many_command(names, eng))
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    if err != "" {
+        return "aeo: batch teardown spawn failed: ${err}"
+    }
+    return ""
+}
+
+// The pure command builder for down_many (unit-testable off-box): one shell
+// line that backgrounds `stop -t 5` + `rm -f` per name and waits for all.
+down_many_command(names: string, eng: string) -> string {
+    return "for n in ${names}; do { ${eng} stop -t 5 \"$n\"; ${eng} rm -f \"$n\"; } >/dev/null 2>&1 & done; wait"
 }
 
 // Liveness probe. Returns 1 if alive (running, and the health command —

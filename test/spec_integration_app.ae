@@ -12,7 +12,10 @@
 import aeocha
 import driver_linux
 import std.string
-import std.http.client
+import std.os (run_capture)
+import std.os   // bare TOO: aeocha's inlined timers call os.now_monotonic_ns
+                // qualified — a selective entry-file std.os import suppresses it
+import std.list
 
 NAME() -> string { return "aeo-calc-svc" }
 PORT() -> int { return 8080 }
@@ -55,9 +58,12 @@ main() {
                 aeocha.expect_str(uerr).to_equal_str("")
                 // wait for the http.server to bind, then curl FROM THE HOST
                 base = "http://localhost:8080"
+                // curl shell-out, NOT std.http.client: the client aborts
+                // intermittently on macOS (SIGABRT mid-request), and the
+                // spec's subject is the ORCHESTRATION, not the transport.
                 aeocha.expect_str(_wait_http("${base}/add/0/0", 40)).to_equal_str("yes")
-                aeocha.expect_http_get_body_eq("${base}/add/2/3", "5", "GET /add/2/3 = 5")
-                aeocha.expect_http_get_body_eq("${base}/add/40/2", "42", "GET /add/40/2 = 42")
+                aeocha.expect_str(_http_get("${base}/add/2/3")).to_equal_str("5")
+                aeocha.expect_str(_http_get("${base}/add/40/2")).to_equal_str("42")
             }
         }
     }
@@ -81,15 +87,30 @@ _no_engine() -> int {
 _wait_http(url: string, secs: int) -> string {
     waited = 0
     while waited < secs {
-        req = client.request("GET", url)
-        resp, cerr = client.send_request(req)
-        client.request_free(req)
-        if cerr == "" {
-            client.response_free(resp)
+        body = _http_get(url)
+        if string.length(body) > 0 {
             return "yes"
         }
         sleep(1000)
         waited = waited + 1
     }
     return "no"
+}
+
+// GET a URL's body via curl ("" on any failure/timeout).
+_http_get(url: string) -> string {
+    av = list_new()
+    list_add(av, "-s")
+    list_add(av, "-m")
+    list_add(av, "5")
+    list_add(av, url)
+    out, status, err = run_capture("curl", av, null)
+    list_free(av)
+    if err != "" {
+        return ""
+    }
+    if status != 0 {
+        return ""
+    }
+    return out
 }

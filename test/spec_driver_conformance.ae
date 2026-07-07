@@ -29,6 +29,9 @@ import driver_firecracker
 import driver_kata
 import driver_stub
 import std.string (string_length, string_index_of, string_substring)
+import std.string   // bare TOO: this ae build emits qualified `string.copy` for
+                    // some string-return shapes; selective-only leaves it unresolved
+
 
 main() {
     fw = aeocha.init()

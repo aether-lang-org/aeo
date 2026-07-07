@@ -110,7 +110,8 @@ _run_on_net(nm: string, cmd: string) {
     av = list_new()
     list_add(av, "run")
     list_add(av, "-d")
-    list_add(av, "--replace")
+    // no --replace: docker doesn't have it (podman-only), and before_each's
+    // _cleanup() already removed any leftover — engine-portable scaffolding.
     list_add(av, "--name")
     list_add(av, nm)
     list_add(av, "--network")

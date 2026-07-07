@@ -21,7 +21,7 @@
 // All flags verified ROOTLESS on Bazzite 2026-06-27 (cgroup v2, no sudo).
 
 import std.list
-import std.string (string_length, string_contains, string_index_of, string_substring)
+import std.string (string_length, string_contains, string_index_of, string_substring, string_get_int)
 
 exports (
     cgroup_flags, security_flags, net_flags, net_flags2, net_kind,
@@ -54,10 +54,40 @@ cgroup_flags(rctl: string) -> string {
     if string_length(nof) > 0 {
         out = _append(out, "--ulimit nofile=${nof}:${nof}")
     }
-    // pcpu is a percentage; podman --cpus is in cores. Leave a cpu cap to the
-    // operator's memory/pids ceilings for v0 (pcpu->cores needs float division
-    // we keep out of the hot path). Documented; can add --cpus later.
+    // pcpu is a percentage (rctl semantics: 150 = 1.5 cores); podman --cpus is
+    // in cores. Rendered with integer math (whole + centi-cores), no floats.
+    pcpu = _kv_value(rctl, "pcpu")
+    if string_length(pcpu) > 0 {
+        cores = _pcpu_to_cores(pcpu)
+        if string_length(cores) > 0 {
+            out = _append(out, "--cpus ${cores}")
+        }
+    }
     return out
+}
+
+// pcpu percentage -> podman --cpus cores string, integer math only:
+// "150" -> "1.5", "50" -> "0.5", "100" -> "1", "25" -> "0.25", "175" -> "1.75".
+// Non-numeric / non-positive input renders "" (no flag — never a bogus cap).
+_pcpu_to_cores(pct: string) -> string {
+    p = string_get_int(pct)
+    if p <= 0 {
+        return ""
+    }
+    whole = p / 100
+    frac = p % 100
+    if frac == 0 {
+        return "${whole}"
+    }
+    tenths = frac / 10
+    hundredths = frac % 10
+    if hundredths == 0 {
+        return "${whole}.${tenths}"
+    }
+    if frac < 10 {
+        return "${whole}.0${hundredths}"
+    }
+    return "${whole}.${frac}"
 }
 
 // ---- axis 2: seccomp / cap-drop (a constrain{} node is confined) ----

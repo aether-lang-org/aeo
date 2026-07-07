@@ -31,6 +31,7 @@
 import std.os (run_capture, os_which, getenv)
 import std.list
 import std.string (string_length, string_char_at, string_substring, string_contains, string_from_char, string_index_of)
+import secrets
 
 exports (
     name,
@@ -221,12 +222,14 @@ _agent_path_on_drv() -> int {
     }
     return 1
 }
+// May be a SEALED envelope (lib/secrets): resolved to plaintext HERE, the
+// boundary where the seed/dial uses it — fail-closed "" if unresolvable.
 _agent_token_drv(res_name: string) -> string {
     v = getenv(_envkey("AEO_TOKEN_", res_name))
     if string_length(v) > 0 {
-        return v
+        return secrets.resolve(v)
     }
-    return getenv("AEO_TOKEN")
+    return secrets.resolve(getenv("AEO_TOKEN"))
 }
 // The aeo-agent binary to plant. AEO_AGENT_BIN, else a couple of well-known
 // build outputs relative to the aeo home.
@@ -1195,21 +1198,9 @@ probe(kind: string, res_name: string, health: string) -> int {
 
 // --- pidfile + process helpers ---------------------------------------
 
-// Build a shell command that launches `bin argv...` in the background and
-// writes its pid to `pf`. argv elements are space-joined; VM argv here is
-// controlled (paths/sizes), not arbitrary user text, so this is safe.
-_bg_command(bin: string, argv: ptr, pf: string) -> string {
-    line = bin
-    n = list_size(argv)
-    i = 0
-    while i < n {
-        a = list_get(argv, i)
-        line = "${line} ${a}"
-        i = i + 1
-    }
-    // `cmd & echo $! > pidfile` records the background pid.
-    return "${line} >/tmp/aeo-vm-out.log 2>&1 & echo $! > ${pf}"
-}
+// (A _bg_command space-joiner used to live here; it interpolated list_get
+// elements — the ptr-address footgun — and was dead since the systemd-run
+// launch rewrite (_launch_persistent builds the argv as a list). Removed.)
 
 _read_pid(res_name: string) -> int {
     pf = pidfile_for(res_name)
