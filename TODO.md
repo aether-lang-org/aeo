@@ -4,6 +4,67 @@ Open work, honest about what's built vs. proven-live. The containment roadmap is
 the live focus (GhostBSD box `paul@192.168.0.57`); see also
 `docs/pf-enforcement-next-steps.md` and `docs/bsd-host-setup.md`.
 
+## Merged from the macOS work-line (2026-07-06/07)
+
+A parallel line developed + validated on the macOS dev box (Docker Desktop),
+re-derived onto this architecture (engine() model, supervisor) after the two
+lines diverged. Everything below is suite-green (193 passing) AND E2E-proven on
+macOS+docker (up 1.8s warm -> curl 42 -> exec -> level-parallel down 6s, zero
+leftovers). Live-prove on a Linux box for full confidence:
+
+- [x] **lib/secrets — sealed values, encrypted-throughout** (the TODO's secrets
+      engine, first cut). `aeo1:<salt>:<nonce>:<ct>:<tag>` envelope; stock-stdlib
+      composition (HMAC-SHA256 labeled derivation, PRF-CTR keystream,
+      encrypt-then-MAC, constant-time verify); FAIL-CLOSED everywhere; key file
+      0600 (AEO_SECRETS_KEY / ~/.config/aeo/secrets.key), key material never on
+      an argv. `aeo secrets keygen|seal|unseal`. The agent-token boundary is
+      wired: runner._agent_token + driver_vm._agent_token_drv resolve() sealed
+      AEO_TOKEN[_<node>] at the courier/seed boundary — ciphertext in
+      env/state/logs, plaintext only at use. spec_secrets 10. NEXT CUTS: encrypt
+      the token INTO the cloud-init seed (agent-side decrypt via ssh-couriered
+      key); pluggable KMS/age/gpg backend; redact() sweep over status/logs.
+- [x] **Front-door BUILD CACHE** — content hash over the full input closure
+      (compose + every lib/ file + `ae --version`) recorded beside the staged
+      binary; match -> skip restage+recompile (measured 3.2s -> 0.26s, 12.5×).
+      NOT a build-graph cache (aeb's line): one artifact, whole closure, can't
+      serve a stale mix. AEO_REBUILD=1 forces; no sha tool -> always rebuild;
+      hash written only after a completed build. Stub compositions
+      (extract/inventory) hash /dev/null.
+- [x] **LEVEL-PARALLEL teardown** — run_down mirrors the bring-up engine:
+      reverse topological levels over BOTH edges (depends() + containment host —
+      a nested node tears down before its guest); engine containers halt in ONE
+      down_many sweep per distinct engine() (stop grace paid once per level —
+      measured 15.6s -> 6.3s at width 3 vs SIGTERM-ignoring containers);
+      dedicated-driver kinds keep per-node actor Halts; wait_for_idle() is the
+      level barrier (state can't be: Configure sets STATE_DOWN before Halt runs
+      — the old per-node _await_down was silently a no-op); ONE poller verifies
+      the level's disappearance (without() windows concurrent = max not sum;
+      engine nodes get a 2s floor so a failed rm surfaces). spec_teardown_batch.
+- [x] **container kinds ENGINE-gated, not family-gated** — runnable wherever
+      podman/docker resolves (macOS via Docker Desktop unlocked; Linux-without-
+      engine now fast-fails at eval time). WSL engines still gate via their
+      driver. FOUND EN ROUTE: engine_resolve returned NULL (os_which null
+      footgun) — every docker-only host ran `(null) run …` AND
+      spec_running_nodes + spec_integration_app silently skip-as-passed for
+      their whole life (now genuinely run against docker); podman-only
+      `--replace` -> docker pre-clears with rm -f; podman-only `network exists`
+      -> engine-portable `network inspect`; spec_integration_app's
+      std.http.client -> curl (client SIGABRTs intermittently on macOS).
+- [x] **`aeo doctor`** — per-kind host capability report (engine paths,
+      /dev/kvm, family, secrets-key posture) + fix hints; compose-less. The
+      interactive twin of the eval-time fast-fail gate.
+- [x] **limit_cpu/pcpu -> podman --cpus** (integer math; 150 -> "1.5"; bogus ->
+      no flag). The CPU axis now enforces on Linux; spec_confine_linux 15.
+- [x] **README "Try it in 60 seconds"** — build front door, doctor, build the
+      demo app image, up, curl, status/exec, verified down. Works on a stock
+      Mac or Linux box with docker/podman.
+- [ ] ae-0.338-on-macOS quirk (recorded in LLM.md): selective-only
+      std.string/std.os imports leave compiler-emitted qualified calls
+      (`string.copy`, `os_platform`, `os.now_monotonic_ns`) unresolved — three
+      upstream specs didn't build on this box until a bare import was added
+      beside the selective one. Harmless on other toolchains; possibly fixed in
+      a newer ae — retest on the next compiler bump.
+
 ## Containment / impregnability roadmap
 
 The question driving this: *orchestrated trees of compute nodes that contain

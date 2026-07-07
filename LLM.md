@@ -160,6 +160,10 @@ lib/confine_linux/ limit{}/constrain{} -> cgroup/seccomp/network flags (the Linu
 lib/rctl/ lib/pf/  FreeBSD confinement: rctl caps + pf network policy.
 lib/attest/        image attestation (verify-before-boot, 3 greppable states).
 lib/audit/         tamper-evident hash-chained audit trail.
+lib/secrets/       SEALED values (aeo1 envelope): ciphertext in state/env/logs,
+                   plaintext only at the use boundary via resolve(), fail-closed.
+                   `aeo secrets keygen|seal|unseal`. NB `seal` is RESERVED —
+                   hence seal_value/unseal_value.
 lib/snapshot/ lib/snapshot_linux/   lifecycle ops (ZFS ; podman/qemu-img/lxc).
 lib/host/          host-profile probe + capsicum/casper gating.
 lib/ipam/ lib/images/   IP allocation + golden-image recipe/realizer.
@@ -196,22 +200,48 @@ is load-bearing: Aether's module `var` had a string of cross-import soundness bu
 - **`list_get` returns a ptr; `"${a}"` on it yields the ADDRESS, not the string.**
   To shell argv, pass the list DIRECTLY to `run_capture(prog, list)` (like
   driver_vm/driver_lxc), or `list_get_raw` + `list_add_raw` to copy element ptrs.
-  Interpolating a list element into a command string silently mangles it. (This
-  bit driver_lxc; driver_bsd's `_sudo_run` has the same latent bug — TODO.)
-- **Nested string literals inside `${}` don't parse** — `"${f("x")}"` is a syntax
-  error. Assign to a var first: `r = f("x"); "${r}"`.
+  Interpolating a list element into a command string silently mangles it. (Bit
+  driver_lxc; driver_bsd's `_sudo_run` had it too — fixed, all self-sudo paths
+  are argv-direct now. Passing a raw element ptr as a string-typed FUNCTION ARG
+  is fine — only direct interpolation mangles.)
+- **Nested string literals inside `${}` don't parse** — `"${f("x")}"` errors
+  (sometimes as a bogus type error, e.g. "Undefined variable 'docker'"). Assign
+  to a var first: `r = f("x"); "${r}"`.
+- **Backslash escapes differ between INTERPOLATED and plain strings**: in a
+  string containing `${}`, `\\n` collapses to a REAL newline; in a plain string
+  it stays a literal backslash-n (driver_vm's cloud-init printf lines depend on
+  the plain behaviour). A `tr '\\n' ...` inside an interpolated command string
+  handed the shell an unbalanced quote. Rule: keep interpolated command strings
+  BACKSLASH-FREE (`\"` is fine; verified).
 - **Heredocs `<<TAG` are RAW** — no `${}` interpolation inside.
 - **`getenv` for an unset var returns an empty string that `== ""` reports as
   FALSE** — `string_length(v) == 0` is true, yet `v == ""` is *false* (so a
   `== ""` default-guard silently never fires). Always guard with
   `string_length(v) == 0`, never `== ""`. (This bit `bin/aeo.ae`: the AEO_WORK
   default never applied → `aeo up` died with `cp: cannot create directory ''`.)
+  **`os_which` has the same trap, worse**: a missing binary returns NULL (not
+  ""), NULL passes `!= ""`, and interpolating it prints `(null)`. This bit
+  driver_linux.engine_resolve — every docker-only host (no podman) ran
+  `(null) run ...` exit-127, which ALSO made the two real-container specs
+  silently skip-as-pass. Guard `== null` (or string_length), the way
+  driver_bwrap/driver_firecracker's available() do.
 - **Multi-return is one-call destructure only** — `a, b = f()`. Don't chain.
 - **Duration literals** (`30s`, `500ms`) are i64 ns; `/ 1000000` → ms (`as int` is
   rejected, `/` works). Used by within/every/without.
 - **Selective `import std.string (...)` does NOT provide bare `copy()`** — the
   aeocha specs need a bare `import std.string` too (aeocha calls `copy`
-  unqualified). #870/#878 fixed the *qualified* surface, not this.
+  unqualified). #870/#878 fixed the *qualified* surface, not this. The class is
+  BIGGER and partly TOOLCHAIN-DEPENDENT: on the macOS dev box's ae 0.338, a
+  selective-only `import std.string`/`import std.os` leaves COMPILER-EMITTED
+  qualified calls unresolved (`string.copy` for some string-return shapes —
+  hit runner.ae, driver_linux, spec_extract/driver_conformance/ipfw_preflight;
+  `os_platform` via lib/host in bin/aeo.ae; aeocha's `os.now_monotonic_ns`).
+  Rule: put a bare `import std.string` / `import std.os` BESIDE any selective
+  one in an entry file or shared module; it only adds names, never conflicts.
+- **`seal` is a reserved word** (the compiler says so; `unseal` is NOT —
+  verified). lib/secrets uses `seal_value`/`unseal_value`.
+- **Aether's std.http.client SIGABRTs intermittently on macOS** (mid-request).
+  Specs that only need transport shell out to curl.
 
 ## DSL conventions (don't fight them)
 

@@ -63,6 +63,33 @@ Containment](https://paulhammant.com/2016/12/14/principles-of-containment/) (see
 > design, [`TODO.md`](./TODO.md) for the honest what's-proven-vs-modeled scorecard,
 > and [`LLM.md`](./LLM.md) for the Aether constraints navigated.
 
+## Try it in 60 seconds
+
+All you need is the [`ae` toolchain](https://github.com/aether-lang-org/aether)
+and **any container engine — podman or Docker, on Linux or macOS** (container
+kinds are engine-gated, not OS-gated):
+
+```sh
+export AEO_HOME=/path/to/aeo
+ae build $AEO_HOME/bin/aeo.ae -o ~/.local/bin/aeo --lib $AEO_HOME/lib
+
+aeo doctor                                    # what can THIS host run?
+docker build -t localhost/aeo-examples/silly-add:latest \
+    $AEO_HOME/examples/silly_addition_app/    # the demo app image (podman works too)
+aeo up examples/silly_addition_containers.ae  # redis ◄ app, dependency-ordered,
+                                              # health-gated, level-parallel
+curl http://localhost:8080/add/40/2           # -> 42 (the app, live)
+aeo status examples/silly_addition_containers.ae   # states + attestation posture
+aeo exec  examples/silly_addition_containers.ae db "redis-cli ping"
+aeo down  examples/silly_addition_containers.ae    # reverse levels, disappearance VERIFIED
+```
+
+Repeat invocations are fast — the front door content-hashes its inputs (compose
++ lib/ + toolchain) and skips the rebuild when nothing changed (`AEO_REBUILD=1`
+forces). `aeo doctor` reports which kinds this host can execute and what's
+missing for the rest; `aeo secrets` seals values (tokens, creds) so they stay
+ciphertext everywhere aeo holds state and decrypt only at use, fail-closed.
+
 ## The one-line distinction
 
 | | does | invocation |
@@ -282,6 +309,7 @@ lib/confine_linux/    Linux confinement renderer: limit{}/constrain{} → cgroup
 lib/rctl/  lib/pf/     FreeBSD confinement: rctl resource caps + pf network policy
 lib/attest/           image attestation (verify-before-boot, fail-closed; 3 greppable states)
 lib/audit/            tamper-evident hash-chained audit trail (`aeo audit`)
+lib/secrets/          sealed values (`aeo secrets`): ciphertext-throughout, decrypt-at-boundary
 lib/snapshot/  lib/snapshot_linux/   lifecycle ops: ZFS (jail/bhyve) + podman/qemu-img/lxc
 lib/host/             host-profile probe + capsicum/casper gating
 lib/ipam/  lib/images/  IP allocation + the golden-image recipe/realizer
