@@ -28,10 +28,7 @@
 // injected cap (the build receives authority), lifecycle supervision, and
 // subcommands — none of which `ae run compose.ae` could provide.
 
-import std.os (run_capture, run_supervised, getenv, argv0, os_which)
-import std.os   // bare TOO: without it, lib/host's `platform()` miscompiles into an
-                // undefined `os_platform` when the ENTRY file's std.os import is
-                // selective (the aeocha bare-import class of merge quirk)
+import std.os
 import host (family, profile)
 import driver_linux (engine_resolve)
 import secrets
@@ -175,7 +172,7 @@ main() {
         exit(2)
     }
 
-    home = getenv("AEO_HOME")
+    home = os.getenv("AEO_HOME")
     if string_length(home) == 0 {
         _diag("aeo: AEO_HOME is not set (point it at the aeo tree holding lib/)")
         exit(2)
@@ -189,7 +186,7 @@ main() {
     // immutable host where `ae` is a container-shim, point this at a dir the
     // shim can bind-mount with SELinux relabel (:Z) — /tmp itself can't be
     // relabeled, but a project subdir can. See docs/build-in-container.md.
-    work = getenv("AEO_WORK")
+    work = os.getenv("AEO_WORK")
     if string_length(work) == 0 {
         work = "/tmp/aeo-build"
     }
@@ -210,7 +207,7 @@ main() {
         hash_src = "/dev/null"
     }
     inputs_hash = _inputs_hash(home, hash_src)
-    force = getenv("AEO_REBUILD")
+    force = os.getenv("AEO_REBUILD")
     cached = 0
     if string_length(inputs_hash) > 0 {
         if string_length(force) == 0 {
@@ -270,7 +267,7 @@ main() {
         list_add(bav, "--lib")
         list_add(bav, libdst)
         _diag("aeo: building composition")
-        bout, bstatus, berr = run_capture("ae", bav, null)
+        bout, bstatus, berr = os.run_capture("ae", bav, null)
         list_free(bav)
         if berr != "" {
             _diag("aeo: build spawn failed: ${berr}")
@@ -363,7 +360,7 @@ main() {
         }
     }
     rav = list_new()
-    code, outcome = run_supervised(bin, rav, null, 1, 1, 0, 1)
+    code, outcome = os.run_supervised(bin, rav, null, 1, 1, 0, 1)
     list_free(rav)
     if outcome != "exited" {
         _diag("aeo: composition ${outcome}")
@@ -390,7 +387,7 @@ _secrets_cmd(action: string, value: string) -> int {
     if action == "seal" {
         v = value
         if string_length(v) == 0 {
-            v = getenv("AEO_SECRET_VALUE")
+            v = os.getenv("AEO_SECRET_VALUE")
         }
         if string_length(v) == 0 {
             _diag("usage: aeo secrets seal <value>   (or AEO_SECRET_VALUE=... aeo secrets seal)")
@@ -534,7 +531,7 @@ _pad(k: string) -> string {
 
 // NULL-SAFE which: os_which returns null (not "") for a missing binary.
 _which(binname: string) -> string {
-    p = os_which(binname)
+    p = os.os_which(binname)
     if p == null {
         return ""
     }
@@ -545,7 +542,7 @@ _path_exists(p: string) -> int {
     av = list_new()
     list_add(av, "-e")
     list_add(av, p)
-    out, status, err = run_capture("/bin/test", av, null)
+    out, status, err = os.run_capture("/bin/test", av, null)
     list_free(av)
     if err != "" {
         return 0
@@ -579,7 +576,7 @@ _inputs_hash(home: string, compose_path: string) -> string {
     av = list_new()
     list_add(av, "-c")
     list_add(av, "{ cat \"${compose_path}\"; find \"${home}/lib\" -type f | LC_ALL=C sort | xargs cat; ae --version; } 2>/dev/null | ${tool}")
-    out, status, err = run_capture("/bin/sh", av, null)
+    out, status, err = os.run_capture("/bin/sh", av, null)
     list_free(av)
     if err != "" {
         return ""
@@ -596,7 +593,7 @@ _sha_tool() -> string {
     av = list_new()
     list_add(av, "-c")
     list_add(av, "command -v sha256sum >/dev/null 2>&1 && echo sha256sum && exit 0; command -v shasum >/dev/null 2>&1 && echo shasum-a256; exit 0")
-    out, status, err = run_capture("/bin/sh", av, null)
+    out, status, err = os.run_capture("/bin/sh", av, null)
     list_free(av)
     if err != "" {
         return ""
@@ -631,7 +628,7 @@ _cache_fresh(work: string, want: string) -> int {
     av = list_new()
     list_add(av, "-c")
     list_add(av, "test -x \"${work}/aeo-run\" && cat \"${work}/.aeo-inputs-hash\" 2>/dev/null")
-    out, status, err = run_capture("/bin/sh", av, null)
+    out, status, err = os.run_capture("/bin/sh", av, null)
     list_free(av)
     if err != "" {
         return 0
@@ -690,7 +687,7 @@ _cp_r(src: string, dst: string) -> int {
     // `cp -a src/. dst` copies contents into dst.
     list_add(av, string_concat(src, "/."))
     list_add(av, dst)
-    out, status, err = run_capture("/bin/cp", av, null)
+    out, status, err = os.run_capture("/bin/cp", av, null)
     list_free(av)
     if err != "" {
         return 1
@@ -704,7 +701,7 @@ _rmrf(path: string) -> int {
     av = list_new()
     list_add(av, "-rf")
     list_add(av, path)
-    out, status, err = run_capture("/bin/rm", av, null)
+    out, status, err = os.run_capture("/bin/rm", av, null)
     list_free(av)
     if err != "" {
         return 1
@@ -718,7 +715,7 @@ _mv(src: string, dst: string) -> int {
     list_add(av, "-f")
     list_add(av, src)
     list_add(av, dst)
-    out, status, err = run_capture("/bin/mv", av, null)
+    out, status, err = os.run_capture("/bin/mv", av, null)
     list_free(av)
     if err != "" {
         return 1
@@ -731,7 +728,7 @@ _cp(src: string, dst: string) -> int {
     av = list_new()
     list_add(av, src)
     list_add(av, dst)
-    out, status, err = run_capture("/bin/cp", av, null)
+    out, status, err = os.run_capture("/bin/cp", av, null)
     list_free(av)
     if err != "" {
         return 1

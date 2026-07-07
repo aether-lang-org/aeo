@@ -6,7 +6,6 @@
 import aeocha
 import compose (system, container, image, within, every, without, health_interval, health_budget,
                 get_interval, get_budget, get_within_ms, get_without_ms)
-import std.string   // bare: aeocha's inlined asserts call string.copy unqualified
 
 main() {
     fw = aeocha.init()

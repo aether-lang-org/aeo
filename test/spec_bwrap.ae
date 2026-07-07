@@ -9,7 +9,6 @@
 import aeocha
 import driver_bwrap (sandbox_argv, pidfile_for, logfile_for, name, _shq)
 import std.list
-import std.string   // bare: aeocha's inlined asserts call string.copy unqualified
 
 // join an argv list into a single space-separated string for assertion.
 _join(av: ptr) -> string {

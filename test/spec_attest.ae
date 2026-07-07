@@ -6,7 +6,6 @@
 import aeocha
 import attest (is_attested, pinned_ref, verify, attest_state)
 import std.string (string_length)
-import std.string   // bare: aeocha's inlined asserts call string.copy unqualified
 
 main() {
     fw = aeocha.init()

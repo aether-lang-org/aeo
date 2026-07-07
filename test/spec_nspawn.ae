@@ -8,7 +8,6 @@
 import aeocha
 import driver_nspawn (name, unit_name, run_argv, is_active_argv, exec_argv, terminate_argv, stop_argv)
 import std.list
-import std.string   // bare: aeocha's inlined asserts call string.copy unqualified
 
 // join an argv list into a single space-separated string for assertion.
 _join(av: ptr) -> string {

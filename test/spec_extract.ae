@@ -9,8 +9,6 @@
 import aeocha
 import extract (render_composition, render_node, bytes_to_human)
 import std.string (string_contains)
-import std.string   // bare TOO: this ae build emits qualified `string.copy` for
-                    // some string-return shapes; selective-only leaves it unresolved
 
 
 main() {

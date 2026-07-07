@@ -6,7 +6,6 @@
 import aeocha
 import audit (line_for, _sha, _jq)
 import std.string (string_length, string_contains, string_index_of, string_substring)
-import std.string   // bare: aeocha's inlined asserts call string.copy unqualified
 
 main() {
     fw = aeocha.init()

@@ -6,7 +6,6 @@
 
 import aeocha
 import confine_linux (cgroup_flags, security_flags, net_flags, net_flags2, net_kind, confine_string, _kv_value)
-import std.string   // bare: aeocha's inlined asserts call string.copy unqualified
 
 main() {
     fw = aeocha.init()

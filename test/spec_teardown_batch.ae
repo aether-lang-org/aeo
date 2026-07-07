@@ -7,7 +7,6 @@
 
 import aeocha
 import driver_linux (down_many_command)
-import std.string   // bare: aeocha's inlined asserts call string.copy unqualified
 import std.string (string_contains)
 
 main() {

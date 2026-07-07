@@ -6,7 +6,6 @@
 
 import aeocha
 import snapshot_linux (supports, snap_image, backup_file)
-import std.string   // bare: aeocha's inlined asserts call string.copy unqualified
 
 main() {
     fw = aeocha.init()

@@ -8,7 +8,6 @@
 import aeocha
 import driver_firecracker (name, mem_mib, kernel_path, rootfs_path, config_json, pidfile_for, sockfile_for)
 import std.string (string_contains)
-import std.string   // bare: aeocha's inlined asserts call string.copy unqualified
 
 main() {
     fw = aeocha.init()

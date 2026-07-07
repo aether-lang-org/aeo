@@ -13,8 +13,6 @@ import aeocha
 import driver_linux
 import std.string
 import std.os (run_capture)
-import std.os   // bare TOO: aeocha's inlined timers call os.now_monotonic_ns
-                // qualified — a selective entry-file std.os import suppresses it
 import std.list
 
 NAME() -> string { return "aeo-calc-svc" }
@@ -80,10 +78,7 @@ _no_engine() -> int {
     return 0
 }
 
-// Poll a URL until it answers (any status) or `secs` elapse. "yes"/"no".
-// (aeocha has no readiness-poll matcher; this stays local. Per aeocha's note,
-// send_request frees resp + returns null on transport error, so only the
-// success branch frees.)
+// Poll a URL until it answers or `secs` elapse. "yes"/"no".
 _wait_http(url: string, secs: int) -> string {
     waited = 0
     while waited < secs {
