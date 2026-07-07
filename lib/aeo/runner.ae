@@ -19,9 +19,6 @@
 
 import std.config
 import std.string (string_length, string_substring, string_index_of, string_char_at, string_from_char, string_starts_with)
-import std.string   // bare TOO: the compiler emits qualified `string.copy` for
-                    // some string-return/copy shapes, and a selective-only
-                    // import leaves it unresolved (the aeocha bare-import class)
 import std.list
 import driver_linux
 import driver_lxc
@@ -46,6 +43,7 @@ import transport_http (post_path, probe_health)
 import attest
 import audit
 import secrets
+import std.intarr
 import resource (set_state, get_state, STATE_DOWN, STATE_BOOTING, STATE_UP, STATE_FAILED)
 import host (family, profile)
 import aeo_compose (aeo_orchestration)
@@ -1102,10 +1100,14 @@ _enforce_limits(nm: string) {
 //      CONCURRENTLY, so a level of lingering nodes costs max(window), not sum.
 run_down() {
     n = compose.count()
+    // Depths computed ONCE into an int array (indexed by declaration order) —
+    // the level loop reads them instead of re-walking the parent chains.
+    depths = intarr.intarr_new_raw(n)
     maxd = 0
     i = 0
     while i < n {
         d = _teardown_depth(compose.name_at(i))
+        intarr.intarr_set_unchecked(depths, i, d)
         if d > maxd {
             maxd = d
         }
@@ -1117,7 +1119,7 @@ run_down() {
         i = n - 1
         while i >= 0 {             // reverse declaration order within the level
             nm = compose.name_at(i)
-            if _teardown_depth(nm) == lvl {
+            if intarr.intarr_get_unchecked(depths, i) == lvl {
                 // Drop this node's pf anchor BEFORE halting it, so no stale deny
                 // rules outlive the node (its address returns to the ipam pool).
                 // FreeBSD-only + best-effort: a flush failure doesn't block teardown.
@@ -1157,6 +1159,7 @@ run_down() {
         list_free(halted)
         lvl = lvl - 1
     }
+    intarr.intarr_free(depths)
     wait_for_idle()
 }
 
@@ -1469,6 +1472,48 @@ _running_for_pref(prefs: ptr, p: int) -> string {
     return driver_linux.running_names(pref)
 }
 
+// The " a b c "-padded still-running set across ALL host-visible container
+// nodes of the composition — one `ps` per distinct engine. The status walk's
+// batch source (same shape as _alive_set / _gone_alive_set).
+_status_alive_set() -> string {
+    s = " "
+    n = compose.count()
+    prefs = list_new()
+    i = 0
+    while i < n {
+        nm = compose.name_at(i)
+        if _engine_gonecheckable(nm) == 1 {
+            pref = compose.get_engine(nm)
+            if _list_has(prefs, pref) == 0 {
+                _ = list_add(prefs, pref)
+            }
+        }
+        i = i + 1
+    }
+    p = 0
+    np = list_size(prefs)
+    while p < np {
+        running = _running_for_pref(prefs, p)
+        s = "${s}${_nl2sp(running)} "
+        p = p + 1
+    }
+    list_free(prefs)
+    return s
+}
+
+// Liveness for the status walk: host-visible engine containers consult the
+// batched `alive` set; every other kind (VMs, jails, sandboxes, WSL engines,
+// nested containers) keeps its per-node driver probe.
+_live_state(nm: string, k: string, alive: string) -> int {
+    if _engine_gonecheckable(nm) == 1 {
+        if string_index_of(alive, " ${nm} ") >= 0 {
+            return 1
+        }
+        return 0
+    }
+    return driver_probe(nm, k, "")
+}
+
 
 // Block until `nm` reports down (best-effort; bounded).
 _await_down(nm: string, secs: int) {
@@ -1496,6 +1541,9 @@ _status() {
     sys = compose.syscount()
     n = compose.count()
     println("aeo: ${sys} system(s), ${n} resource(s) declared")
+    // ONE `ps` per distinct engine for all the host-visible container nodes;
+    // the walk consults the membership set instead of probing each one.
+    alive = _status_alive_set()
     i = 0
     while i < n {
         nm = compose.name_at(i)
@@ -1503,7 +1551,7 @@ _status() {
         dep = compose.get_depends(nm)
         host = compose.get_host(nm)
         sysn = compose.get_system(nm)
-        live = driver_probe(nm, k, "")
+        live = _live_state(nm, k, alive)
         st = "down"
         if live == 1 {
             st = "up"
@@ -1616,12 +1664,13 @@ _status_json_on() -> int {
 // differs. Hand-built (the fields are known strings) with JSON escaping.
 _status_json() {
     n = compose.count()
+    alive = _status_alive_set()          // one `ps` per engine, not one per node
     out = "["
     i = 0
     while i < n {
         nm = compose.name_at(i)
         k = compose.get_kind(nm)
-        live = driver_probe(nm, k, "")
+        live = _live_state(nm, k, alive)
         st = "down"
         if live == 1 {
             st = "up"
