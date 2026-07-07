@@ -58,12 +58,28 @@ leftovers). Live-prove on a Linux box for full confidence:
 - [x] **README "Try it in 60 seconds"** — build front door, doctor, build the
       demo app image, up, curl, status/exec, verified down. Works on a stock
       Mac or Linux box with docker/podman.
-- [ ] ae-0.338-on-macOS quirk (recorded in LLM.md): selective-only
-      std.string/std.os imports leave compiler-emitted qualified calls
-      (`string.copy`, `os_platform`, `os.now_monotonic_ns`) unresolved — three
-      upstream specs didn't build on this box until a bare import was added
-      beside the selective one. Harmless on other toolchains; possibly fixed in
-      a newer ae — retest on the next compiler bump.
+- [x] **ae-0.338 selective-import quirk RESOLVED on ae 0.364** — the phantom
+      `string.copy`/`os_platform`/`os.now_monotonic_ns` from selective-only
+      std.string/std.os imports is gone on 0.364 (upgraded via the canonical
+      installer; 0.338 stays version-managed for rollback). EVERY bare-import
+      workaround deleted (6 mine + 9 legacy aeocha ones across the specs);
+      bin/aeo.ae moved to qualified `os.*` calls (designs the trigger out, not
+      a workaround). Suite 193 green on 0.364, no bare-import crutches.
+- [x] **Perf pass, all serial/quadratic paths closed** (ae 0.364):
+      - `aeo status` (both text + `--json`) now does ONE `ps` per distinct
+        engine for all host-visible container nodes instead of one probe per
+        node (the _status_alive_set batch, same shape as the bring-up/teardown
+        pollers). VMs/jails/sandboxes/nested keep their per-node probe.
+      - run_down computes teardown depths ONCE into a std.intarr (indexed by
+        declaration order) instead of re-walking each node's parent chains per
+        level — O(N) depths, not O(N·levels) chain walks.
+      - lib/secrets hex plumbing (_hex_of/_unhex/_xor_hex/_keystream) rebuilt on
+        std.strbuilder — O(n) append, not O(n²) string-concat; keygen is now
+        fully native (cryptography.random_hex + fs.write_atomic + fs.chmod 0600,
+        no shell/od/tr subprocess); load_key is a direct fs.read (no shell).
+      - inspect_state uses os.run_full (separate stderr capture) so an absent
+        container's "No such object" no longer leaks onto aeo's stderr during
+        `aeo dry-run`/reconcile.
 
 ## Containment / impregnability roadmap
 

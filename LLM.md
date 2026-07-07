@@ -6,7 +6,7 @@ that keep it coherent, the footguns. Re-read at the start of every session. **Fo
 an observer wanting to *use* aeo for its purpose:** the "What aeo is for" and "A
 composition, end to end" sections are your entry; the rest is the engine room.
 
-Not a CLAUDE.md. Short, opinionated, current as of ae 0.328 (2026-06-27).
+Not a CLAUDE.md. Short, opinionated, current as of ae 0.364 (2026-07-07).
 
 ---
 
@@ -228,16 +228,16 @@ is load-bearing: Aether's module `var` had a string of cross-import soundness bu
 - **Multi-return is one-call destructure only** — `a, b = f()`. Don't chain.
 - **Duration literals** (`30s`, `500ms`) are i64 ns; `/ 1000000` → ms (`as int` is
   rejected, `/` works). Used by within/every/without.
-- **Selective `import std.string (...)` does NOT provide bare `copy()`** — the
-  aeocha specs need a bare `import std.string` too (aeocha calls `copy`
-  unqualified). #870/#878 fixed the *qualified* surface, not this. The class is
-  BIGGER and partly TOOLCHAIN-DEPENDENT: on the macOS dev box's ae 0.338, a
-  selective-only `import std.string`/`import std.os` leaves COMPILER-EMITTED
-  qualified calls unresolved (`string.copy` for some string-return shapes —
-  hit runner.ae, driver_linux, spec_extract/driver_conformance/ipfw_preflight;
-  `os_platform` via lib/host in bin/aeo.ae; aeocha's `os.now_monotonic_ns`).
-  Rule: put a bare `import std.string` / `import std.os` BESIDE any selective
-  one in an entry file or shared module; it only adds names, never conflicts.
+- **Selective imports + compiler-emitted qualified calls (FIXED in ae 0.364).**
+  On ae ≤ 0.338 a selective-only `import std.string`/`import std.os` could leave
+  COMPILER-EMITTED qualified calls unresolved (`string.copy` for some
+  string-return shapes; `os_platform` via a transitively-imported `platform()`;
+  aeocha's `os.now_monotonic_ns`), and the fix was a bare `import std.string` /
+  `import std.os` beside the selective one. **ae 0.364 resolves this** — every
+  such bare-import crutch has been removed from the tree, and `bin/aeo.ae` uses
+  qualified `os.*` calls (cleaner than the workaround). If you're on an older
+  toolchain and hit a phantom `string.copy`/`os_platform`, upgrade
+  (`~/scm/aether && ./install.sh`) rather than re-adding the bare import.
 - **`seal` is a reserved word** (the compiler says so; `unseal` is NOT —
   verified). lib/secrets uses `seal_value`/`unseal_value`.
 - **Aether's std.http.client SIGABRTs intermittently on macOS** (mid-request).
