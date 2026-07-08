@@ -8,6 +8,13 @@ Soeters' "Towards the dark factory" (Formae's autonomous-agent setup), which
 locks agent containers to *"a firewall with an explicit FQDN allowlist … and
 nothing else. Everything else is dropped and logged."*
 
+**The realization (§6.5):** the control lowers to a **minimal CONNECT gateway in
+aeo-agent, built over `std.tcp`** — decide on the name at the CONNECT line
+(fail-closed, no MITM), then splice — which **complements** aeo's already-coded
+`allow_egress(ip)` (the L3 floor that makes the gateway unbypassable). All
+primitives already exist in Aether's `std.tcp`; a `tcp_splice` is a library
+composition, not an upstream ask. Concrete build in §8.
+
 The motivating threat: an agent container feeds attacker-influenceable text
 (issue bodies, PR comments) through an LLM **that holds live credentials**. A
 prompt injection then tries to **exfiltrate those credentials**. aeo already
@@ -238,6 +245,94 @@ point where those scoped creds are the only lever.
 
 ---
 
+## 6.5. The realization: a CONNECT gateway in aeo-agent, over `std.tcp`
+
+The `egress_fqdn` proxy does NOT have to be a Squid/Envoy sidecar, and it does
+NOT have to be a full HTTP proxy. The threat model needs exactly one behavior — a
+**CONNECT gateway**: read the `CONNECT host:port` line, decide on the *name*
+before any bytes flow, then splice the opaque stream. That is buildable **today in
+pure Aether**, and it lands the enforcement in aeo-agent itself (the brain,
+per §4) without importing a general HTTP-proxy's attack surface (per the
+mitmproxy analysis — adopt the *tunnel* behavior, not the MITM stack).
+
+### 6.5a. Why the agent-as-proxy is sound here (and node-as-proxy is not)
+
+Whose agent matters. The **parent's** agent proxying for the **child** node sits
+*outside* the node's boundary, on the trusted side — that is the same trust
+gradient aeo-agent already runs on ("acts inside, reports outward"). The node's
+own in-container process being the proxy would put the filter *inside* the
+boundary a compromised node owns → rejected (see §4). So: the gateway is the
+**parent-agent's** listener; the node is routed to it and cannot reach around it.
+
+Agent-as-**brain** (owns the name decision + path stamp — its knowledge is
+unique) but a **minimal CONNECT relay for the bloodstream** (no HTTP/2/3, no
+TLS interception, no content views) — a deliberately dumb, auditable data plane.
+
+### 6.5b. It is NOT `java.exe` that opens the true-endpoint socket
+
+The containment hinges on this. With `https_proxy=http://<agent>:PORT` in the
+node, a process (`java.exe`) does **not** connect to `github.com`. It connects to
+the **gateway** and sends `CONNECT github.com:443`. The **gateway** (trusted side)
+opens the socket to `github.com`, replies `200 Connection Established`, and
+splices bytes. The node's processes have **no route to the internet at all** —
+their only reachable thing is the gateway. That is *why* it contains, and why the
+node never needs (or gets) `allow_egress(githubIP)`.
+
+```
+java.exe  --CONNECT github.com:443-->  aeo-agent gateway (parent side)
+                                         │ 1. read CONNECT line
+                                         │ 2. relay UP to parent, parent STAMPS X-Aeo-Path
+                                         │ 3. DECIDE on the name — deny here = fail-closed,
+                                         │    BEFORE 200, before a single payload byte
+                                         │ 4. resolve github.com -> 140.82.x.x
+                                         │ 5. allow_egress(140.82.x.x) on the GATEWAY's egress
+                                         │ 6. tcp.connect(140.82.x.x, 443); 200 Established
+                                         └ 7. splice opaque bytes both ways (no MITM)
+```
+
+The deny is made **on the CONNECT line, before `200`, before the splice** — the
+only enforcement moment (post-`200` bytes are opaque TLS, uninspectable by
+design, and that is fine: the name decision at connect-time is the whole control
+surface because the node has no other route out). At each level up the tree the
+relaying parent re-decides on the CONNECT and may deny a host its child approved
+(narrow-only, §5b) — the denial lands at CONNECT, so nothing leaks.
+
+### 6.5c. Primitives — all present; nothing to file upstream
+
+`std.tcp` (aka `std.net`) already exposes the full set: `connect`,
+`listen`/`accept`, `read`/`write`, `close`, and `fd()`/`server_fd()` (the raw OS
+descriptor — its own doc-comment anticipates confined-relay use:
+"connect through the stdlib, then narrow the descriptor with `capsicum.rights_limit`
+before `capsicum.enter()`"). `std.http.server` can parse the one CONNECT request
+line, or a bare `tcp.read` + line-split suffices. **A `tcp_splice` is a library
+composition** — a two-actor `read→write` pump, one actor per direction — **not a
+missing primitive; do NOT file it as an upstream ask.** The two narrow things that
+*could* be real stdlib gaps are only filed if the build actually hits them: (a) a
+multi-fd readiness poll (sidestepped by one actor per direction), and (b) whether
+`tcp_receive_raw` distinguishes clean-EOF from would-block (matters for
+half-close). Surface them empirically, file only if genuinely absent.
+
+### 6.5d. How this COMPLEMENTS the already-coded `allow_egress(ip)`
+
+They are **stacked layers of one boundary**, not competitors — `allow_egress`
+(L3/L4, IP-subject, kernel-enforced) appears at BOTH ends, doing two jobs:
+
+- **On the NODE — the black-hole floor:** `allow_egress(<gateway_ip>)` and nothing
+  else. `java.exe` *cannot* open TCP to `github.com` — no route. **This is what
+  makes the gateway unbypassable** (kills raw-TCP / QUIC / DNS-tunnel bypass too).
+  Existing primitive, doing the hard containment.
+- **On the GATEWAY — the resolved-IP pin:** after the name is approved,
+  `allow_egress(<resolved_ip>)` on the gateway's own egress — the name→IP bridge
+  the DNS-firewall idea in §1 called for.
+
+Neither replaces the other: `allow_egress` alone can't express "github.com" (CDN
+IPs are huge/rotating); the gateway alone is bypassed if the node keeps a direct
+route. **Together:** the node has no route except the gateway (L3 floor), and the
+gateway enforces *names* (L7 decision at CONNECT). The kernel floor makes the
+gateway unbypassable; the gateway makes the floor name-aware. Full seal.
+
+---
+
 ## 7. Summary of the decision
 
 | item | verdict | why |
@@ -248,21 +343,43 @@ point where those scoped creds are the only lever.
 | **hierarchy** | each level enforced by the level above | compromised agent narrows below itself, never widens itself — structural |
 | **`X-Aeo-Path` context** | **parent-stamped, never child-asserted; narrow-only** | removes attacker-controlled input by construction; ground truth from the wire, identity from the channel |
 | **allowed-host exfil** | out of network scope → **credential scoping** | the outer ring can't stop misuse of a sanctioned host; scoped short-TTL creds make a leak survivable |
+| **proxy shape** | **minimal CONNECT gateway in aeo-agent over `std.tcp`** | not a Squid sidecar, not a full HTTP proxy; agent = brain (name decision + path stamp), a dumb 2-actor splice = bloodstream; deny at CONNECT, fail-closed, no MITM |
+| **relation to `allow_egress(ip)`** | **complements — stacked layers** | node floor `allow_egress(gateway)` makes the gateway unbypassable; gateway pins `allow_egress(resolved_ip)` after approving the name; kernel floor + name-aware gateway = full seal |
+| **`tcp_splice` upstream ask** | **do NOT file** | `std.tcp` already has connect/listen/accept/read/write/fd; a splice is a library composition, not a missing primitive |
 
-## 8. First buildable slice (when we build it)
+## 8. First buildable slice (the concrete build)
 
-1. `egress_fqdn(...)` verb in `lib/compose` (records the allowlist per node).
-2. `confine_linux` lowering: provision a Squid/Envoy CONNECT-allowlist sidecar on
-   the node's podman network; black-hole the node's default route; set
-   `http_proxy`/`https_proxy` + route to the sidecar. Default-drop + log.
-3. `_enforce_egress_fqdn(bn)` hook in `lib/aeo/runner.ae`, beside
-   `_enforce_netpolicy`. The agent inherits it via the shared driver path.
-4. Live-prove on CachyOS: a node with `egress_fqdn("api.github.com")` reaches
-   GitHub, is dropped+logged reaching anything else; verify the node **cannot**
-   alter its own allowlist (immutability check).
-5. Hierarchy + parent-stamped path is a later thickening (needs the aeo-agent
-   http transport's authenticated single-parent identity first — see §5b rule 2).
+The proxy is a **CONNECT gateway in aeo-agent over `std.tcp`** (§6.5), not a
+sidecar. In dependency order:
+
+1. **`lib/egress_relay` — the dumb data plane.** A minimal CONNECT relay over
+   `std.tcp`: `listen`/`accept` the node's connection, read the `CONNECT host:port`
+   request line, hand `host` to a decision callback, and on approval
+   `tcp.connect(host,port)` → write `200 Connection Established` → **splice**
+   (two actors, one per direction, each `read(src)→write(dst)` until close). NO
+   HTTP parsing past the CONNECT line, NO TLS touch. Building this is also the
+   empirical probe for the two possible stdlib gaps in §6.5c (multi-fd poll,
+   EOF-vs-would-block) — file upstream ONLY if actually hit.
+2. **`egress_fqdn(...)` verb in `lib/compose`** — records the allowlist per node.
+3. **The decision callback** — allowlist-check the CONNECT host; on the hierarchy
+   path, relay UP to the parent (which stamps `X-Aeo-Path`, §5b) and let the
+   parent deny at CONNECT (fail-closed). Deny = refuse the tunnel (no `200`).
+4. **`confine_linux` lowering (the two `allow_egress` ends, §6.5d):** black-hole
+   the node's default route and `allow_egress(<gateway_ip>)` ONLY (the floor that
+   makes the gateway unbypassable); set the node's `http_proxy`/`https_proxy` to
+   the gateway; on the gateway side, `allow_egress(<resolved_ip>)` after a name is
+   approved (the resolved-IP pin).
+5. **`_enforce_egress_fqdn(bn)` hook in `lib/aeo/runner.ae`**, beside
+   `_enforce_netpolicy`. The runner (depth-0) and every nested agent inherit it via
+   the shared driver path — the gateway *is* aeo-agent's listener.
+6. **Live-prove on CachyOS:** a node with `egress_fqdn("api.github.com")` reaches
+   GitHub through the gateway; is **denied at CONNECT** (and logged) for any other
+   host; **cannot** open a direct socket to GitHub's IP (the L3 floor holds — no
+   route); and **cannot** alter its own allowlist (immutability check).
+7. **Hierarchy + parent-stamped path** is a later thickening — needs the aeo-agent
+   http transport's authenticated single-parent identity first (§5b rule 2). The
+   single-node gateway (steps 1–6) stands alone without it.
 
 See also `docs/aeo-agent.md` (the recursion / acts-inside-reports-outward model),
-`docs/aeo-supervisor.md`, and `lib/confine_linux` (where the layer-3/4
-confinement already lives).
+`docs/aeo-supervisor.md`, `lib/confine_linux` (where the layer-3/4 confinement
+already lives), and `std/tcp` in the aether repo (the relay's primitives).
