@@ -6,7 +6,28 @@ single Aether composition, with dependency-ordered bring-up gated on health,
 reverse-order teardown that *verifies* disappearance, per-node **confinement**
 (cgroups / cap-drop / network policy on Linux; rctl / jail boundary on FreeBSD),
 **image attestation** (verify-before-boot, fail-closed), and a **tamper-evident
-audit trail**:
+audit trail**.
+
+## Why aeo?
+
+**The problem**: Modern infrastructure needs to be both **declared** (reproducible,
+version-controlled, diff'able) and **live** (responsive to health, capable of
+rolling updates, safe to tear down). Terraform declares; Kubernetes runs live.
+aeo does both from the same file.
+
+**The promise**: A single `.ae` composition declares a tree of nodes, their
+dependencies, health checks, containment policy, and attestation requirements.
+`aeo up` brings it all up in parallel (respecting dependencies), health-gated.
+`aeo watch` keeps it coherent. `aeo down` tears it down in reverse, verifying
+each node is gone. No drift, no config creep, auditable at every step.
+
+**The security story**: Every node runs confined (cap-drop, network-deny-default,
+resource caps). Images are attested (SHA-256 verified before boot, wrong digests
+refused). The audit log is tamper-evident (hash-chained). Secrets stay ciphertext
+in state/logs and decrypt only at use (fail-closed on tampering or wrong key).
+
+**Portable**: Works on Linux (podman/docker, LXC, KVM), macOS (Docker Desktop),
+and FreeBSD (jails, bhyve). Same composition, different drivers — no rewrites.
 
 ```
 aeo up       compose.ae      # bring the tree up, dependency-ordered, gated on health
@@ -90,6 +111,23 @@ forces). `aeo doctor` reports which kinds this host can execute and what's
 missing for the rest; `aeo secrets` seals values (tokens, creds) so they stay
 ciphertext everywhere aeo holds state and decrypt only at use, fail-closed.
 
+## Features at a glance
+
+| Feature | aeo | Kubernetes | Docker Compose | Terraform |
+|---------|-----|------------|-----------------|-----------|
+| **Declare infrastructure** | ✅ | ✅ | ✅ | ✅ |
+| **Health-gated bring-up** | ✅ | ✅ | ⚠️ basic | ❌ |
+| **Verify teardown** (nodes actually gone) | ✅ | ✅ | ❌ | ❌ |
+| **Per-node confinement** (cap-drop, rctl, netpolicy) | ✅ | ✅ | ⚠️ limited | ❌ |
+| **Image attestation** (verify before boot, fail-closed) | ✅ | ⚠️ admission control | ❌ | ❌ |
+| **Tamper-evident audit trail** | ✅ | ⚠️ event log | ❌ | ❌ |
+| **Runtime reconcile/watch** | ✅ | ✅ | ❌ | ❌ |
+| **Zero-downtime cutover** (blue-green) | ✅ (aeo cutover) | ✅ | ❌ | ❌ |
+| **No YAML** (config IS code) | ✅ | ❌ | ❌ | ✅ |
+| **VM + container substrate** (same file) | ✅ | ❌ | ❌ | ✅ |
+| **Multi-OS** (Linux, macOS, FreeBSD) | ✅ | ⚠️ Linux-first | ✅ | ✅ |
+| **Portable driver model** (docker/podman/lxc/bhyve/jail) | ✅ | ❌ | ⚠️ engine only | ✅ |
+
 ## The one-line distinction
 
 | | does | invocation |
@@ -102,6 +140,59 @@ runtime no-op. aeo is *imperative-runtime* — `vm(a).wait_for_it_to_be_up()` is
 a live handle that blocks on liveness; ordering is by **health**, not by
 artifact existence. aeo is the runtime-lifecycle layer aeb deliberately refuses
 to have. If aeo ever needs build-graph work, it shells out to aeb.
+
+## Design principles
+
+**Config IS code.** The composition is pure Aether — control flow, env lookups,
+conditionals — not YAML. Derive a database password from a secret key, select
+container kinds based on host capabilities, loop over a fleet of nodes. This is
+feature, not a bug.
+
+**Declare, then execute.** The composition is data (a pure declaration of the
+resource tree). The runner is the executor. They're separate concerns. Same
+composition can be checked (dry-run), smoke-tested (deploy + test + keep), or
+fully tested (deploy + test + tear down).
+
+**Health-gated, not schedule-gated.** Bring-up waits for **health**, not just
+"container started". A node is ready when *you* say it's ready (via the health
+check). Teardown verifies disappearance, not just "stop signal sent".
+
+**Portable.** Same composition runs on Linux (podman/docker/LXC/KVM) and FreeBSD
+(jail/bhyve) without rewrites. Drivers are isolated; the DSL is substrate-agnostic.
+
+**Confined by default.** Every node runs with a cap-drop floor and network-deny
+default. Confinement is *declared* (you set the high-water mark), not
+bolted-on post-hoc.
+
+**Auditable.** Every step — build, bring-up, health, teardown — is logged. The
+audit trail is tamper-evident (hash-chained). Secrets stay ciphertext and
+decrypt only at use.
+
+## Common patterns
+
+**Microservices architecture** (the 60-second demo). Database tier (Redis/Postgres)
+← application tier (Node/Python) ← reverse proxy. Health checks at each layer.
+Confinement: app has network access to DB only; reverse proxy allows only port 80/443.
+
+**Distributed system testing.** Spin up N nodes (broker, replicas, clients),
+declare confinement (this replica can reach only these others), run your chaos
+tests, tear down. Composition is the test harness. `aeo check` validates the
+topology; `aeo smoke` deploys + tests + leaves it running; `aeo suite` deploys
++ tests + tears down. Same file, different phases.
+
+**Live infrastructure (permanent)** with `aeo watch --converge`. Declare your
+nodes once. aeo watches for drift (a crashed container, a failed health check),
+reconciles automatically, and logs every action. Manual fixes and drift creep
+become impossible.
+
+**Blue-green deployments.** Declare version A (blue). Run `aeo up blue.ae`.
+Later, declare version B (green) with `aeo cutover blue.ae app-tier`. aeo brings
+up green in parallel, health-gates it, swaps the alias, retires blue. Zero
+downtime, atomic.
+
+**Compliance + audit.** Every node confined by default. Image digests attested.
+Audit trail tamper-evident. `aeo audit` verifies the chain end-to-end. Meets
+regulatory requirements without extra tooling.
 
 ## A composition
 
