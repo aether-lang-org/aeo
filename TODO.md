@@ -223,6 +223,22 @@ driver picks rctl/Capsicum/pf on FreeBSD vs cgroups/seccomp/network on Linux).
       if_bridge bug (§1) — podman routed nets, no bridge filter. spec 12.
 - [ ] Follow-up: --cpus from pcpu (limit_cpu); finer ingress_from peer-scoping
       (v0 internal-net is per-system, not per-pair).
+- [ ] **Layer-7 egress: `egress_fqdn(...)` allowlist** — DESIGN captured in
+      `docs/egress-fqdn-considered.md` (2026-07-08, prompted by Formae's
+      FQDN-allowlist agent setup). The layer-3/4 netpolicy above filters by
+      IP/net; the exfil-hardening threat (a prompt-injected agent holding live
+      creds) wants a DESTINATION-NAME allowlist. A packet filter structurally
+      can't (name is gone by SYN-time; CDN IPs are huge/rotating), so it lowers
+      to a CONNECT/SNI-allowlist proxy the node's routed through (no MITM),
+      default-drop+log. Decisions on record: **build** the FQDN allowlist;
+      **reject** HTTP-method limiting (forces MITM *and* GET isn't read-only —
+      body + query-string exfil; can't enforce data-flow with a metadata filter);
+      the agent **provisions** the boundary but is **never in the data path**;
+      hierarchy = each level enforced by the level above; any `X-Aeo-Path`
+      containment context is **parent-stamped, never child-asserted** (narrow-only,
+      identity bound by the authenticated channel). Buildable slice + immutability
+      live-proof in §8 of the doc. Residual hole (exfil THROUGH an allowed host)
+      is answered by credential scoping, not more network filtering.
 
 ## Lifecycle & state ops (snapshot / rollback / backup / prune / exec / restart)
 Day-2 operability for a STANDING deployment: capture point-in-time state, restore
