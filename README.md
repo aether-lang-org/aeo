@@ -303,6 +303,36 @@ substrate grid (read one, diff against another). Each example is a **pure
 declaration** that names its own `check()`/`smoke()`/`suite()` verification specs;
 `aeo <phase> <example>.ae` executes it.
 
+## Performance
+
+aeo is fast because it **parallelizes aggressively** and **caches wisely**.
+
+**Bring-up**: Level-parallel orchestration (topological sort respecting both
+`depends()` and containment edges). All nodes at the same level boot in parallel.
+Health polls are batched (one OS `ps` per engine for all host containers, not per
+node). A 2-node demo brings up in ~2-3s; a 9-node DAG in ~15s.
+
+**Build cache**: The front door content-hashes the entire closure (compose + all
+lib files + toolchain version) and caches the compiled binary. Repeated `aeo
+status` on an unchanged composition: 3.2s (first run, compile) → 0.26s (cache
+hit, 12.5× speedup).
+
+**Teardown**: Reverse-topology, level-parallel. Nodes at the same level halt
+concurrently. Tear-down of a 15-node cluster with uncooperative containers
+(ignore SIGTERM) dropped from 15.6s (serial) to 6.3s (parallel) by batching stops
+per engine and giving one grace period per level, not per node.
+
+**Status probing**: A single `ps` per distinct engine (docker/podman/lxc/etc)
+reports all host-visible containers, not one probe per node. On a 9-node tree:
+~0.3s (batched) vs ~2.7s (one per node).
+
+**Secrets**: O(n) encryption/decryption (HMAC-SHA256 labeled derivation + PRF-CTR
+keystream on `std.strbuilder`) instead of O(n²) string concat. Native keygen
+(no subprocess).
+
+See [`TODO.md`](./TODO.md) for detailed measurements and [`aeo-design.md`](./aeo-design.md)
+for the architecture.
+
 ## Running it
 
 aeo compiles your composition into a supervised runner and executes it. Point
