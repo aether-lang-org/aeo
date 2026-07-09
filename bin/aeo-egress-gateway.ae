@@ -1,0 +1,76 @@
+// aeo-egress-gateway — std.http CONNECT decision gateway shell.
+//
+// Env:
+//   AEO_EGRESS_ALLOW   comma-separated FQDN allowlist
+//   AEO_EGRESS_HOST    bind host, default 127.0.0.1
+//   AEO_EGRESS_PORT    bind port, default 9470
+//
+// This intentionally stops at the std.http CONNECT decision response. A real
+// tunnel still needs std.http.server to expose connection handoff after 200.
+
+import std.http (http_server_create, http_server_set_host, http_server_add_route,
+                 http_server_start_raw, http_response_set_status,
+                 http_response_set_header, http_response_set_body,
+                 request_method, request_path)
+import std.os (os_getenv)
+import std.string (string_length, string_get_int)
+import egress_gateway (
+    set_allowlist, allowlist, decision_status_for_http,
+    response_body_for_status, tunnel_blocker
+)
+
+@c_callback h_connect(req: ptr, res: ptr, ud: ptr) {
+    st = decision_status_for_http(request_method(req), request_path(req), allowlist())
+    http_response_set_status(res, st)
+    http_response_set_header(res, "Connection", "close")
+    http_response_set_header(res, "Content-Type", "text/plain")
+    http_response_set_body(res, response_body_for_status(st))
+}
+
+main() {
+    host = _env_default("AEO_EGRESS_HOST", "127.0.0.1")
+    port = _env_int_default("AEO_EGRESS_PORT", 9470)
+    allow = _env_default("AEO_EGRESS_ALLOW", "")
+    set_allowlist(allow)
+
+    raw = http_server_create(port)
+    if raw == 0 {
+        println("aeo-egress-gateway: server_create failed")
+        return
+    }
+    http_server_set_host(raw, host)
+    http_server_add_route(raw, "CONNECT", "*", h_connect, 0)
+
+    println("aeo-egress-gateway: listening on ${host}:${port}")
+    println("aeo-egress-gateway: ${tunnel_blocker()}")
+    rc = http_server_start_raw(raw)
+    if rc < 0 {
+        println("aeo-egress-gateway: server_start failed")
+    }
+}
+
+_env_default(name: string, fallback: string) -> string {
+    v = os_getenv(name)
+    if v == null {
+        return fallback
+    }
+    if string_length(v) == 0 {
+        return fallback
+    }
+    return v
+}
+
+_env_int_default(name: string, fallback: int) -> int {
+    v = os_getenv(name)
+    if v == null {
+        return fallback
+    }
+    if string_length(v) == 0 {
+        return fallback
+    }
+    n = string_get_int(v)
+    if n <= 0 {
+        return fallback
+    }
+    return n
+}

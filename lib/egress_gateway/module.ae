@@ -1,0 +1,244 @@
+// lib/egress_gateway — std.http-facing CONNECT gateway shell for egress_fqdn.
+//
+// This is the runtime HTTP edge around egress_relay's pure decision core. It
+// intentionally uses std.http server/client APIs only. Current std.http.server
+// can route CONNECT and emit the pre-tunnel decision response, but it does not
+// yet expose a public "take over this accepted connection after 200" hook, so
+// the opaque tunnel pump is still a std.http API follow-up rather than raw TCP
+// code in aeo.
+
+import std.http.client (request, use_http_proxy, set_timeout, send_request,
+                        response_status, response_free, request_free)
+import std.config
+import std.string (
+    string_length, string_index_of, string_substring,
+    string_char_at, string_get_int, string_to_lower
+)
+
+exports (
+    set_allowlist, allowlist,
+    decision_status_for_http, decision_reason_for_http,
+    response_body_for_status, connect_request_from_http,
+    tunnel_supported, tunnel_blocker,
+    probe_direct_connect_status, probe_connect_denied
+)
+
+set_allowlist(csv: string) {
+    config.put("aeo.egress_gateway.allow_csv", csv)
+}
+
+allowlist() -> string {
+    return config.get("aeo.egress_gateway.allow_csv")
+}
+
+decision_status_for_http(method: string, path: string, allow_csv: string) -> int {
+    if method != "CONNECT" {
+        return 400
+    }
+    host = connect_host_from_path(path)
+    port = connect_port_from_path(path)
+    if string_length(host) == 0 {
+        return 400
+    }
+    if port == 0 {
+        return 400
+    }
+    if host_allowed(allow_csv, host) == 1 {
+        return 200
+    }
+    return 403
+}
+
+decision_reason_for_http(method: string, path: string, allow_csv: string) -> string {
+    st = decision_status_for_http(method, path, allow_csv)
+    if st == 200 {
+        return "allow"
+    }
+    if st == 403 {
+        return "deny:not-allowlisted"
+    }
+    return "deny:bad-connect"
+}
+
+connect_request_from_http(method: string, path: string) -> string {
+    if method != "CONNECT" {
+        return "${method} ${path} HTTP/1.1\r\n\r\n"
+    }
+    authority = _authority_from_path(path)
+    return "CONNECT ${authority} HTTP/1.1\r\n\r\n"
+}
+
+connect_host_from_path(path: string) -> string {
+    authority = _authority_from_path(path)
+    colon = string_index_of(authority, ":")
+    if colon <= 0 {
+        return ""
+    }
+    return string_to_lower(string_substring(authority, 0, colon))
+}
+
+connect_port_from_path(path: string) -> int {
+    authority = _authority_from_path(path)
+    colon = string_index_of(authority, ":")
+    if colon <= 0 {
+        return 0
+    }
+    port_s = string_substring(authority, colon + 1, string_length(authority))
+    if _all_digits(port_s) == 0 {
+        return 0
+    }
+    port = string_get_int(port_s)
+    if port < 1 {
+        return 0
+    }
+    if port > 65535 {
+        return 0
+    }
+    return port
+}
+
+host_allowed(csv: string, host: string) -> int {
+    h = string_to_lower(host)
+    rest = csv
+    more = 1
+    while more == 1 {
+        idx = string_index_of(rest, ",")
+        entry = rest
+        if idx >= 0 {
+            entry = string_substring(rest, 0, idx)
+            rest = string_substring(rest, idx + 1, string_length(rest))
+        } else {
+            more = 0
+        }
+        e = string_to_lower(_trim(entry))
+        if string_length(e) > 0 {
+            if e == h {
+                return 1
+            }
+        }
+    }
+    return 0
+}
+
+response_body_for_status(status: int) -> string {
+    if status == 200 {
+        return "connect allowed; std.http tunnel handoff not wired"
+    }
+    if status == 403 {
+        return "connect denied: not allowlisted"
+    }
+    return "bad connect request"
+}
+
+// A real CONNECT proxy must keep the client socket open after the 200 and pump
+// opaque bytes. std.http.server route handlers do not currently expose that
+// connection takeover; keep this explicit so aeo does not silently ship an
+// advisory-only proxy.
+tunnel_supported() -> int {
+    return 0
+}
+
+tunnel_blocker() -> string {
+    return "std.http.server can route CONNECT but does not expose a public tunnel handoff/hijack API after 200"
+}
+
+// Client-side probe for the deny path using std.http.client's proxy support.
+// For a denied HTTPS origin the client performs CONNECT to `proxy_url`; a
+// refusal comes back as a transport error string. Return 1 when denial is seen.
+probe_connect_denied(proxy_url: string, target_url: string) -> int {
+    req = request("GET", target_url)
+    if req == 0 {
+        return 0
+    }
+    _ = use_http_proxy(req, proxy_url)
+    _ = set_timeout(req, 5s)
+    resp, err = send_request(req)
+    request_free(req)
+    if resp != 0 {
+        response_free(resp)
+    }
+    if string_length(err) == 0 {
+        return 0
+    }
+    if string_index_of(err, "proxy CONNECT refused") >= 0 {
+        return 1
+    }
+    return 0
+}
+
+// Loopback test/probe helper: send a direct CONNECT request to this gateway via
+// std.http.client and return the HTTP status. `base` is "http://host:port";
+// `authority` is "host:port" or another path-shaped authority.
+probe_direct_connect_status(base: string, authority: string) -> int {
+    req = request("CONNECT", "${base}/${authority}")
+    if req == 0 {
+        return 0
+    }
+    _ = set_timeout(req, 5s)
+    resp, err = send_request(req)
+    request_free(req)
+    if err != "" {
+        return 0
+    }
+    st = response_status(resp)
+    response_free(resp)
+    return st
+}
+
+_authority_from_path(path: string) -> string {
+    // std.http parses "CONNECT host:443 HTTP/1.1" with request_path = "host:443".
+    // Some clients may send absolute-form; strip scheme defensively.
+    p = path
+    if string_index_of(p, "/") == 0 {
+        p = string_substring(p, 1, string_length(p))
+    }
+    https = string_index_of(p, "https://")
+    if https == 0 {
+        p = string_substring(p, 8, string_length(p))
+    }
+    http = string_index_of(p, "http://")
+    if http == 0 {
+        p = string_substring(p, 7, string_length(p))
+    }
+    slash = string_index_of(p, "/")
+    if slash >= 0 {
+        p = string_substring(p, 0, slash)
+    }
+    return p
+}
+
+_all_digits(s: string) -> int {
+    n = string_length(s)
+    if n == 0 {
+        return 0
+    }
+    i = 0
+    while i < n {
+        c = string_char_at(s, i)
+        if c < 48 {
+            return 0
+        }
+        if c > 57 {
+            return 0
+        }
+        i = i + 1
+    }
+    return 1
+}
+
+_trim(s: string) -> string {
+    n = string_length(s)
+    lo = 0
+    while lo < n {
+        c = string_char_at(s, lo)
+        if c != 32 { if c != 10 { if c != 13 { if c != 9 { break } } } }
+        lo = lo + 1
+    }
+    hi = n
+    while hi > lo {
+        c = string_char_at(s, hi - 1)
+        if c != 32 { if c != 10 { if c != 13 { if c != 9 { break } } } }
+        hi = hi - 1
+    }
+    return string_substring(s, lo, hi)
+}
