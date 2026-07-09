@@ -1,0 +1,197 @@
+// lib/egress_relay — minimal CONNECT-gateway core for egress_fqdn.
+//
+// This module is deliberately pure for the first gateway slice: it parses the
+// CONNECT line and makes the allow/deny decision. The actual opaque TCP splice
+// needs length-aware TCP read/write in std.tcp; current tcp_send_raw uses strlen
+// and tcp_receive_raw returns a NUL-terminated string, so it cannot safely relay
+// TLS bytes.
+
+import std.string (
+    string_length, string_index_of, string_substring, string_contains,
+    string_char_at, string_get_int, string_to_lower
+)
+
+exports (
+    is_connect, connect_host, connect_port, host_allowed,
+    decision_status, decision_reason, response_for_status,
+    splice_supported, splice_blocker
+)
+
+is_connect(req: string) -> int {
+    line = _first_line(req)
+    if string_length(line) < 8 {
+        return 0
+    }
+    if string_substring(line, 0, 8) == "CONNECT " {
+        return 1
+    }
+    return 0
+}
+
+connect_host(req: string) -> string {
+    line = _first_line(req)
+    if is_connect(line) == 0 {
+        return ""
+    }
+    rest = string_substring(line, 8, string_length(line))
+    sp = string_index_of(rest, " ")
+    if sp < 0 {
+        return ""
+    }
+    authority = string_substring(rest, 0, sp)
+    colon = string_index_of(authority, ":")
+    if colon <= 0 {
+        return ""
+    }
+    return string_to_lower(string_substring(authority, 0, colon))
+}
+
+connect_port(req: string) -> int {
+    line = _first_line(req)
+    if is_connect(line) == 0 {
+        return 0
+    }
+    rest = string_substring(line, 8, string_length(line))
+    sp = string_index_of(rest, " ")
+    if sp < 0 {
+        return 0
+    }
+    authority = string_substring(rest, 0, sp)
+    colon = string_index_of(authority, ":")
+    if colon <= 0 {
+        return 0
+    }
+    port_s = string_substring(authority, colon + 1, string_length(authority))
+    if _all_digits(port_s) == 0 {
+        return 0
+    }
+    port = string_get_int(port_s)
+    if port < 1 {
+        return 0
+    }
+    if port > 65535 {
+        return 0
+    }
+    return port
+}
+
+// Exact host allowlist. `csv` is the compose helper shape:
+// "api.github.com, api.anthropic.com". No wildcards, suffixes, or trailing-dot
+// normalization yet; those are separate policy decisions.
+host_allowed(csv: string, host: string) -> int {
+    h = string_to_lower(host)
+    rest = csv
+    more = 1
+    while more == 1 {
+        idx = string_index_of(rest, ",")
+        entry = rest
+        if idx >= 0 {
+            entry = string_substring(rest, 0, idx)
+            rest = string_substring(rest, idx + 1, string_length(rest))
+        } else {
+            more = 0
+        }
+        e = string_to_lower(_trim(entry))
+        if string_length(e) > 0 {
+            if e == h {
+                return 1
+            }
+        }
+    }
+    return 0
+}
+
+decision_status(req: string, allow_csv: string) -> int {
+    if is_connect(req) == 0 {
+        return 400
+    }
+    host = connect_host(req)
+    port = connect_port(req)
+    if string_length(host) == 0 {
+        return 400
+    }
+    if port == 0 {
+        return 400
+    }
+    if host_allowed(allow_csv, host) == 1 {
+        return 200
+    }
+    return 403
+}
+
+decision_reason(req: string, allow_csv: string) -> string {
+    st = decision_status(req, allow_csv)
+    if st == 200 {
+        return "allow"
+    }
+    if st == 403 {
+        return "deny:not-allowlisted"
+    }
+    return "deny:bad-connect"
+}
+
+response_for_status(status: int) -> string {
+    if status == 200 {
+        return "HTTP/1.1 200 Connection Established\r\n\r\n"
+    }
+    if status == 403 {
+        return "HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n"
+    }
+    return "HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n"
+}
+
+splice_supported() -> int {
+    return 0
+}
+
+splice_blocker() -> string {
+    return "std.tcp is not length-aware yet: tcp_send_raw uses strlen and tcp_receive_raw returns a NUL-terminated string, so opaque TLS splice would corrupt binary streams"
+}
+
+_first_line(req: string) -> string {
+    crlf = string_index_of(req, "\r\n")
+    if crlf >= 0 {
+        return string_substring(req, 0, crlf)
+    }
+    lf = string_index_of(req, "\n")
+    if lf >= 0 {
+        return string_substring(req, 0, lf)
+    }
+    return req
+}
+
+_all_digits(s: string) -> int {
+    n = string_length(s)
+    if n == 0 {
+        return 0
+    }
+    i = 0
+    while i < n {
+        c = string_char_at(s, i)
+        if c < 48 {
+            return 0
+        }
+        if c > 57 {
+            return 0
+        }
+        i = i + 1
+    }
+    return 1
+}
+
+_trim(s: string) -> string {
+    n = string_length(s)
+    lo = 0
+    while lo < n {
+        c = string_char_at(s, lo)
+        if c != 32 { if c != 10 { if c != 13 { if c != 9 { break } } } }
+        lo = lo + 1
+    }
+    hi = n
+    while hi > lo {
+        c = string_char_at(s, hi - 1)
+        if c != 32 { if c != 10 { if c != 13 { if c != 9 { break } } } }
+        hi = hi - 1
+    }
+    return string_substring(s, lo, hi)
+}

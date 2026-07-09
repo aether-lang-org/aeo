@@ -54,8 +54,8 @@ exports (
     image_recipe, from, install, netplan_static, systemd_unit, realize_as,
     imgcount, imgname_at, get_img_from, get_img_install, get_img_netplan,
     get_img_units, get_img_unit_body, get_img_realize,
-    suspend, constrain, grant_fd, egress, ingress, ingress_from, deny_egress, deny_ingress, start,
-    get_suspended, get_started, get_constraints, get_netpolicy, pf_rules_for,
+    suspend, constrain, grant_fd, egress, egress_fqdn, ingress, ingress_from, deny_egress, deny_ingress, start,
+    get_suspended, get_started, get_constraints, get_netpolicy, has_egress_fqdn, egress_fqdn_csv, pf_rules_for,
     limit, limit_mem, limit_vmem, limit_cpu, limit_maxproc, limit_openfiles, get_rctl,
     describe_tree, dns_hosts
 )
@@ -404,6 +404,10 @@ grant_fd(_ctx: ptr, kind: string, target: string, rights: string) {
 // Capsicum fd grants above — direction/peer/port filtering, not fd rights).
 //   egress(target, port)  — may CONNECT OUT to `target` (a resource name aeo
 //       resolves to an IP at deploy time) on `port`. Nothing else outbound.
+//   egress_fqdn(host)     — may CONNECT OUT to this DNS name through the future
+//       parent-owned CONNECT gateway. Packet filters cannot enforce this directly;
+//       it is recorded in the same policy store so status/audit/model checks see
+//       the intended boundary before the gateway runtime lands.
 //   ingress(port)         — may ACCEPT IN on `port`. Nothing else inbound.
 //   deny_egress()         — EXPLICIT "reaches out to NOTHING". Use on a pure
 //       server (e.g. redis): if the workload is later compromised (latent
@@ -414,6 +418,9 @@ grant_fd(_ctx: ptr, kind: string, target: string, rights: string) {
 //   deny_ingress()        — EXPLICIT "accepts NOTHING in" (a pure client).
 egress(_ctx: ptr, target: string, port: int) {
     _net_add(_ctx, "egress->${target}:${string_from_int(port)}")
+}
+egress_fqdn(_ctx: ptr, host: string) {
+    _net_add(_ctx, "egress_fqdn:${host}")
 }
 ingress(_ctx: ptr, port: int) {
     _net_add(_ctx, "ingress:${string_from_int(port)}")
@@ -1001,6 +1008,37 @@ get_constraints(vm: string) -> string { return config.get("aeo.cmp.constraints.$
 // A VM's network whitelist (egress/ingress in its constrain block). "" = no
 // rules declared; once any rule exists, all other traffic is denied.
 get_netpolicy(vm: string) -> string { return config.get("aeo.cmp.netpolicy.${vm}") }
+has_egress_fqdn(vm: string) -> int {
+    if string_contains(get_netpolicy(vm), "egress_fqdn:") == 1 {
+        return 1
+    }
+    return 0
+}
+egress_fqdn_csv(vm: string) -> string {
+    pol = get_netpolicy(vm)
+    out = ""
+    rest = pol
+    more = 1
+    while more == 1 {
+        idx = string_index_of(rest, ", ")
+        entry = rest
+        if idx >= 0 {
+            entry = string_substring(rest, 0, idx)
+            rest = string_substring(rest, idx + 2, string_length(rest))
+        } else {
+            more = 0
+        }
+        if string_index_of(entry, "egress_fqdn:") == 0 {
+            host = string_substring(entry, 12, string_length(entry))
+            if string_length(out) == 0 {
+                out = host
+            } else {
+                out = "${out}, ${host}"
+            }
+        }
+    }
+    return out
+}
 
 // pf_rules_for(vm) — generate the pf ruleset that ENFORCES a VM's netpolicy.
 // Deny-default whitelist: emit `pass` lines for each declared flow, then a
@@ -1013,6 +1051,7 @@ get_netpolicy(vm: string) -> string { return config.get("aeo.cmp.netpolicy.${vm}
 //   ingress:P            -> pass in proto tcp to $self port P
 //   ingress:P<-PEER      -> pass in proto tcp from $PEER to $self port P
 //   egress->TGT:P        -> pass out proto tcp from $self to $TGT port P
+//   egress_fqdn:HOST     -> no pf pass (FQDN is enforced by CONNECT gateway)
 //   egress:DENY-ALL      -> (no pass; the catch-all block denies all egress)
 //   ingress:DENY-ALL     -> (no pass; catch-all denies all ingress)
 // then: block in/out to/from $self  (deny rest).

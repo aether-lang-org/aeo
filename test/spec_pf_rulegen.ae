@@ -8,7 +8,7 @@
 // a 3rd/4th VM is blocked. The generated rules show exactly that.
 
 import aeocha
-import compose (constrain, grant_fd, ingress_from, egress, ingress, deny_egress, pf_rules_for, get_netpolicy)
+import compose (constrain, grant_fd, ingress_from, egress, egress_fqdn, ingress, deny_egress, pf_rules_for, get_netpolicy, has_egress_fqdn, egress_fqdn_csv)
 import std.string
 
 declare() {
@@ -18,6 +18,8 @@ declare() {
     }
     constrain("python_vm") {
         egress("db_vm", 6379)
+        egress_fqdn("api.github.com")
+        egress_fqdn("api.anthropic.com")
         ingress(8080)
     }
 }
@@ -50,6 +52,15 @@ main() {
             aeocha.it("passes OUT to db_vm:6379") callback {
                 aeocha.expect_int(_has(pf_rules_for("python_vm"),
                     "pass out proto tcp from $python_vm to $db_vm port 6379")).to_be_truthy()
+            }
+            aeocha.it("records FQDN egress intent in the model") callback {
+                aeocha.expect_int(has_egress_fqdn("python_vm")).to_be_truthy()
+                aeocha.expect_str(egress_fqdn_csv("python_vm")).to_equal_str("api.github.com, api.anthropic.com")
+            }
+            aeocha.it("does NOT turn FQDN egress into fake pf pass rules") callback {
+                aeocha.expect_int(_has(get_netpolicy("python_vm"), "egress_fqdn:api.github.com")).to_be_truthy()
+                aeocha.expect_int(_absent(pf_rules_for("python_vm"), "api.github.com")).to_be_truthy()
+                aeocha.expect_int(_absent(pf_rules_for("python_vm"), "api.anthropic.com")).to_be_truthy()
             }
             aeocha.it("passes IN on 8080") callback {
                 aeocha.expect_int(_has(pf_rules_for("python_vm"),

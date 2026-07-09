@@ -222,23 +222,29 @@ driver picks rctl/Capsicum/pf on FreeBSD vs cgroups/seccomp/network on Linux).
       (egress->db) reaches db but CANNOT reach the internet. SIDESTEPS the pf+
       if_bridge bug (§1) — podman routed nets, no bridge filter. spec 12.
 - [ ] Follow-up: --cpus from pcpu (limit_cpu); finer ingress_from peer-scoping
-      (v0 internal-net is per-system, not per-pair).
-- [ ] **Layer-7 egress: `egress_fqdn(...)` allowlist** — DESIGN captured in
+      (v0 internal-net is per-system, not per-pair); SELinux-aware podman
+      handling on Bazzite/Fedora hosts (bind-mount relabel policy such as `:Z`,
+      refuse/avoid unsafe `$HOME` relabels, document/profile-test the host
+      traps currently only noted in `docs/build-in-container.md`).
+- [ ] **Layer-7 egress: `egress_fqdn(...)` allowlist** — PARTIAL BUILD:
+      compose/model surface + pure CONNECT parser/decision core landed
+      (`lib/egress_relay`, `test/spec_egress_relay.ae`). Design captured in
       `docs/egress-fqdn-considered.md` (2026-07-08, prompted by Formae's
       FQDN-allowlist agent setup). The layer-3/4 netpolicy above filters by
       IP/net; the exfil-hardening threat (a prompt-injected agent holding live
       creds) wants a DESTINATION-NAME allowlist. A packet filter structurally
       can't (name is gone by SYN-time; CDN IPs are huge/rotating), so it lowers
-      to a CONNECT/SNI-allowlist proxy the node's routed through (no MITM),
-      default-drop+log. Decisions on record: **build** the FQDN allowlist;
+      to a parent-owned CONNECT allowlist gateway the node's routed through (no
+      MITM), default-drop+log. Decisions on record: **build** the FQDN allowlist;
       **reject** HTTP-method limiting (forces MITM *and* GET isn't read-only —
       body + query-string exfil; can't enforce data-flow with a metadata filter);
-      the agent **provisions** the boundary but is **never in the data path**;
-      hierarchy = each level enforced by the level above; any `X-Aeo-Path`
-      containment context is **parent-stamped, never child-asserted** (narrow-only,
-      identity bound by the authenticated channel). Buildable slice + immutability
-      live-proof in §8 of the doc. Residual hole (exfil THROUGH an allowed host)
-      is answered by credential scoping, not more network filtering.
+      the child never owns its own gateway; hierarchy = each level enforced by
+      the level above; any `X-Aeo-Path` containment context is **parent-stamped,
+      never child-asserted** (narrow-only, identity bound by the authenticated
+      channel). Next blocker: length-aware std.tcp read/write — current
+      tcp_send_raw uses strlen and tcp_receive_raw is NUL-terminated, so opaque
+      TLS splice is unsafe. Residual hole (exfil THROUGH an allowed host) is
+      answered by credential scoping, not more network filtering.
 
 ## Lifecycle & state ops (snapshot / rollback / backup / prune / exec / restart)
 Day-2 operability for a STANDING deployment: capture point-in-time state, restore

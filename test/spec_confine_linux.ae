@@ -60,6 +60,7 @@ main() {
             aeocha.it("net_kind classifies none / internal / shared") callback {
                 aeocha.expect_str(net_kind("egress:DENY-ALL")).to_equal_str("none")
                 aeocha.expect_str(net_kind("egress->db:6379")).to_equal_str("internal")
+                aeocha.expect_str(net_kind("egress_fqdn:api.github.com")).to_equal_str("internal")
                 aeocha.expect_str(net_kind("ingress:6379")).to_equal_str("shared")
                 aeocha.expect_str(net_kind("")).to_equal_str("shared")
             }
@@ -68,6 +69,9 @@ main() {
             }
             aeocha.it("peer egress -> the INTERNAL net (intra-only, no phone-home)") callback {
                 aeocha.expect_str(net_flags2("egress->db:6379", "aeo-sys", "aeo-sys-int")).to_equal_str("--network aeo-sys-int")
+            }
+            aeocha.it("FQDN egress -> the INTERNAL net until the gateway opens one path") callback {
+                aeocha.expect_str(net_flags2("egress_fqdn:api.github.com", "aeo-sys", "aeo-sys-int")).to_equal_str("--network aeo-sys-int")
             }
             aeocha.it("ingress/no-policy -> the shared aeo net (intra + egress)") callback {
                 aeocha.expect_str(net_flags("ingress:6379", "aeo-sys")).to_equal_str("--network aeo-sys")

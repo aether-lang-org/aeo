@@ -123,6 +123,9 @@ security_flags(constraints: string, netpolicy: string) -> string {
 //   egress->PEER flows, no ext -> "internal" : an --internal podman net — peers
 //                                 resolve + reach each other BY NAME, but the node
 //                                 CANNOT reach the host/internet (can't phone home).
+//   egress_fqdn:HOST           -> "internal" : future CONNECT-gateway tier. The
+//                                 node must not stay on shared internet while the
+//                                 name-aware gateway is being enforced.
 //   no netpolicy               -> "shared"   : the shared aeo net (intra + egress).
 //
 // net_kind classifies; net_flags renders the --network choice. The driver creates
@@ -134,6 +137,9 @@ net_kind(netpolicy: string) -> string {
     // any declared egress flow (egress->peer:port) means intra-only confinement:
     // the node may reach named peers but not the outside.
     if string_contains(netpolicy, "egress->") == 1 {
+        return "internal"
+    }
+    if string_contains(netpolicy, "egress_fqdn:") == 1 {
         return "internal"
     }
     return "shared"

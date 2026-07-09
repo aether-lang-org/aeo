@@ -1,7 +1,10 @@
 # Egress FQDN filtering in aeo — considered (design, not yet built)
 
-**STATUS: DESIGN.** Nothing here is built yet. This note records the reasoning
-for a layer-7 egress control (`egress_fqdn(...)`), what to build, what to reject
+**STATUS: PARTIAL BUILD.** The compose/model surface (`egress_fqdn(...)`) and the
+pure CONNECT parser/decision core (`lib/egress_relay`) are built. Runtime
+gateway enforcement is not wired yet; opaque TCP splice is currently blocked on
+length-aware std.tcp read/write (current raw TCP uses C strings). This note
+records the reasoning for a layer-7 egress control, what to build, what to reject
 and *why*, and the trust invariants that make the hierarchical (agent-relayed)
 form sound. Written 2026-07-08 after a design conversation prompted by Jeroen
 Soeters' "Towards the dark factory" (Formae's autonomous-agent setup), which
@@ -11,9 +14,9 @@ nothing else. Everything else is dropped and logged."*
 **The realization (§6.5):** the control lowers to a **minimal CONNECT gateway in
 aeo-agent, built over `std.tcp`** — decide on the name at the CONNECT line
 (fail-closed, no MITM), then splice — which **complements** aeo's already-coded
-`allow_egress(ip)` (the L3 floor that makes the gateway unbypassable). All
-primitives already exist in Aether's `std.tcp`; a `tcp_splice` is a library
-composition, not an upstream ask. Concrete build in §8.
+`allow_egress(ip)` (the L3 floor that makes the gateway unbypassable). The name
+decision is built in pure Aether; the opaque byte splice needs length-aware TCP
+read/write before it can be safe for TLS. Concrete build in §8.
 
 The motivating threat: an agent container feeds attacker-influenceable text
 (issue bodies, PR comments) through an LLM **that holds live credentials**. A
@@ -62,16 +65,22 @@ A `constrain{}` modifier that names the permitted destinations:
 
 ```
 constrain {
-    egress_fqdn("api.github.com", "api.anthropic.com",
-                "proxy.golang.org", "linear.app")
+    egress_fqdn("api.github.com")
+    egress_fqdn("api.anthropic.com")
+    egress_fqdn("proxy.golang.org")
+    egress_fqdn("linear.app")
 }
 ```
 
-Lowers to: **a CONNECT/SNI-allowlist forward proxy** (Squid/Envoy) on the node's
-network, the node's default route black-holed, and the node's egress pointed at
-the proxy (route + `http_proxy`/`https_proxy`). Everything not on the list is
+Lowers to: **a CONNECT-allowlist gateway** on the parent side of the node's
+boundary, the node's default route black-holed, and the node's egress pointed at
+the gateway (route + `http_proxy`/`https_proxy`). Everything not on the list is
 **dropped and logged**. This enforces the **destination** — the control with
-teeth — at low cost (no TLS interception needed for CONNECT/SNI).
+teeth — at low cost (no TLS interception needed for CONNECT).
+
+Early notes assumed Squid/Envoy as a sidecar. §6.5 supersedes that: the first
+implementation should be a minimal aeo-agent gateway over `std.tcp`, because the
+needed behavior is just CONNECT-line decision + opaque splice.
 
 This is the 90%. Build this first.
 
@@ -128,11 +137,13 @@ reach at runtime**. Two shapes of the same rule:
   category as `_enforce_netpolicy` / `_enforce_limits` in `lib/aeo/runner.ae`. The
   agent does it from **outside** the node, with the authority it holds *as the
   parent-of-this-node*, then reports the boundary established outward. Fine.
-- ❌ **The agent IS the proxy / owns the filter at runtime.** Then a compromised
-  agent owns its own henhouse door: rewrite the allowlist, disable the drop,
-  `curl` around itself. Never do this. The proxy is a **sidecar the parent
-  controls**; the node sees only "my egress goes to this address" and can no more
-  turn it off than a jail can grant itself more rctl.
+- ❌ **The node, or the node's own child-side agent, owns the filter at runtime.**
+  Then a compromised node owns its own door: rewrite the allowlist, disable the
+  drop, `curl` around itself. Never do this.
+- ✅ **The parent agent may be the gateway for its child.** That gateway is
+  outside the child's boundary and controlled by the parent; the child sees only
+  "my egress goes to this address" and can no more turn it off than a jail can
+  grant itself more rctl. This is the §6.5 realization.
 
 Because the runner and every nested agent **share the driver path** (the header
 of `bin/aeo-agent.ae`: *"the driver calls are the SAME ones the runner uses"*),
@@ -299,18 +310,21 @@ relaying parent re-decides on the CONNECT and may deny a host its child approved
 
 ### 6.5c. Primitives — all present; nothing to file upstream
 
-`std.tcp` (aka `std.net`) already exposes the full set: `connect`,
+`std.tcp` (aka `std.net`) exposes the control-plane set: `connect`,
 `listen`/`accept`, `read`/`write`, `close`, and `fd()`/`server_fd()` (the raw OS
 descriptor — its own doc-comment anticipates confined-relay use:
 "connect through the stdlib, then narrow the descriptor with `capsicum.rights_limit`
 before `capsicum.enter()`"). `std.http.server` can parse the one CONNECT request
-line, or a bare `tcp.read` + line-split suffices. **A `tcp_splice` is a library
-composition** — a two-actor `read→write` pump, one actor per direction — **not a
-missing primitive; do NOT file it as an upstream ask.** The two narrow things that
-*could* be real stdlib gaps are only filed if the build actually hits them: (a) a
-multi-fd readiness poll (sidestepped by one actor per direction), and (b) whether
-`tcp_receive_raw` distinguishes clean-EOF from would-block (matters for
-half-close). Surface them empirically, file only if genuinely absent.
+line, or a bare `tcp.read` + line-split suffices.
+
+**Empirical gap found during Cut 2:** current raw TCP is C-string shaped:
+`tcp_send_raw(sock, data)` sends `strlen(data)`, and `tcp_receive_raw(sock, n)`
+returns a NUL-terminated string. That is not a safe opaque TLS splice: any
+embedded NUL truncates the relay. So the missing primitive is not "a whole
+proxy"; it is length-aware TCP I/O, e.g. `tcp_send_n(sock, bytes, len)` and
+`tcp_receive_n(sock, max) -> (bytes, len, err)` or an fd-to-fd splice helper.
+Once that exists, the splice is still just the two-direction pump described here.
+Do not ship a string-based tunnel.
 
 ### 6.5d. How this COMPLEMENTS the already-coded `allow_egress(ip)`
 
@@ -337,48 +351,100 @@ gateway unbypassable; the gateway makes the floor name-aware. Full seal.
 
 | item | verdict | why |
 |---|---|---|
-| **`egress_fqdn(...)`** allowlist | **BUILD** | destination control, from the wire; CONNECT/SNI, no MITM; the 90% |
+| **`egress_fqdn(...)`** allowlist | **BUILD** | destination control, from the wire; CONNECT first, no MITM; the 90% |
 | **HTTP-method limiting** (GET-only) | **REJECT** | forces MITM *and* GET isn't read-only (body + query-string exfil); can't enforce data-flow with a metadata filter |
-| **enforcement site** | parent-provisioned, node-immutable | the agent is the untrusted party; it provisions the boundary, is never *in* the data path |
+| **enforcement site** | parent-owned, node-immutable | the child is untrusted; its parent provisions the boundary and may run the CONNECT gateway outside the child |
 | **hierarchy** | each level enforced by the level above | compromised agent narrows below itself, never widens itself — structural |
 | **`X-Aeo-Path` context** | **parent-stamped, never child-asserted; narrow-only** | removes attacker-controlled input by construction; ground truth from the wire, identity from the channel |
 | **allowed-host exfil** | out of network scope → **credential scoping** | the outer ring can't stop misuse of a sanctioned host; scoped short-TTL creds make a leak survivable |
 | **proxy shape** | **minimal CONNECT gateway in aeo-agent over `std.tcp`** | not a Squid sidecar, not a full HTTP proxy; agent = brain (name decision + path stamp), a dumb 2-actor splice = bloodstream; deny at CONNECT, fail-closed, no MITM |
 | **relation to `allow_egress(ip)`** | **complements — stacked layers** | node floor `allow_egress(gateway)` makes the gateway unbypassable; gateway pins `allow_egress(resolved_ip)` after approving the name; kernel floor + name-aware gateway = full seal |
-| **`tcp_splice` upstream ask** | **do NOT file** | `std.tcp` already has connect/listen/accept/read/write/fd; a splice is a library composition, not a missing primitive |
+| **`tcp_splice` upstream ask** | **do NOT file as a proxy ask** | the missing piece is length-aware TCP I/O; after that, splice remains a small library pump |
 
 ## 8. First buildable slice (the concrete build)
 
 The proxy is a **CONNECT gateway in aeo-agent over `std.tcp`** (§6.5), not a
-sidecar. In dependency order:
+sidecar. Build it in cuts that keep every intermediate state testable:
 
-1. **`lib/egress_relay` — the dumb data plane.** A minimal CONNECT relay over
-   `std.tcp`: `listen`/`accept` the node's connection, read the `CONNECT host:port`
-   request line, hand `host` to a decision callback, and on approval
-   `tcp.connect(host,port)` → write `200 Connection Established` → **splice**
-   (two actors, one per direction, each `read(src)→write(dst)` until close). NO
-   HTTP parsing past the CONNECT line, NO TLS touch. Building this is also the
-   empirical probe for the two possible stdlib gaps in §6.5c (multi-fd poll,
-   EOF-vs-would-block) — file upstream ONLY if actually hit.
-2. **`egress_fqdn(...)` verb in `lib/compose`** — records the allowlist per node.
-3. **The decision callback** — allowlist-check the CONNECT host; on the hierarchy
-   path, relay UP to the parent (which stamps `X-Aeo-Path`, §5b) and let the
-   parent deny at CONNECT (fail-closed). Deny = refuse the tunnel (no `200`).
-4. **`confine_linux` lowering (the two `allow_egress` ends, §6.5d):** black-hole
-   the node's default route and `allow_egress(<gateway_ip>)` ONLY (the floor that
-   makes the gateway unbypassable); set the node's `http_proxy`/`https_proxy` to
-   the gateway; on the gateway side, `allow_egress(<resolved_ip>)` after a name is
-   approved (the resolved-IP pin).
-5. **`_enforce_egress_fqdn(bn)` hook in `lib/aeo/runner.ae`**, beside
-   `_enforce_netpolicy`. The runner (depth-0) and every nested agent inherit it via
-   the shared driver path — the gateway *is* aeo-agent's listener.
-6. **Live-prove on CachyOS:** a node with `egress_fqdn("api.github.com")` reaches
-   GitHub through the gateway; is **denied at CONNECT** (and logged) for any other
-   host; **cannot** open a direct socket to GitHub's IP (the L3 floor holds — no
-   route); and **cannot** alter its own allowlist (immutability check).
-7. **Hierarchy + parent-stamped path** is a later thickening — needs the aeo-agent
-   http transport's authenticated single-parent identity first (§5b rule 2). The
-   single-node gateway (steps 1–6) stands alone without it.
+### 8a. Cut 1 — model the declaration, no enforcement yet
+
+Goal: make the operator surface real and inspectable without pretending the
+runtime boundary exists.
+
+1. **`lib/compose` grammar.** Add `egress_fqdn(_ctx, host)` as a single-arg
+   setter inside `constrain{}`. Aether is fixed-arity, so multiple names are
+   repeated calls:
+
+   ```aether
+   constrain("agent") {
+       egress_fqdn("api.github.com")
+       egress_fqdn("api.anthropic.com")
+   }
+   ```
+
+   Store as netpolicy entries, e.g. `egress_fqdn:api.github.com`, so it rides the
+   existing `get_netpolicy()` / status / audit surface.
+2. **Parser helpers.** Add cheap helpers in `compose`, not ad hoc downstream:
+   `has_egress_fqdn(nm)` and `egress_fqdn_csv(nm)` (or equivalent count/at
+   helpers if list iteration is cleaner in Aether). The rule is exact host match
+   first; wildcard suffixes are a later explicit design, not implicit globbing.
+3. **Renderers stay conservative.** `pf_rules_for()` must not emit a pass rule
+   for `egress_fqdn:*`; packet filters cannot enforce it. For now it should still
+   emit deny-default blocks, and runner output should say FQDN policy is declared
+   but not yet enforced.
+4. **Tests.** Add a pure model spec:
+   - repeated `egress_fqdn()` calls append stable entries;
+   - `describe_tree()` surfaces `net{...}`;
+   - `pf_rules_for()` does not turn FQDN names into fake IP rules;
+   - Linux `confine_linux.net_kind()` treats FQDN egress as not-open-internet.
+
+This cut is worth landing alone because it fixes the DSL shape and prevents
+future runtime code from inventing a second policy store.
+
+### 8b. Cut 2 — gateway library, still not wired to containers
+
+1. **`lib/egress_relay` — DONE for control-plane core.** Pure CONNECT parser and
+   decision helpers exist: extract host/port from the first line, exact-match the
+   allowlist, return 200/403/400, and expose `splice_supported()==0` with the
+   current blocker. Covered by `test/spec_egress_relay.ae`.
+2. **Length-aware TCP I/O — BLOCKER.** Add or depend on a std.tcp API that can
+   send/receive buffers with explicit lengths. Current C-string TCP cannot splice
+   TLS safely.
+3. **Data plane after blocker clears.** Wire `listen`/`accept`, read the CONNECT
+   line, call the decision helper, and on approval `tcp.connect(host,port)` ->
+   write `200 Connection Established` -> **splice** (two actors, one per
+   direction, each length-aware `read(src)->write(dst)` until close). NO HTTP
+   parsing past the CONNECT line, NO TLS touch.
+4. **Audit callback.** Log both allow and deny decisions into the aeo audit trail.
+
+### 8c. Cut 3 — rootless Linux container enforcement
+
+1. **Gateway placement.** Start one parent-owned gateway per constrained node, or
+   one parent-owned gateway per system with per-node allowlist keyed by source.
+   The per-node form is simpler and avoids source-identification ambiguity; the
+   per-system form is cheaper later.
+2. **Container environment.** Inject `http_proxy`/`https_proxy`/`HTTP_PROXY`/
+   `HTTPS_PROXY` pointing at the gateway. Also set `no_proxy` for declared
+   peer-only traffic so `egress("db", 6379)` does not accidentally go through an
+   HTTP proxy.
+3. **L3 floor.** The node must have no direct internet path. For podman this means
+   the current `internal` network tier, plus exactly one reachable gateway address.
+   Do not ship a gateway-only implementation while the node remains on the shared
+   internet-capable network; that is advisory, not containment.
+4. **Runner hook.** Add `_enforce_egress_fqdn(nm)` beside `_enforce_netpolicy`.
+   The hook should fail closed for `container` nodes once enforcement exists, and
+   warn loudly for non-container kinds until their substrate path exists.
+5. **Live proof.** On CachyOS/Bazzite: a node with
+   `egress_fqdn("api.github.com")` reaches GitHub through the gateway; is denied
+   at CONNECT for another host; cannot open a direct socket to GitHub's IP; and
+   cannot mutate its own allowlist.
+
+### 8d. Later thickening
+
+Hierarchy + parent-stamped path waits for the aeo-agent http transport's
+authenticated single-parent identity (§5b rule 2). Wildcards, DNS-firewall/SNI
+modes, non-HTTP raw TCP proxying, and FreeBSD pf table integration are separate
+follow-ups. The single-node CONNECT gateway stands without them.
 
 See also `docs/aeo-agent.md` (the recursion / acts-inside-reports-outward model),
 `docs/aeo-supervisor.md`, `lib/confine_linux` (where the layer-3/4 confinement
