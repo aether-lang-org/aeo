@@ -33,11 +33,11 @@ aeo is the third sibling to `aether` (the language) and `aeb` (the build runner)
 born spun-out. **config IS code** — the composition is a `.ae` you *run*, full
 Aether around the declarations; no YAML, ever.
 
-## Status (honest, ae 0.328)
+## Status (honest, ae 0.364)
 
-Working, with a **live-proven containment story**. Of six containment axes, **five
-are live-proven on real hardware** (a rootless Fedora-atomic "Bazzite" box for
-Linux, a GhostBSD box for FreeBSD):
+Working, with a **live-proven containment story**. Of six containment axes, **all
+six are now live-proven on real hardware** (a rootless Fedora-atomic "Bazzite" box
+for Linux, a GhostBSD box for FreeBSD, plus macOS via Docker Desktop):
 
 | Axis | State |
 |---|---|

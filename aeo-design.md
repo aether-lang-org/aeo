@@ -1,7 +1,7 @@
 # aeo — design doc (as built)
 
-The design of what aeo **is**, as implemented and live-proven (ae 0.328,
-2026-06-27). An earlier version of this doc proposed a grammar and left two open
+The design of what aeo **is**, as implemented and live-proven (ae 0.364,
+2026-07-09). An earlier version of this doc proposed a grammar and left two open
 decisions; both are resolved and the grammar evolved in building it. This
 describes the real system. For the user tour see [`README.md`](./README.md), for
 the working surface see [`examples/`](./examples/), for the LLM primer +
