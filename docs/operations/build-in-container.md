@@ -46,6 +46,66 @@ clear the stale GhostBSD host key with `ssh-keygen -R 192.168.0.57` first).
   `ae run` the demo's CHECK mode IN the container: 3/3 passing. Self-contained
   (no host `ae`, no front-door).
 
+## Distrobox as a host-tool bootstrapper
+
+Distrobox is a good fit for **building the toolchain binaries** on an immutable
+desktop, then copying only those binaries into the host's user install. It is not
+aeo's containment substrate: Distrobox optimizes for a comfortable, host-integrated
+developer userspace, while aeo's runtime nodes need explicit deny-default
+boundaries. But as a mutable build shell on Bazzite/Silverblue, it is exactly the
+right kind of convenience.
+
+Shape:
+
+1. Create a distrobox with the compiler/build dependencies.
+2. Clone/build `aether`, `aeb`, and `aro` inside it.
+3. Install or copy the resulting host binaries into `~/.local/bin`.
+4. Keep the runtime `aeo` deployment path separate: host `podman`/KVM/etc. remain
+   the substrates aeo drives.
+
+Example Fedora-flavoured bootstrap:
+
+```sh
+distrobox create --name aether-build --image fedora:latest
+distrobox enter aether-build
+
+sudo dnf install -y git gcc gcc-c++ make openssl-devel zlib-devel pcre2-devel
+mkdir -p ~/scm ~/.local/bin
+
+cd ~/scm
+git clone https://github.com/aether-lang-org/aether.git
+git clone https://github.com/aether-lang-org/aeb.git
+git clone https://github.com/aether-lang-org/aro.git
+
+cd ~/scm/aether
+make -j"$(nproc)"
+make install PREFIX="$HOME/.local"
+
+export PATH="$HOME/.local/bin:$PATH"
+export AETHER_HOME="$HOME/.local"
+
+cd ~/scm/aeb
+make install PREFIX="$HOME/.local"
+
+cd ~/scm/aro
+# Use aro's repo-native install/build target here; the result should land in
+# ~/.local/bin/aro or be copied there explicitly.
+```
+
+That leaves the immutable host with normal user-owned tools:
+
+```sh
+~/.local/bin/ae
+~/.local/bin/aetherc
+~/.local/bin/aeb
+~/.local/bin/aro
+```
+
+The useful boundary is: Distrobox is the **compiler workstation**; the host only
+keeps the small tools it needs on `PATH`. Do not treat a Distrobox as proof of
+aeo confinement, and do not rely on its host-integrated defaults for malware
+containment.
+
 ## The runtime-`ae` caveat for `aeo up` (DEPLOY) on an immutable host
 
 The aeo front-door (`bin/aeo.ae`) **builds the composition at runtime**: `aeo up
