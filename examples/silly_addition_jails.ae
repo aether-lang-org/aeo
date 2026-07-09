@@ -37,7 +37,7 @@
 import compose (system, jail)
 import compose (dataset, ip, command, health, depends)
 import compose (limit, limit_mem, limit_maxproc)
-import compose (check, smoke, suite)
+import compose (check, suite)
 
 exports ( aeo_orchestration )
 

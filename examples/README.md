@@ -3,11 +3,11 @@
 Each `silly_addition_*.ae` here is the **same two-tier app** — a `db` cache (redis)
 and an `app` that serves `/add/N/M` over HTTP, `app` depending on `db` — deployed
 on a **different substrate** (the thing it runs on: a VM, a container, a jail, or
-some combination). The core six span the orchestration matrix —
+some combination). The demos span the orchestration matrix —
 **with/without a VM (VMM)** × **with/without containers (podman)**, plus the
-host-native isolation tiers (Linux LXC, FreeBSD jails) — across both host OSes
-aeo targets. A seventh, `bwrap`, adds an unprivileged Linux sandbox (zero host
-setup). One more, `confined`, isn't a new substrate — it layers the confinement
+host-native isolation tiers (Linux LXC, FreeBSD jails, nspawn, bwrap), and
+cross-platform (Linux, FreeBSD, Windows) — across the full range aeo targets.
+The `confined` demo isn't a new substrate — it layers the confinement
 vocabulary on top of an existing one.
 
 They're deliberately the *same workload* so the only thing that varies is the
@@ -182,7 +182,7 @@ thin itest driver is [`test/examples-suite.sh`](../test/examples-suite.sh).
 Also live on Bazzite: **image attestation** (a mismatched digest refused at
 boot), the **tamper-evident audit trail** (an edited log caught by `aeo audit`),
 and the **lifecycle ops** (snapshot/rollback round-trip on a container, prune
-keep-N). Every demo passes `check` standalone and builds via both doors.
+keep-N). Every demo passes `check` standalone (data-model assertions, no backend needed).
 
 ## Other examples here
 

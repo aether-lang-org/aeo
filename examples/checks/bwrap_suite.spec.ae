@@ -14,7 +14,6 @@
 // mirroring the model check so `aeo suite` still has a real post-deploy assertion.
 
 import aeocha
-import std.os
 import compose (system, bwrap)
 import compose (command, health, depends)
 import compose (get_command, get_depends, describe_tree)

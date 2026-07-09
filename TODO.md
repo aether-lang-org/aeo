@@ -312,7 +312,7 @@ Gaps:
       ptr-copy (as driver_lxc now does, like driver_vm's qemu exec). Until then,
       jail/jls/jexec via driver_bsd self-sudo would mangle their args live.
 - [~] **`engine()` property — CORE BUILT + LIVE-PROVEN 2026-07-04; examples pending
-      (Paul migrating). See fable-5-insights.md §D.** DONE: compose `engine()` verb
+      (Paul migrating). See docs/research/grammar-design-proposals.md §D.** DONE: compose `engine()` verb
       (system-float + node override, snapshotted at decl like within/every) +
       `get_engine()`; deleted docker/windows/wslc KIND-verbs; rerouted all runner
       dispatch (up/exec/down/probe + batch-liveness `_level_has_engine`) to key on
@@ -355,7 +355,7 @@ Gaps:
       bhyve demos run Linux guests. A real cell (FreeBSD-native VM / jails-in-VM),
       trivially close to the bhyve demo. No demo yet.
 - [ ] **GENERAL container nesting — the Proxmox docker-in-LXC pattern (see
-      fable-5-insights.md §E)**. Homelab ground truth (XDA Jul-2025 + many
+      docs/research/grammar-design-proposals.md §E)**. Homelab ground truth (XDA Jul-2025 + many
       others): OCI-engine-inside-LXC is mainstream — cheap on weak hardware, and
       LXCs can SHARE a GPU/PCIe device across consumers where VM passthrough is
       exclusive. aeo already has the seam: every host-capable kind exposes
@@ -376,7 +376,7 @@ Gaps:
       jail-in-VM, VM-in-VM, or 3+ tier. (Subsumes into the general-nesting item
       above once that lands: depth is just repeated application of the exec seam.)
 - [x] **`gpu(mode)` — device claims with CHECKED allocation semantics (see
-      fable-5-insights.md §G)** — BUILT + live-proven 2026-07-04 (Intel iGPU,
+      docs/research/grammar-design-proposals.md §G)** — BUILT + live-proven 2026-07-04 (Intel iGPU,
       podman 6, CachyOS). `gpu("shared"|"exclusive")` + optional `gpu_device(pin)`
       as a claim; gpu_flags renders SHARED container/lxc to `--device /dev/dri`;
       gpu_alloc_error() is the check-time gate (kind-gating + exclusive-conflict
@@ -398,7 +398,7 @@ Gaps:
       NOT yet built (follow-ups): VM exclusive/VFIO render (refused-at-check today);
       `"slice"` (MIG/SR-IOV); repeat gpu() for multi-device.
 - [ ] **`nested_virt()` — deny-by-default, attenuate-down-the-tree (see
-      fable-5-insights.md §H)**. Principles of containment: capability must
+      docs/research/grammar-design-proposals.md §H)**. Principles of containment: capability must
       attenuate down the tree, never flow down implicitly — a node with nested
       virt can spawn sub-VMs aeo can't see (breaks tree-is-truth; the
       deny_egress twin for compute capability). Explicit per-node grant, NO
@@ -627,9 +627,8 @@ wired yet; mapped here as candidate kinds. Ordered by how cleanly they'd land:
               `systemctl --user is-active/stop`. (What kvm + firecracker do today.)
             - Linux/podman containers → optionally QUADLET (.container units) so
               systemd itself supervises + restarts + boot-survives (podman 6 improved
-              Quadlet); see the Quadlet note in fable-5-insights (the systemd-native
-              container answer). A `aeo-<system>.target` Wants= each node's unit = the
-              whole tree as one systemctl handle.
+              Quadlet); the systemd-native container answer. A `aeo-<system>.target` 
+              Wants= each node's unit = the whole tree as one systemctl handle.
             - **FreeBSD → rc.d (boot-survive) + `daemon(8) -r -P pidfile` (keep-alive/
               restart)**; jails via jail.conf / `service jail` / BastilleBSD (the
               jail-tree supervisor). NB the ASYMMETRY that motivates keeping
