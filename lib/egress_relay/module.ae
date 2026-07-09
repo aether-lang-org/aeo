@@ -1,20 +1,19 @@
 // lib/egress_relay — minimal CONNECT-gateway core for egress_fqdn.
 //
-// This module is deliberately pure for the first gateway slice: it parses the
-// CONNECT line and makes the allow/deny decision. The actual opaque TCP splice
-// needs length-aware TCP read/write in std.tcp; current tcp_send_raw uses strlen
-// and tcp_receive_raw returns a NUL-terminated string, so it cannot safely relay
-// TLS bytes.
+// This module keeps the CONNECT decision pure and exposes the small binary-safe
+// relay primitives needed by the runtime gateway. Namespace/routing enforcement
+// lives above this module; this layer only decides before 200 and pumps bytes.
 
 import std.string (
     string_length, string_index_of, string_substring, string_contains,
     string_char_at, string_get_int, string_to_lower
 )
+import std.tcp (read_n, write_n)
 
 exports (
     is_connect, connect_host, connect_port, host_allowed,
     decision_status, decision_reason, response_for_status,
-    splice_supported, splice_blocker
+    splice_supported, splice_blocker, relay_once, write_all
 )
 
 is_connect(req: string) -> int {
@@ -141,11 +140,47 @@ response_for_status(status: int) -> string {
 }
 
 splice_supported() -> int {
-    return 0
+    return 1
 }
 
 splice_blocker() -> string {
-    return "std.tcp is not length-aware yet: tcp_send_raw uses strlen and tcp_receive_raw returns a NUL-terminated string, so opaque TLS splice would corrupt binary streams"
+    return ""
+}
+
+// Copy one binary-safe chunk from `src` to `dst`. The caller owns the loop and
+// directionality: a CONNECT tunnel runs one pump per direction until EOF/error.
+// Returns (bytes_written, err); EOF/receive failure is surfaced from std.tcp.
+relay_once(src: ptr, dst: ptr, max_bytes: int) -> {
+    data, n, rerr = read_n(src, max_bytes)
+    if string_length(rerr) > 0 {
+        return 0, rerr
+    }
+    if n <= 0 {
+        return 0, "eof"
+    }
+    wrote, werr = write_all(dst, data, n)
+    return wrote, werr
+}
+
+// std.tcp.write_n may legally perform a partial write. Loop until the requested
+// prefix has been accepted or the transport refuses progress.
+write_all(sock: ptr, data: string, length: int) -> {
+    if length <= 0 {
+        return 0, ""
+    }
+    off = 0
+    while off < length {
+        chunk = string_substring(data, off, length)
+        n, err = write_n(sock, chunk, length - off)
+        if string_length(err) > 0 {
+            return off, err
+        }
+        if n <= 0 {
+            return off, "short write"
+        }
+        off = off + n
+    }
+    return off, ""
 }
 
 _first_line(req: string) -> string {

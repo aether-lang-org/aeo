@@ -227,9 +227,11 @@ driver picks rctl/Capsicum/pf on FreeBSD vs cgroups/seccomp/network on Linux).
       refuse/avoid unsafe `$HOME` relabels, document/profile-test the host
       traps currently only noted in `docs/build-in-container.md`).
 - [ ] **Layer-7 egress: `egress_fqdn(...)` allowlist** — PARTIAL BUILD:
-      compose/model surface + pure CONNECT parser/decision core landed
-      (`lib/egress_relay`, `test/spec_egress_relay.ae`). Design captured in
-      `docs/egress-fqdn-considered.md` (2026-07-08, prompted by Formae's
+      compose/model surface + CONNECT parser/decision core + length-aware relay
+      helpers landed (`lib/egress_relay`, `test/spec_egress_relay.ae`). The relay
+      helpers require Aether's `fix/tcp-length-aware-io` branch (aether#1078)
+      until it is merged to `origin/main`. Design captured in
+      `docs/research/egress-fqdn-considered.md` (2026-07-08, prompted by Formae's
       FQDN-allowlist agent setup). The layer-3/4 netpolicy above filters by
       IP/net; the exfil-hardening threat (a prompt-injected agent holding live
       creds) wants a DESTINATION-NAME allowlist. A packet filter structurally
@@ -241,10 +243,11 @@ driver picks rctl/Capsicum/pf on FreeBSD vs cgroups/seccomp/network on Linux).
       the child never owns its own gateway; hierarchy = each level enforced by
       the level above; any `X-Aeo-Path` containment context is **parent-stamped,
       never child-asserted** (narrow-only, identity bound by the authenticated
-      channel). Next blocker: length-aware std.tcp read/write — current
-      tcp_send_raw uses strlen and tcp_receive_raw is NUL-terminated, so opaque
-      TLS splice is unsafe. Residual hole (exfil THROUGH an allowed host) is
-      answered by credential scoping, not more network filtering.
+      channel). Next blocker: runtime gateway wiring — `listen`/`accept`, CONNECT
+      first-line read, approval response, two-direction pump, audit, and
+      namespace/routing enforcement that makes the gateway unbypassable. Residual
+      hole (exfil THROUGH an allowed host) is answered by credential scoping, not
+      more network filtering.
 
 ## Lifecycle & state ops (snapshot / rollback / backup / prune / exec / restart)
 Day-2 operability for a STANDING deployment: capture point-in-time state, restore

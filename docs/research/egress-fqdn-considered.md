@@ -1,12 +1,13 @@
-# Egress FQDN filtering in aeo — considered (design, not yet built)
+# Egress FQDN filtering in aeo — considered (design, partially built)
 
-**STATUS: PARTIAL BUILD.** The compose/model surface (`egress_fqdn(...)`) and the
-pure CONNECT parser/decision core (`lib/egress_relay`) are built. Runtime
-gateway enforcement is not wired yet; opaque TCP splice is currently blocked on
-length-aware std.tcp read/write (current raw TCP uses C strings). This note
-records the reasoning for a layer-7 egress control, what to build, what to reject
-and *why*, and the trust invariants that make the hierarchical (agent-relayed)
-form sound. Written 2026-07-08 after a design conversation prompted by Jeroen
+**STATUS: PARTIAL BUILD.** The compose/model surface (`egress_fqdn(...)`), the
+CONNECT parser/decision core, and the length-aware relay helpers
+(`lib/egress_relay`) are built. Runtime gateway enforcement is not wired yet;
+the relay helpers depend on Aether's length-aware TCP branch
+(`fix/tcp-length-aware-io`, aether#1078) until it is merged to `origin/main`.
+This note records the reasoning for a layer-7 egress control, what to build, what
+to reject and *why*, and the trust invariants that make the hierarchical
+(agent-relayed) form sound. Written 2026-07-08 after a design conversation prompted by Jeroen
 Soeters' "Towards the dark factory" (Formae's autonomous-agent setup), which
 locks agent containers to *"a firewall with an explicit FQDN allowlist … and
 nothing else. Everything else is dropped and logged."*
@@ -15,8 +16,9 @@ nothing else. Everything else is dropped and logged."*
 aeo-agent, built over `std.tcp`** — decide on the name at the CONNECT line
 (fail-closed, no MITM), then splice — which **complements** aeo's already-coded
 `allow_egress(ip)` (the L3 floor that makes the gateway unbypassable). The name
-decision is built in pure Aether; the opaque byte splice needs length-aware TCP
-read/write before it can be safe for TLS. Concrete build in §8.
+decision is built in pure Aether; the opaque byte pump now uses length-aware
+`std.tcp.read_n`/`write_n`, pending upstream merge of aether#1078. Concrete build
+in §8.
 
 The motivating threat: an agent container feeds attacker-influenceable text
 (issue bodies, PR comments) through an LLM **that holds live credentials**. A
@@ -308,7 +310,7 @@ surface because the node has no other route out). At each level up the tree the
 relaying parent re-decides on the CONNECT and may deny a host its child approved
 (narrow-only, §5b) — the denial lands at CONNECT, so nothing leaks.
 
-### 6.5c. Primitives — all present; nothing to file upstream
+### 6.5c. Primitives — present on the aether#1078 branch
 
 `std.tcp` (aka `std.net`) exposes the control-plane set: `connect`,
 `listen`/`accept`, `read`/`write`, `close`, and `fd()`/`server_fd()` (the raw OS
@@ -317,14 +319,16 @@ descriptor — its own doc-comment anticipates confined-relay use:
 before `capsicum.enter()`"). `std.http.server` can parse the one CONNECT request
 line, or a bare `tcp.read` + line-split suffices.
 
-**Empirical gap found during Cut 2:** current raw TCP is C-string shaped:
-`tcp_send_raw(sock, data)` sends `strlen(data)`, and `tcp_receive_raw(sock, n)`
-returns a NUL-terminated string. That is not a safe opaque TLS splice: any
-embedded NUL truncates the relay. So the missing primitive is not "a whole
-proxy"; it is length-aware TCP I/O, e.g. `tcp_send_n(sock, bytes, len)` and
-`tcp_receive_n(sock, max) -> (bytes, len, err)` or an fd-to-fd splice helper.
-Once that exists, the splice is still just the two-direction pump described here.
-Do not ship a string-based tunnel.
+**Empirical gap found during Cut 2, now fixed locally in aether#1078:** legacy raw
+TCP was C-string shaped: `tcp_send_raw(sock, data)` sent `strlen(data)`, and
+`tcp_receive_raw(sock, n)` returned a NUL-terminated string. That was not a safe
+opaque TLS splice: any embedded NUL could truncate the relay. The needed
+primitive was length-aware TCP I/O, now exposed as `std.tcp.write_n(sock, bytes,
+len)` and `std.tcp.read_n(sock, max) -> (bytes, len, err)` on the
+`fix/tcp-length-aware-io` branch. `lib/egress_relay` now uses those primitives for
+`relay_once`/`write_all`; the remaining runtime work is the listener,
+two-direction pump orchestration, audit, and namespace/routing enforcement. Do
+not ship a string-based tunnel.
 
 ### 6.5d. How this COMPLEMENTS the already-coded `allow_egress(ip)`
 
@@ -359,7 +363,7 @@ gateway unbypassable; the gateway makes the floor name-aware. Full seal.
 | **allowed-host exfil** | out of network scope → **credential scoping** | the outer ring can't stop misuse of a sanctioned host; scoped short-TTL creds make a leak survivable |
 | **proxy shape** | **minimal CONNECT gateway in aeo-agent over `std.tcp`** | not a Squid sidecar, not a full HTTP proxy; agent = brain (name decision + path stamp), a dumb 2-actor splice = bloodstream; deny at CONNECT, fail-closed, no MITM |
 | **relation to `allow_egress(ip)`** | **complements — stacked layers** | node floor `allow_egress(gateway)` makes the gateway unbypassable; gateway pins `allow_egress(resolved_ip)` after approving the name; kernel floor + name-aware gateway = full seal |
-| **`tcp_splice` upstream ask** | **do NOT file as a proxy ask** | the missing piece is length-aware TCP I/O; after that, splice remains a small library pump |
+| **`tcp_splice` upstream ask** | **filed/fixed as length-aware TCP I/O (aether#1078)** | not a proxy ask; `lib/egress_relay` now has the small library pump, pending upstream main |
 
 ## 8. First buildable slice (the concrete build)
 
@@ -403,19 +407,18 @@ future runtime code from inventing a second policy store.
 
 ### 8b. Cut 2 — gateway library, still not wired to containers
 
-1. **`lib/egress_relay` — DONE for control-plane core.** Pure CONNECT parser and
-   decision helpers exist: extract host/port from the first line, exact-match the
-   allowlist, return 200/403/400, and expose `splice_supported()==0` with the
-   current blocker. Covered by `test/spec_egress_relay.ae`.
-2. **Length-aware TCP I/O — BLOCKER.** Add or depend on a std.tcp API that can
-   send/receive buffers with explicit lengths. Current C-string TCP cannot splice
-   TLS safely.
-3. **Data plane after blocker clears.** Wire `listen`/`accept`, read the CONNECT
-   line, call the decision helper, and on approval `tcp.connect(host,port)` ->
-   write `200 Connection Established` -> **splice** (two actors, one per
-   direction, each length-aware `read(src)->write(dst)` until close). NO HTTP
-   parsing past the CONNECT line, NO TLS touch.
-4. **Audit callback.** Log both allow and deny decisions into the aeo audit trail.
+1. **`lib/egress_relay` — DONE for control-plane core and length-aware pump
+   helpers.** CONNECT parser and decision helpers exist: extract host/port from
+   the first line, exact-match the allowlist, return 200/403/400, and expose
+   `relay_once`/`write_all` over `std.tcp.read_n`/`write_n`. Covered by
+   `test/spec_egress_relay.ae`. Requires Aether's `fix/tcp-length-aware-io`
+   branch until aether#1078 reaches `origin/main`.
+2. **Data plane wiring.** Wire `listen`/`accept`, read the CONNECT line, call the
+   decision helper, and on approval `tcp.connect(host,port)` -> write
+   `200 Connection Established` -> **splice** (two actors, one per direction,
+   each length-aware `read(src)->write(dst)` until close). NO HTTP parsing past
+   the CONNECT line, NO TLS touch.
+3. **Audit callback.** Log both allow and deny decisions into the aeo audit trail.
 
 ### 8c. Cut 3 — rootless Linux container enforcement
 

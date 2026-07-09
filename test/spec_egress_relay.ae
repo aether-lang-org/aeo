@@ -5,7 +5,7 @@ import aeocha
 import egress_relay (
     is_connect, connect_host, connect_port, host_allowed,
     decision_status, decision_reason, response_for_status,
-    splice_supported, splice_blocker
+    splice_supported, splice_blocker, write_all
 )
 import std.string
 
@@ -55,10 +55,14 @@ main() {
         }
 
         aeocha.describe("runtime splice readiness") {
-            aeocha.it("does not claim opaque TCP splice support until std.tcp is length-aware") callback {
-                aeocha.expect_int(splice_supported()).to_equal(0)
-                aeocha.expect_int(_has(splice_blocker(), "strlen")).to_be_truthy()
-                aeocha.expect_int(_has(splice_blocker(), "NUL-terminated")).to_be_truthy()
+            aeocha.it("claims opaque TCP splice support once std.tcp is length-aware") callback {
+                aeocha.expect_int(splice_supported()).to_equal(1)
+                aeocha.expect_str(splice_blocker()).to_equal_str("")
+            }
+            aeocha.it("write_all treats empty prefixes as a successful no-op") callback {
+                wrote, err = write_all(null, "", 0)
+                aeocha.expect_int(wrote).to_equal(0)
+                aeocha.expect_str(err).to_equal_str("")
             }
         }
     }
