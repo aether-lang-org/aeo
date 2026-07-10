@@ -421,8 +421,17 @@ are later thickening.
    still carries the signal), never a hard error. Live-proven: the warning fires,
    the audit entry is recorded, and the split is genuinely round-robin (10:10, the
    3:1 weights truly dropped — the warning is truthful).
-   *Still to wire:* the health interval/thresholds (path+status pass through today;
-   the system `health_retry` interval lowering onto the pool checker is a follow-up).
+
+   The health interval/threshold lowering (§6 "one clock, two enforcers") is
+   **DONE**: `lb_health_timing` lowers the SYSTEM `health_retry` window (inherited
+   by the LB via the float) onto the pool checker — `interval_ms = every()`,
+   `timeout_ms = every()` (a probe can't outlast its cadence),
+   `unhealthy_threshold = down_within / every()` (so ejection lands within
+   down_within), `healthy_threshold = 2` (readmit hysteresis, kept distinct from
+   aeo's `up_within` bring-up retry). Unset window → `get_interval`'s 1000ms
+   default + unhealthy 3. Unit-tested (`500ms`/`10s` → `500;500;20;2`); live-proven
+   — the lowered `AEO_LB_HEALTH_*` env reached the container and a stopped backend
+   ejected within the 10s `down_within` window.
 4. **Later thickening:** drain/undrain in reconcile, circuit breaker, cache; `:vm`
    substrate; then the `:host` and multi-host epics (§7); and, gated on aether#1092,
    the L4 TCP balancer (§8). (The aeo-lb image build is already folded in — the

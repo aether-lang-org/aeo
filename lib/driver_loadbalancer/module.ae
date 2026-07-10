@@ -31,7 +31,7 @@ import std.list
 
 exports (
     up, down, probe, available, ensure_image,
-    backend_specs, lb_env, lb_image, lb_net, lb_binary
+    backend_specs, lb_env, lb_image, lb_net, lb_binary, lb_health_timing
 )
 
 // The aeo-lb front-door binary, under AEO_HOME/bin (built by the toolchain
@@ -224,10 +224,55 @@ lb_env(lb: string) -> string {
         if string_length(hstatus) > 0 {
             e = "${e},AEO_LB_HEALTH_STATUS=${hstatus}"
         }
-        // interval/thresholds: fall back to aeo-lb defaults; the system
-        // health_retry interval lowering is a follow-up (doc §9 step 2 note).
+        // §6 "one clock, two enforcers": lower the SYSTEM health_retry timing
+        // (every / down_within, inherited by the LB via the float) onto the pool's
+        // health checker, so aeo and the pool share ONE cadence + one down-window.
+        e = "${e},AEO_LB_HEALTH_INTERVAL=${_interval_ms(lb)}"
+        e = "${e},AEO_LB_HEALTH_TIMEOUT=${_timeout_ms(lb)}"
+        e = "${e},AEO_LB_HEALTH_UNHEALTHY=${_unhealthy(lb)}"
+        e = "${e},AEO_LB_HEALTH_HEALTHY=${_healthy(lb)}"
     }
     return e
+}
+
+// ---- §6 health-timing lowering (system health_retry -> pool checker) --------
+// interval_ms = every() (the ONE clock); default 1000 (get_interval's own default).
+_interval_ms(lb: string) -> int {
+    return compose.get_interval(lb)
+}
+// timeout_ms: a single probe must not outlast its cadence, so timeout == interval.
+_timeout_ms(lb: string) -> int {
+    return compose.get_interval(lb)
+}
+// unhealthy_threshold: N consecutive failed probes to EJECT, chosen so ejection
+// lands within down_within — N = down_within / interval (>= 1). down_within unset
+// (0) -> the aeo-lb default (fall back to a conservative 3).
+_unhealthy(lb: string) -> int {
+    dw = compose.get_without_ms(lb)
+    if dw <= 0 {
+        return 3
+    }
+    iv = compose.get_interval(lb)
+    if iv <= 0 {
+        iv = 1000
+    }
+    n = dw / iv
+    if n < 1 {
+        return 1
+    }
+    return n
+}
+// healthy_threshold: consecutive OK probes to READMIT a recovered backend. This is
+// readmit hysteresis, NOT aeo's up_within bring-up retry — a small fixed 2 avoids
+// flapping without a slow return. (Kept distinct on purpose; see doc §6.)
+_healthy(lb: string) -> int {
+    return 2
+}
+
+// lb_health_timing(lb) — the four pool params as a ";"-joined string
+// "interval;timeout;unhealthy;healthy", for unit tests to assert the lowering.
+lb_health_timing(lb: string) -> string {
+    return "${_interval_ms(lb)};${_timeout_ms(lb)};${_unhealthy(lb)};${_healthy(lb)}"
 }
 
 // Bring the balancer up: run the aeo-lb container on the backends' net, with the
