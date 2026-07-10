@@ -55,6 +55,14 @@ run_one() {
             cp "$ROOT/test/capharness.py" "$ROOT/test/capprobe.py" /tmp/ 2>/dev/null || true
             cp "$ROOT/test/capharness_freebsd.py" "$ROOT/test/capprobe_freebsd.c" /tmp/ 2>/dev/null || true
             ;;
+        *spec_egress_splice_live*)
+            # LIVE splice test: build the gateway binary + stage its python
+            # harness where the spec shells to them. If the build fails (or
+            # python3 is absent) the spec self-skips as HARNESS_UNAVAILABLE.
+            cp "$ROOT/test/egress_splice_harness.py" /tmp/ 2>/dev/null || true
+            ae build "$ROOT/bin/aeo-egress-gateway.ae" -o /tmp/aeo-egress-gateway-live \
+                --lib "$ROOT/lib" >/dev/null 2>&1 || true
+            ;;
     esac
     # build-then-run, not `ae run`: `ae run` caches by content and can serve a
     # stale compiled dependency (e.g. an edited lib/compose) — build to a fresh

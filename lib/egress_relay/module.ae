@@ -8,12 +8,12 @@ import std.string (
     string_length, string_index_of, string_substring, string_contains,
     string_char_at, string_get_int, string_to_lower
 )
-import std.tcp (read_n, write_n)
+import std.tcp (read_n, write_n, poll2)
 
 exports (
     is_connect, connect_host, connect_port, host_allowed,
     decision_status, decision_reason, response_for_status,
-    splice_supported, splice_blocker, relay_once, write_all
+    splice_supported, splice_blocker, relay_once, write_all, splice
 )
 
 is_connect(req: string) -> int {
@@ -160,6 +160,63 @@ relay_once(src: ptr, dst: ptr, max_bytes: int) -> {
     }
     wrote, werr = write_all(dst, data, n)
     return wrote, werr
+}
+
+// Full-duplex opaque splice between two connected sockets (the CONNECT-tunnel
+// data plane). Waits on BOTH sides at once with std.tcp.poll2 (#1092), services
+// whichever direction is readable, and pumps until one side sends FIN or a hard
+// error. This replaces the half-duplex alternating pump: neither direction has
+// to speak before the other, so server-speaks-first / both-streaming protocols
+// (WebSocket-over-CONNECT, gRPC streaming, TLS renegotiation) relay correctly.
+//
+// The #1092 timeout sentinel is load-bearing: read_n on a quiet-but-alive peer
+// returns ("", 0, "timeout") and leaves the socket connected — we must re-poll,
+// NOT tear the tunnel down. Only "" (orderly FIN) or a non-"timeout" error is
+// terminal. `poll_ms` bounds each wait so neither a dead poll nor a wholly idle
+// tunnel spins; -1 would block forever with no way to notice a half-close.
+// Returns "" on clean teardown (either FIN), or the first transport error seen.
+splice(a: ptr, b: ptr, max_bytes: int, poll_ms: int) -> string {
+    while 1 == 1 {
+        a_ready, b_ready, perr = poll2(a, b, poll_ms)
+        if string_length(perr) > 0 {
+            return perr
+        }
+        if a_ready == true {
+            done, err = _pump_one(a, b, max_bytes)
+            if done == 1 {
+                return err
+            }
+        }
+        if b_ready == true {
+            done, err = _pump_one(b, a, max_bytes)
+            if done == 1 {
+                return err
+            }
+        }
+    }
+    return ""
+}
+
+// Move one ready chunk src->dst. Returns (terminal, err): terminal=1 means the
+// splice should stop — "" for an orderly FIN, or the transport error otherwise.
+// A "timeout" read is NOT terminal (poll said readable but the byte was consumed
+// by a racing path, or a spurious wakeup): report not-done so the caller re-polls.
+_pump_one(src: ptr, dst: ptr, max_bytes: int) -> {
+    data, n, rerr = read_n(src, max_bytes)
+    if string_length(rerr) > 0 {
+        if rerr == "timeout" {
+            return 0, ""
+        }
+        return 1, rerr
+    }
+    if n <= 0 {
+        return 1, ""
+    }
+    wrote, werr = write_all(dst, data, n)
+    if string_length(werr) > 0 {
+        return 1, werr
+    }
+    return 0, ""
 }
 
 // std.tcp.write_n may legally perform a partial write. Loop until the requested

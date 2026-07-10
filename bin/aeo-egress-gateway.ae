@@ -11,13 +11,19 @@ import std.http (http_server_create, http_server_set_host, http_server_add_route
                  response_accept_tunnel, request_method, request_path)
 import std.os (os_getenv)
 import std.string (string_length, string_get_int)
-import std.tcp (connect, read_n, write_n, close)
+import std.tcp (connect, close)
 import egress_gateway (
     set_allowlist, allowlist, decision_status_for_http,
     response_body_for_status, connect_host_from_path, connect_port_from_path
 )
+import egress_relay (splice)
 
 const CHUNK = 16384
+// Per-poll wait for the full-duplex splice. Bounds each poll2 so a wholly idle
+// tunnel does not block forever unnoticed; a live half-close is still detected
+// within one interval. Not a data timeout — the #1092 sentinel keeps quiet
+// peers connected across polls.
+const POLL_MS = 30000
 
 message StartServer { srv: ptr }
 message Noop {}
@@ -73,7 +79,7 @@ actor ServerActor {
         return
     }
 
-    _relay_alternating(tunnel, upstream)
+    _ = splice(tunnel, upstream, CHUNK, POLL_MS)
     close(upstream)
     close(tunnel)
 }
@@ -126,56 +132,4 @@ _env_int_default(name: string, fallback: int) -> int {
         return fallback
     }
     return n
-}
-
-// First-cut stdlib-only relay: alternate client->upstream then
-// upstream->client. This proves #1086's std.http takeover path and handles
-// request/response-shaped tunnels; a true arbitrary full-duplex splice wants a
-// stdlib poll/select helper or a callback-thread-safe actor handoff.
-_relay_alternating(client: ptr, upstream: ptr) {
-    active = 1
-    while active == 1 {
-        data, n, rerr = read_n(client, CHUNK)
-        if rerr != "" {
-            active = 0
-        } else {
-            if n <= 0 {
-                active = 0
-            } else {
-                werr = _write_all(upstream, data, n)
-                if werr != "" {
-                    active = 0
-                } else {
-                    updata, rn, uerr = read_n(upstream, CHUNK)
-                    if uerr != "" {
-                        active = 0
-                    } else {
-                        if rn <= 0 {
-                            active = 0
-                        } else {
-                            cerr = _write_all(client, updata, rn)
-                            if cerr != "" {
-                                active = 0
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-_write_all(sock: ptr, data: string, length: int) -> string {
-    off = 0
-    while off < length {
-        sent, err = write_n(sock, data, length - off)
-        if err != "" {
-            return err
-        }
-        if sent <= 0 {
-            return "short write"
-        }
-        off = off + sent
-    }
-    return ""
 }

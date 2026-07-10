@@ -8,14 +8,29 @@ std.http server tunnel handoff (`http.response_accept_tunnel`, aether#1086).
 `lib/egress_gateway` provides std.http-facing CONNECT decision helpers, and
 `bin/aeo-egress-gateway.ae` accepts an allowed `CONNECT`, takes ownership of the
 accepted connection, opens the upstream socket, and pumps opaque bytes. The byte
-pump is currently **half-duplex** (`_relay_alternating`: `client→upstream` then
-`upstream→client`, in lockstep) — correct for request/response HTTPS, but it will
-stall a server-speaks-first or both-sides-streaming protocol (some TLS
-renegotiation patterns, WebSocket-over-`CONNECT`, gRPC streaming). A full-duplex
-splice wants a stdlib poll/select helper or a callback-safe actor handoff (§8d).
-The remaining work is that full-duplex pump plus integrating the gateway into node
-networking so `egress_fqdn(...)` is enforced rather than just available as a
-standalone executable.
+pump is now **full-duplex**: `egress_relay.splice` waits on both sockets at once
+with `std.tcp.poll2` (aether#1092, merged in 0.379.0), services whichever side is
+readable, and branches on the `"timeout"` sentinel so a quiet-but-alive direction
+is not mistaken for a close. This relays server-speaks-first / both-sides-streaming
+protocols (WebSocket-over-`CONNECT`, gRPC streaming, TLS renegotiation) that the
+earlier half-duplex `_relay_alternating` would have stalled. A live loopback tunnel
+test (`test/spec_egress_splice_live.ae` + `test/egress_splice_harness.py`) drives
+the real gateway binary end to end: a CONNECT client writes three chunks *before*
+reading any echo — a burst a lockstep relay would deadlock on — and drains all
+three back, and a non-allowlisted host is 403'd at CONNECT. The remaining work is
+integrating the gateway into node networking so `egress_fqdn(...)` is enforced
+rather than just available as a standalone executable.
+
+> **Toolchain bug found and fixed while wiring this (aether#1097):** a **selective**
+> `import std.tcp (subset)` in the top-level unit that *omitted* a tuple wrapper
+> (`poll2`/`read_n`/`write_n`) suppressed that wrapper's instantiation
+> program-wide — so a transitive use inside an imported module (here
+> `egress_relay.splice`) degraded to the UNKNOWN bare extern `tcp_poll2` and the
+> build failed, with the error pointing at the *library*, not the top-level file.
+> A *bare* program with no direct `std.tcp` import instantiated it fine; a partial
+> import was what broke it. Filed and fixed upstream as aether#1097;
+> `bin/aeo-egress-gateway.ae` keeps its natural minimal `std.tcp (connect, close)`
+> import — no workaround needed.
 This note records the reasoning for a layer-7 egress control, what to build, what
 to reject and *why*, and the trust invariants that make the hierarchical
 (agent-relayed) form sound. Written 2026-07-08 after a design conversation prompted by Jeroen
@@ -471,10 +486,21 @@ future runtime code from inventing a second policy store.
 
 ### 8d. Later thickening
 
-#### Full-duplex splice — the true root cause (an Aether `std.tcp` gap, not aeo)
+#### Full-duplex splice — RESOLVED (aether#1092, merged in 0.379.0)
 
-The half-duplex `_relay_alternating` is **not a shortcut we chose** — it is the
-only shape the current Aether stdlib can express *correctly*. The blocker is in
+**DONE.** `egress_relay.splice(a, b, max_bytes, poll_ms)` is the full-duplex pump:
+`std.tcp.poll2` waits on both sockets, whichever is readable is serviced with
+`read_n`, and the `"timeout"` sentinel is treated as retry (not close). It replaced
+`_relay_alternating` in `bin/aeo-egress-gateway.ae`. Both stdlib defects below were
+fixed exactly as this section requested — `poll2` (readiness) and the non-fatal
+`"timeout"` sentinel (the read no longer collapses timeout into EOF). The
+historical diagnosis is kept below because it is the reasoning that produced the
+issue.
+
+<details><summary>Original diagnosis (now fixed)</summary>
+
+The half-duplex `_relay_alternating` was **not a shortcut we chose** — it was the
+only shape the then-current Aether stdlib could express *correctly*. The blocker was in
 `aether/std/net/aether_net.c`, at the read primitive both directions must share.
 Two defects, either one alone fatal to a naive bidirectional pump:
 
@@ -512,11 +538,12 @@ model is fine; the socket read contract is what's wrong.
 - add a dedicated `tcp.splice(a, b)` that owns the bidirectional pump in C over
   the runtime poller (aeo passes two fds, gets back opaque full-duplex relay).
 
-Filed upstream as **aether#1092**. Until it lands, `_relay_alternating` is the
-honest ceiling; do not paper over it with a timeout-poll loop — defect #2 makes
-that *silently* lossy.
+Filed upstream as **aether#1092** — merged in 0.379.0 as `tcp.poll`/`tcp.poll2`
+plus the non-fatal `"timeout"` sentinel.
 
-**When it lands**, replace `_relay_alternating` with the poller/splice call and add
+</details>
+
+The remaining verification is to add
 a loopback echo-server tunnel test to the normal suite (both-sides-streaming, not
 just request/response) so the byte pump — where the surprising behavior lives — is
 covered by CI.
