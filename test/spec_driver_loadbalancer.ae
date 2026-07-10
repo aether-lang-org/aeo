@@ -1,14 +1,15 @@
 // spec_driver_loadbalancer.ae — the load_balancer driver's pure renderers
-// (docs §9 step 2). backend_specs() maps the model (children + listens + weight)
-// to the "url|weight,…" string aeo-lb parses; lb_binary() resolves under AEO_HOME.
-// No process launch here — that's the live proof (test/lb_live_harness).
+// (docs §9 step 2/3). backend_specs() maps the model (children + listens +
+// weight) to the ';'-separated "url|weight;…" the aeo-lb container parses;
+// lb_env() renders the full AEO_LB_* env; lb_net() names the backends' net.
+// No container launch here — that's the live proof (spec_driver_loadbalancer_live).
 
 import aeocha
 import compose (
-    system, container, load_balancer, listens, publish, balance_to, balancer_weight,
+    system, container, load_balancer, listens, publish, balance_to, lb_health, balancer_weight,
     reset_nodes
 )
-import driver_loadbalancer (backend_specs, lb_binary)
+import driver_loadbalancer (backend_specs, lb_env, lb_net, lb_image)
 import std.string
 
 _declare() {
@@ -30,7 +31,7 @@ main() {
     aeocha.describe(fw, "driver_loadbalancer pure renderers") {
         aeocha.it("renders backends as http://name:port|weight, weighted") callback {
             aeocha.expect_str(backend_specs("web")).to_equal_str(
-                "http://app-1:8080|3,http://app-2:8080|1")
+                "http://app-1:8080|3;http://app-2:8080|1")
         }
         aeocha.it("defaults weight to 1 when unset") callback {
             reset_nodes()
@@ -55,14 +56,44 @@ main() {
             }
             aeocha.expect_str(backend_specs("lb")).to_equal_str("http://good:8080|1")
         }
-        aeocha.it("lb_binary resolves under AEO_HOME/bin") callback {
-            aeocha.expect_int(_ends_with(lb_binary(), "/bin/aeo-lb")).to_be_truthy()
+        aeocha.it("lb_env renders the full AEO_LB_* pool (health included)") callback {
+            reset_nodes()
+            system("s4") {
+                lb = load_balancer("web", "container") {
+                    publish(9000)
+                    balance_to(8080) {
+                        lb_health("/healthz", 200)
+                    }
+                    a1 = container("app-1") { listens(8080); balancer_weight(3) }
+                    a2 = container("app-2") { listens(8080); balancer_weight(1) }
+                }
+            }
+            e = lb_env("web")
+            aeocha.expect_int(_has(e, "AEO_LB_PORT=9000")).to_be_truthy()
+            aeocha.expect_int(_has(e, "AEO_LB_ALGO=weighted_rr")).to_be_truthy()
+            aeocha.expect_int(_has(e, "AEO_LB_BACKENDS=http://app-1:8080|3;http://app-2:8080|1")).to_be_truthy()
+            aeocha.expect_int(_has(e, "AEO_LB_HEALTH_PATH=/healthz")).to_be_truthy()
+            aeocha.expect_int(_has(e, "AEO_LB_HEALTH_STATUS=200")).to_be_truthy()
+        }
+        aeocha.it("lb_net is the backends' shared aeo-<system> net") callback {
+            reset_nodes()
+            system("mysys") {
+                lb = load_balancer("web", "container") { publish(80); balance_to(8080) }
+            }
+            aeocha.expect_str(lb_net("web")).to_equal_str("aeo-mysys")
+        }
+        aeocha.it("lb_image defaults to the aeo-lb tag") callback {
+            aeocha.expect_int(_has(lb_image(), "aeo-lb")).to_be_truthy()
         }
     }
 
     aeocha.run_summary(fw)
 }
 
+_has(hay: string, needle: string) -> int {
+    if string.contains(hay, needle) == 1 { return 1 }
+    return 0
+}
 _ends_with(s: string, suffix: string) -> int {
     ls = string.length(s)
     lf = string.length(suffix)

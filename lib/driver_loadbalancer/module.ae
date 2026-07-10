@@ -1,37 +1,41 @@
-// driver_loadbalancer — provisions a load_balancer node (docs §9 step 2).
+// driver_loadbalancer — provisions a load_balancer node (docs §9 step 2/3).
 //
-// A load_balancer lowers onto the aeo-lb front-door binary (bin/aeo-lb.ae), an
-// std.http.proxy reverse proxy. This driver renders the pool from the compose
-// model — backends are the LB node's children (get_host(child) == lb), their
-// listens() ports + balancer_weight, the inferred/declared algorithm, and the
-// one health contract (§6) — hands it to aeo-lb via env, and backgrounds it
-// tracked by a pidfile (the driver_bwrap pattern: fire-and-forget + $! pidfile).
+// A load_balancer lowers onto the aeo-lb front-door (an std.http.proxy reverse
+// proxy) packaged as a CONTAINER. Step-3 live proof established the design: the
+// LB must run ON THE BACKENDS' NET (aeo-<system>), not on the host — only then
+// can it resolve backends BY NAME and reach them (rootless podman nets aren't
+// host-routable, and container DNS is net-internal). The LB publishes its
+// publish() port to the host as the single pinhole; the backends stay
+// unreachable from outside.
 //
-// Backends reach each other by NAME on the aeo net, so a backend URL is
-// http://<backend-name>:<listens-port>. The LB binds publish() (the boundary).
+// This driver renders the pool from the compose model — backends are the LB
+// node's children (get_host(child) == lb), their listens() ports +
+// balancer_weight, the inferred/declared algorithm, the one health contract
+// (§6) — passes it to the aeo-lb container as AEO_LB_* env, and runs it via
+// driver_linux.up_net (shared net, published port). up/down/probe delegate to
+// driver_linux (podman lifecycle), so they're idempotent across invocations.
 //
-// up/down/probe are keyed on the pidfile so they work across separate aeo
-// invocations. probe = "the LB process is alive" (its own health-checking of
-// backends is internal to std.http.proxy).
+// The aeo-lb container image (LB_IMAGE) is built from bin/aeo-lb + its runtime
+// libs (see docs/built_in_load_balancing.md §9). available() gates on the image
+// existing; a missing image is a loud up() error pointing at the build step.
 
 import compose
-import std.os (run_capture, os_system, getenv)
+import driver_linux
+import std.os (run_capture, getenv)
+import std.fs (write_atomic)
 import std.string (
-    string_length, string_concat, string_from_int, string_index_of, string_substring
+    string_length, string_concat, string_from_int, string_index_of, string_substring,
+    string_get_int
 )
 import std.list
 
 exports (
-    up, down, probe, available,
-    pidfile_for, logfile_for, backend_specs, lb_binary
+    up, down, probe, available, ensure_image,
+    backend_specs, lb_env, lb_image, lb_net, lb_binary
 )
 
-pidfile_for(res_name: string) -> string { return "/tmp/aeo-lb-${res_name}.pid" }
-logfile_for(res_name: string) -> string { return "/tmp/aeo-lb-${res_name}.log" }
-
-// The aeo-lb front-door binary, built under AEO_HOME/bin (mirrors driver_vm's
-// agent_bin resolution). Built once by run-spec.sh / the aeo build; a missing
-// binary surfaces as an up() error pointing at the build.
+// The aeo-lb front-door binary, under AEO_HOME/bin (built by the toolchain
+// alongside bin/aeo). ensure_image() COPYs it into the image build context.
 lb_binary() -> string {
     h = getenv("AEO_HOME")
     if string_length(h) == 0 {
@@ -41,14 +45,136 @@ lb_binary() -> string {
     return "${h}/bin/aeo-lb"
 }
 
+// The aeo-lb container image. Overridable via AEO_LB_IMAGE for a custom build/tag.
+lb_image() -> string {
+    v = getenv("AEO_LB_IMAGE")
+    if string_length(v) > 0 {
+        return v
+    }
+    return "localhost/aeo/aeo-lb:latest"
+}
+
+// The net the LB joins == the backends' shared net (aeo-<system>), so it resolves
+// them by name. Matches runner.ae's `net = "aeo-${get_system(nm)}"`.
+lb_net(lb: string) -> string {
+    return "aeo-${compose.get_system(lb)}"
+}
+
+// available iff a container engine is present. The aeo-lb IMAGE is built on
+// demand by ensure_image() (folded into up()), so its absence is not "not
+// available" — only a missing engine or a missing aeo-lb binary is.
 available() -> int {
-    // available iff the front-door binary exists (built).
+    eng = driver_linux.engine_resolve("")
+    if string_length(eng) == 0 {
+        return 0
+    }
+    return 1
+}
+
+_image_present() -> int {
+    eng = driver_linux.engine_resolve("")
+    if string_length(eng) == 0 {
+        return 0
+    }
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "${eng} image inspect ${lb_image()} >/dev/null 2>&1")
+    _o, status, _e = run_capture("/bin/sh", av, null)
+    list_free(av)
+    if status == 0 { return 1 }
+    return 0
+}
+
+// ensure_image() — build the aeo-lb container image if absent (idempotent). The
+// LB runs as a container (docs §9 step 3: it must share the backends' net), so
+// aeo bakes the image itself — no manual pre-build. Context: the toolchain-built
+// aeo-lb binary + a Dockerfile that installs its runtime libs (libssl/libnghttp2)
+// and COPYs the binary. Returns "" on success (or if already present) else error.
+// Overridable via AEO_LB_IMAGE (a pre-built image) — then this is a no-op.
+ensure_image() -> string {
+    pinned = getenv("AEO_LB_IMAGE")
+    if pinned != null {
+        if string_length(pinned) > 0 {
+            return ""   // caller pinned a custom image; trust it
+        }
+    }
+    if _image_present() == 1 {
+        return ""
+    }
+    eng = driver_linux.engine_resolve("")
+    if string_length(eng) == 0 {
+        return "aeo: no container engine to build the aeo-lb image (need podman/docker)"
+    }
+    bin = lb_binary()
+    if _binary_present(bin) == 0 {
+        return "aeo: aeo-lb binary not found at ${bin} — the toolchain builds it beside bin/aeo (ae build bin/aeo-lb.ae -o ${bin} --lib lib)"
+    }
+    ctx = "/tmp/aeo-lb-image"
+    _ = _mkdir(ctx)
+    // stage the binary into the context (COPY needs it inside the build dir).
+    cperr = _cp(bin, "${ctx}/aeo-lb")
+    if string_length(cperr) > 0 {
+        return "aeo: staging aeo-lb binary failed: ${cperr}"
+    }
+    df = _dockerfile()
+    werr = write_atomic("${ctx}/Dockerfile", df, string_length(df))
+    if string_length(werr) > 0 {
+        return "aeo: cannot write aeo-lb Dockerfile: ${werr}"
+    }
+    av = list_new()
+    list_add(av, "build")
+    list_add(av, "-t")
+    list_add(av, lb_image())
+    list_add(av, "-f")
+    list_add(av, "${ctx}/Dockerfile")
+    list_add(av, ctx)
+    out, status, err = run_capture(eng, av, null)
+    list_free(av)
+    if err != "" {
+        return "aeo: aeo-lb image build spawn failed: ${err}"
+    }
+    if status != 0 {
+        return "aeo: aeo-lb image build failed (exit ${status}): ${out}"
+    }
+    return ""
+}
+
+// The aeo-lb image Dockerfile: a slim base + the binary's runtime libs. Kept in
+// sync with aeo-lb's `ldd` (libssl3, libnghttp2 via libcurl). ca-certificates
+// for TLS to https upstreams.
+_dockerfile() -> string {
+    d = "FROM docker.io/library/debian:stable-slim\n"
+    d = string_concat(d, "RUN apt-get update -qq && apt-get install -y -qq libssl3 libnghttp2-14 ca-certificates && rm -rf /var/lib/apt/lists/*\n")
+    d = string_concat(d, "COPY aeo-lb /usr/local/bin/aeo-lb\n")
+    d = string_concat(d, "ENTRYPOINT [\"/usr/local/bin/aeo-lb\"]\n")
+    return d
+}
+
+_binary_present(path: string) -> int {
     av = list_new()
     list_add(av, "-x")
-    list_add(av, lb_binary())
+    list_add(av, path)
     _o, status, _e = run_capture("/usr/bin/test", av, null)
     list_free(av)
     if status == 0 { return 1 }
+    return 0
+}
+_cp(src: string, dst: string) -> string {
+    av = list_new()
+    list_add(av, src)
+    list_add(av, dst)
+    _o, status, err = run_capture("/bin/cp", av, null)
+    list_free(av)
+    if err != "" { return err }
+    if status != 0 { return "cp exit ${status}" }
+    return ""
+}
+_mkdir(path: string) -> int {
+    av = list_new()
+    list_add(av, "-p")
+    list_add(av, path)
+    _o, _s, _e = run_capture("/bin/mkdir", av, null)
+    list_free(av)
     return 0
 }
 
@@ -69,7 +195,9 @@ backend_specs(lb: string) -> string {
                     w = compose.get_weight(nm)
                     if string_length(w) == 0 { w = "1" }
                     spec = "http://${nm}:${port}|${w}"
-                    if string_length(out) == 0 { out = spec } else { out = "${out},${spec}" }
+                    // ';' not ',' — driver_linux's -e env splitter is comma-
+                    // delimited, so the backends list must be comma-free.
+                    if string_length(out) == 0 { out = spec } else { out = "${out};${spec}" }
                 }
             }
         }
@@ -78,196 +206,61 @@ backend_specs(lb: string) -> string {
     return out
 }
 
-// Bring the balancer up idempotently. Renders the pool from the model, sets the
-// AEO_LB_* env, and backgrounds aeo-lb tracked by a pidfile.
-up(res_name: string) -> string {
-    if probe(res_name, "", "") == 1 {
-        return ""
+// lb_env(lb) — the "K=V,K=V" env string driver_linux passes as `-e` to the LB
+// container. Renders the whole pool: port, algorithm, backends, health contract.
+// Pure model→string; unit-testable.
+lb_env(lb: string) -> string {
+    port = compose.get_publish(lb)
+    algo = compose.lb_algorithm(lb)
+    backends = backend_specs(lb)
+    e = "AEO_LB_HOST=0.0.0.0"
+    e = "${e},AEO_LB_PORT=${port}"
+    e = "${e},AEO_LB_ALGO=${algo}"
+    e = "${e},AEO_LB_BACKENDS=${backends}"
+    hpath = compose.get_lb_health_path(lb)
+    if string_length(hpath) > 0 {
+        e = "${e},AEO_LB_HEALTH_PATH=${hpath}"
+        hstatus = compose.get_lb_health_expect(lb)
+        if string_length(hstatus) > 0 {
+            e = "${e},AEO_LB_HEALTH_STATUS=${hstatus}"
+        }
+        // interval/thresholds: fall back to aeo-lb defaults; the system
+        // health_retry interval lowering is a follow-up (doc §9 step 2 note).
     }
+    return e
+}
+
+// Bring the balancer up: run the aeo-lb container on the backends' net, with the
+// pool rendered into AEO_LB_* env, publishing publish() to the host.
+up(res_name: string) -> string {
     if available() == 0 {
-        return "aeo: aeo-lb binary not found at ${lb_binary()} (build it: ae build bin/aeo-lb.ae -o ${lb_binary()} --lib lib)"
+        return "aeo: no container engine found (need podman or docker on PATH)"
+    }
+    // Build the aeo-lb image on demand (idempotent) — aeo bakes it, no manual step.
+    ierr = ensure_image()
+    if string_length(ierr) > 0 {
+        return ierr
     }
     backends = backend_specs(res_name)
     if string_length(backends) == 0 {
         return "aeo: load_balancer '${res_name}' has no routable backends (children need listens())"
     }
-    port = compose.get_publish(res_name)
-    if string_length(port) == 0 {
+    ports = compose.get_publish(res_name)
+    if string_length(ports) == 0 {
         return "aeo: load_balancer '${res_name}' has no publish() port"
     }
-    algo = compose.lb_algorithm(res_name)
-
-    log = logfile_for(res_name)
-    bg = _bg_command(res_name, backends, port, algo)
-    // os_system (system(3)) NOT run_capture: run_capture reads the child's stdout
-    // pipe until EOF, and aeo-lb (a long-running Aether server) never closes it —
-    // so run_capture would block forever (the documented detach-stdio busy-spin).
-    // os_system just fork/execs a shell and waitpid's it; the shell backgrounds
-    // aeo-lb and exits, so this returns while the LB keeps running.
-    _rc = os_system(bg)
-    // The `& echo $!` writes the pidfile asynchronously; poll briefly for it
-    // rather than racing an immediate read (mirrors driver_bwrap's info-fd wait).
-    _wait_pidfile(res_name)
-    if _read_pid(res_name) <= 0 {
-        return "aeo: load_balancer '${res_name}' did not start (see ${log})"
-    }
-    return ""
+    port = string_get_int(ports)
+    net = lb_net(res_name)
+    _ = driver_linux.network_ensure(net, "")
+    env = lb_env(res_name)
+    // No cmd (the image ENTRYPOINT is aeo-lb); publish `port` to the host.
+    return driver_linux.up_net(res_name, lb_image(), "", port, net, env, "")
 }
 
 down(res_name: string) -> string {
-    pid = _read_pid(res_name)
-    if pid > 0 {
-        _kill(pid)
-    }
-    _rm_pidfile(res_name)
-    return ""
+    return driver_linux.down(res_name, "")
 }
 
 probe(res_name: string, _health: string, _unused: string) -> int {
-    return _pid_alive(res_name)
-}
-
-// ---- the backgrounding command (env + aeo-lb & + record $!) -----------------
-// Shape:  AEO_LB_*=... <bin> </dev/null >LOG 2>&1 & echo $! > PIDFILE
-_bg_command(res_name: string, backends: string, port: string, algo: string) -> string {
-    hpath = compose.get_lb_health_path(res_name)
-    hstatus = compose.get_lb_health_expect(res_name)
-    s = "AEO_LB_HOST=0.0.0.0"
-    s = string_concat(s, " AEO_LB_PORT=")
-    s = string_concat(s, _shq(port))
-    s = string_concat(s, " AEO_LB_ALGO=")
-    s = string_concat(s, _shq(algo))
-    s = string_concat(s, " AEO_LB_BACKENDS=")
-    s = string_concat(s, _shq(backends))
-    if string_length(hpath) > 0 {
-        s = string_concat(s, " AEO_LB_HEALTH_PATH=")
-        s = string_concat(s, _shq(hpath))
-        if string_length(hstatus) > 0 {
-            s = string_concat(s, " AEO_LB_HEALTH_STATUS=")
-            s = string_concat(s, _shq(hstatus))
-        }
-        // interval/thresholds inherited from the system health_retry window; the
-        // driver passes the interval it resolves (falls back to aeo-lb's default).
-    }
-    // os_system runs this via `sh -c`, so a plain background + pidfile suffices:
-    //   <env> BIN </dev/null >LOG 2>&1 & echo $! > PID
-    // All of aeo-lb's stdio is redirected to the log/​/dev/null, and system(3)
-    // does not hold a capture pipe, so the launcher returns immediately.
-    s = string_concat(s, " ")
-    s = string_concat(s, _shq(lb_binary()))
-    s = string_concat(s, " </dev/null >")
-    s = string_concat(s, logfile_for(res_name))
-    s = string_concat(s, " 2>&1 & echo $! > ")
-    s = string_concat(s, pidfile_for(res_name))
-    return s
-}
-
-// Poll up to ~2s for the pidfile to appear + be non-empty (the async `echo $!`).
-_wait_pidfile(res_name: string) {
-    pf = pidfile_for(res_name)
-    i = 0
-    while i < 20 {
-        av = list_new()
-        list_add(av, "-s")
-        list_add(av, pf)
-        _o, status, _e = run_capture("/usr/bin/test", av, null)
-        list_free(av)
-        if status == 0 {
-            return
-        }
-        sleep(100)
-        i = i + 1
-    }
-}
-
-_read_pid(res_name: string) -> int {
-    av = list_new()
-    list_add(av, pidfile_for(res_name))
-    out, status, err = run_capture("/bin/cat", av, null)
-    list_free(av)
-    if err != "" { return 0 }
-    if status != 0 { return 0 }
-    return _to_int(out)
-}
-_pid_alive(res_name: string) -> int {
-    pid = _read_pid(res_name)
-    if pid <= 0 { return 0 }
-    av = list_new()
-    list_add(av, "-0")
-    list_add(av, string_from_int(pid))
-    _o, status, err = run_capture("/bin/kill", av, null)
-    list_free(av)
-    if err != "" { return 0 }
-    if status == 0 { return 1 }
-    return 0
-}
-_kill(pid: int) {
-    av = list_new()
-    list_add(av, "-KILL")
-    list_add(av, string_from_int(pid))
-    _o, _s, _e = run_capture("/bin/kill", av, null)
-    list_free(av)
-}
-_rm_pidfile(res_name: string) {
-    av = list_new()
-    list_add(av, "-f")
-    list_add(av, pidfile_for(res_name))
-    _o, _s, _e = run_capture("/bin/rm", av, null)
-    list_free(av)
-}
-
-// Minimal single-quote shell escape (the driver builds one `sh -c` line).
-_shq(s: string) -> string {
-    return "'${_sq_body(s)}'"
-}
-_sq_body(s: string) -> string {
-    out = ""
-    n = string_length(s)
-    i = 0
-    while i < n {
-        c = string_substring(s, i, i + 1)
-        if c == "'" {
-            out = string_concat(out, "'\\''")
-        } else {
-            out = string_concat(out, c)
-        }
-        i = i + 1
-    }
-    return out
-}
-
-_to_int(s: string) -> int {
-    // reuse compose-free int parse via string_from_int inverse isn't available;
-    // fall back to a tiny digit scan (tolerates trailing newline).
-    n = string_length(s)
-    v = 0
-    i = 0
-    seen = 0
-    while i < n {
-        c = string_substring(s, i, i + 1)
-        d = _digit(c)
-        if d >= 0 {
-            v = v * 10 + d
-            seen = 1
-        } else {
-            if seen == 1 {
-                return v
-            }
-        }
-        i = i + 1
-    }
-    return v
-}
-_digit(c: string) -> int {
-    if c == "0" { return 0 }
-    if c == "1" { return 1 }
-    if c == "2" { return 2 }
-    if c == "3" { return 3 }
-    if c == "4" { return 4 }
-    if c == "5" { return 5 }
-    if c == "6" { return 6 }
-    if c == "7" { return 7 }
-    if c == "8" { return 8 }
-    if c == "9" { return 9 }
-    return -1
+    return driver_linux.probe(res_name, "", "")
 }

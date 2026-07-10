@@ -8,7 +8,9 @@
 //   AEO_LB_HOST              bind host (default 0.0.0.0 — the LB IS the boundary)
 //   AEO_LB_PORT              publish() port to listen on
 //   AEO_LB_ALGO              "weighted_rr" | "round_robin" | …
-//   AEO_LB_BACKENDS          "url|weight,url|weight,…" (url e.g. http://app-1:8080)
+//   AEO_LB_BACKENDS          "url|weight;url|weight;…" (url e.g. http://app-1:8080)
+//                            (';' not ',' — the driver's -e env splitter is
+//                             comma-delimited, so backends use ';')
 //   AEO_LB_HEALTH_PATH       probe path (e.g. /healthz); "" disables health checks
 //   AEO_LB_HEALTH_STATUS     expected status int (e.g. 200)
 //   AEO_LB_HEALTH_INTERVAL   probe interval ms (from system health_retry every())
@@ -78,13 +80,13 @@ main() {
     }
 }
 
-// Parse "url|weight,url|weight,…" and upstream_add each. Returns the count added.
+// Parse "url|weight;url|weight;…" and upstream_add each. Returns the count added.
 _add_backends(pool: ptr, csv: string) -> int {
     added = 0
     rest = csv
     more = 1
     while more == 1 {
-        idx = string_index_of(rest, ",")
+        idx = string_index_of(rest, ";")
         entry = rest
         if idx >= 0 {
             entry = string_substring(rest, 0, idx)

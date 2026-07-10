@@ -1,12 +1,15 @@
 // spec_driver_loadbalancer_live.ae — LIVE lifecycle proof of driver_loadbalancer
-// through the real aeo-lb binary (docs §9 step 2): up() starts a tracked LB
-// process, probe() sees it alive, the LB answers on its publish() port, and
-// down() stops it. Backend routing correctness (weighted split, health-eject) is
-// proven at the binary level; here the focus is the DRIVER lifecycle.
+// through the real aeo-lb CONTAINER (docs §9 step 2/3): up() runs the aeo-lb
+// container on the backends' net publishing publish(), probe() sees it, the LB
+// answers on its publish() port, down() stops it. Backend routing correctness
+// (weighted split, health-eject, isolation) is proven end-to-end via `aeo up` on
+// real podman (see the step-3 proof in docs/built_in_load_balancing.md §9); here
+// the focus is the DRIVER lifecycle.
 //
-// Results are gathered into config BEFORE the describe() blocks (the actor/probe
-// work must complete up front — assertions then just read the recorded facts).
-// Requires AEO_HOME/bin/aeo-lb (run-spec.sh builds it); self-skips as UNAVAILABLE.
+// Results are gathered into config BEFORE the describe() blocks. Requires the
+// aeo-lb image (available() gates on it); self-skips as UNAVAILABLE otherwise.
+// run-spec.sh builds the binary but NOT the image, so this spec typically skips
+// under the plain suite and is exercised by the live `aeo up` proof instead.
 
 import aeocha
 import compose (system, container, load_balancer, listens, publish, balance_to, reset_nodes)

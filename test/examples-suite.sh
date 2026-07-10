@@ -29,6 +29,14 @@ ONE="${2:-}"
     exit 1
 }
 
+# The load_balancer example deploys an aeo-lb CONTAINER; the driver bakes the
+# image on demand (ensure_image) from AEO_HOME/bin/aeo-lb. Build that binary
+# beside bin/aeo so a `up`-phase run of the LB example works out of the box.
+if [ ! -x "$ROOT/bin/aeo-lb" ]; then
+    ( cd "$ROOT" && ae build bin/aeo-lb.ae -o bin/aeo-lb --lib lib ) >/dev/null 2>&1 \
+        || echo "  NOTE: could not build bin/aeo-lb (the load_balancer example's up phase needs it)"
+fi
+
 run_one() {
     ex="$1"
     echo "=== aeo $PHASE $(basename "$ex") ==="

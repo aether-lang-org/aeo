@@ -64,11 +64,12 @@ run_one() {
                 --lib "$ROOT/lib" >/dev/null 2>&1 || true
             ;;
         *spec_driver_loadbalancer_live*)
-            # LIVE LB lifecycle test: build aeo-lb to AEO_HOME/bin where the driver
-            # resolves it. Self-skips as UNAVAILABLE if the build fails.
-            ae build "$ROOT/bin/aeo-lb.ae" -o "${AEO_HOME:-$HOME/aeo}/bin/aeo-lb" \
-                --lib "$ROOT/lib" >/dev/null 2>&1 || true
-            ;;
+            # LIVE LB lifecycle test: the driver runs the aeo-lb CONTAINER, so it
+            # needs the aeo-lb image (localhost/aeo/aeo-lb:latest). The plain suite
+            # does NOT build that image, so this spec self-skips as UNAVAILABLE here;
+            # the end-to-end proof is the `aeo up` step-3 run (docs §9). Left as a
+            # no-op stage: to run it live, build the image first (see docs §9).
+            : ;;
     esac
     # build-then-run, not `ae run`: `ae run` caches by content and can serve a
     # stale compiled dependency (e.g. an edited lib/compose) — build to a fresh

@@ -1,6 +1,13 @@
-# Built-in load balancing in aeo — considered (design, model + provisioning built)
+# Built-in load balancing in aeo — considered (design, BUILT + live-proven)
 
-**STATUS: MODEL + PROVISIONING BUILT.** §9 steps 1 AND 2 have landed:
+**STATUS: BUILT + LIVE-PROVEN (steps 1–3).** `aeo up` provisions a working L7
+load balancer end to end on real podman: **weighted split** (3:1 observed
+exactly), **health-eject** (a stopped backend drops from rotation), and **backend
+isolation** (backends are NXDOMAIN + IP-unreachable from the host; only the LB's
+`publish()` port is the pinhole). See §9 for the proof and the two architecture
+findings it forced.
+
+§9 steps 1, 2 AND 3 have landed:
 - **Step 1** — the compose grammar (`load_balancer`, `publish`/`listens`,
   `balance_to { algorithm / lb_health }`, `balancer_weight`), model accessors
   (`lb_backends`, `lb_algorithm`, `lb_weight_ignored`), and model-check rules
@@ -374,30 +381,47 @@ are later thickening.
    `lb_health("/healthz", 200)` (not `health("/healthz", expect: 200)`) — `health`
    was already a container-scope verb, and named args aren't used elsewhere in the
    grammar; the doc's `health(..., expect:)` sketch reads better but collides.
-2. **`aeo up` lowering onto `std.http.proxy` — DONE.** `lib/driver_loadbalancer`
-   renders the pool from the model (children + `listens` + `balancer_weight` →
-   `http://name:port|weight`, the inferred/declared algorithm, the health contract)
-   and backgrounds `bin/aeo-lb` (an `std.http.proxy` reverse proxy) tracked by a
-   pidfile; wired into the runner's `driver_up`/`driver_down`/`driver_probe` for
-   kind `load_balancer`. The launcher uses `os_system` (not `run_capture` — a
-   long-running server never closes run_capture's stdout pipe, the documented
-   detach-stdio block). Renderers unit-tested (`test/spec_driver_loadbalancer.ae`);
-   up→answers→down live-proven (`test/spec_driver_loadbalancer_live.ae`); the
-   weighted split + health-eject datapath proven live via `bin/aeo-lb` directly.
-   *Still to wire:* the health contract's interval/thresholds are passed through
-   (path+status today; the system `health_retry` interval lowering onto the pool
-   checker is a follow-up), and the weight/algorithm mismatch surfacing into the
-   `up` summary (§5) — the model signal `lb_weight_ignored` exists; the runner
-   emit is pending.
-3. **Live deploy-and-route proof** (CachyOS/Bazzite): two REAL backends behind
-   `web`, a request reaches an app through the LB, `/healthz` failing on one
-   backend ejects it and traffic rebalances, `balancer_weight` produces the
-   declared split, and a backend is **not** directly reachable from outside (only
-   `web:9000` is). The mechanisms are each proven in isolation; this is the
-   end-to-end aeo-up-on-real-containers proof.
+2. **`aeo up` lowering onto `std.http.proxy` — DONE.** `bin/aeo-lb.ae` is the
+   front-door (an `std.http.proxy` reverse proxy reading its pool from `AEO_LB_*`
+   env); `lib/driver_loadbalancer` renders the pool from the model (children +
+   `listens` + `balancer_weight` → `http://name:port|weight`, the inferred/declared
+   algorithm, the health contract) and runs aeo-lb; wired into the runner's
+   `driver_up`/`driver_down`/`driver_probe` for kind `load_balancer`, plus the
+   host-gate (`_kind_runnable`) and the backend-nesting fix (a backend's `host` is
+   the LB — a container, not a VM — so it takes the host-container path, not the
+   ssh/agent nested path). Renderers unit-tested (`test/spec_driver_loadbalancer.ae`);
+   lifecycle live-proven (`test/spec_driver_loadbalancer_live.ae`).
+3. **Live deploy-and-route proof — DONE.** Proven via real `aeo up` on podman:
+   two self-identifying backends behind `web`, **weighted split 3:1 observed
+   exactly**, **health-eject** (stopped backend drops out, all traffic to the
+   survivor), **isolation** (backends NXDOMAIN + IP-unreachable from host; only
+   `web:19000` published), and clean `aeo down`.
+
+   **Two architecture findings this forced (both fixed):**
+   - **The LB must run as a CONTAINER on the backends' net, not a host process.**
+     A host-side aeo-lb cannot resolve backend names (container DNS is net-internal)
+     nor reach rootless-podman backend IPs (not host-routable). So the driver runs
+     aeo-lb as a container (image `localhost/aeo/aeo-lb:latest`) on `aeo-<system>`,
+     publishing `publish()` to the host — which is *also* what makes backend
+     isolation real. The image is **baked on demand** by the driver
+     (`ensure_image`): a slim base + the binary's runtime libs (libssl/libnghttp2)
+     + the toolchain-built `AEO_HOME/bin/aeo-lb` — no manual image step. (This
+     replaced the earlier host-process `os_system` launcher; the container path is
+     `driver_linux.up_net`.) The backends list uses `;` not `,` because
+     driver_linux's `-e` env splitter is comma-delimited.
+   - **The LB must boot AFTER its backends.** A pool built before a backend is
+     healthy admits it only once health checks converge — correct eventually, but
+     early traffic skews. `_deps_ready` now makes a `load_balancer` implicitly
+     depend on all its children being UP, so it's the last node in its subtree to
+     boot; the 3:1 split is then exact from the first request.
+   *Still to wire:* the health interval/thresholds (path+status pass through today;
+   the system `health_retry` interval lowering onto the pool checker is a follow-up),
+   and the weight/algorithm mismatch surfacing into the `up` summary (§5 — the
+   model signal `lb_weight_ignored` exists; the runner emit is pending).
 4. **Later thickening:** drain/undrain in reconcile, circuit breaker, cache; `:vm`
-   substrate; then the `:host` and multi-host epics (§7); and, gated on
-   aether#1092, the L4 TCP balancer (§8).
+   substrate; then the `:host` and multi-host epics (§7); and, gated on aether#1092,
+   the L4 TCP balancer (§8). (The aeo-lb image build is already folded in — the
+   driver bakes it on demand; see the step-3 finding above.)
 
 ---
 

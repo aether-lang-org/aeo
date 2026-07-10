@@ -18,29 +18,23 @@
 // See docs/built_in_load_balancing.md for the full grammar rationale.
 //
 // ┌─────────────────────────────────────────────────────────────────────────┐
-// │ ⚠ NOT YET TESTED — DEMONSTRATES THE MODEL/GRAMMAR ONLY.                   │
-// │                                                                          │
-// │ The load-balancer COMPOSE GRAMMAR + model checks are built and unit-     │
-// │ tested (lib/compose, test/spec_load_balancer.ae). But `aeo up` does NOT  │
-// │ yet PROVISION a load_balancer node — there is no lowering onto           │
-// │ std.http.proxy yet (docs/built_in_load_balancing.md §9 step 2), and no   │
-// │ live proof (step 3). So this file PARSES and MODEL-CHECKS, but           │
-// │ `aeo up`/`smoke`/`suite` on it will NOT stand up a working balancer.     │
-// │ It exists to show the intended DECLARATION shape and to exercise the     │
-// │ model — treat it as documentation-in-code, not a runnable deploy. The    │
-// │ check() spec below is a MODEL check (no deploy) and is the only phase     │
-// │ meaningful today; smoke()/suite() are placeholders for when step 2 lands.│
+// │ RUNNABLE — the load_balancer is provisioned by `aeo up` (docs §9, live-  │
+// │ proven: weighted split 3:1, health-eject, backend isolation). The LB     │
+// │ runs as a CONTAINER on the backends' net; aeo BAKES the aeo-lb image on   │
+// │ demand (driver_loadbalancer.ensure_image) from the toolchain-built        │
+// │ AEO_HOME/bin/aeo-lb — no manual image step. The backends need the         │
+// │ silly-add image (examples/silly_addition_app/).                           │
 // └─────────────────────────────────────────────────────────────────────────┘
 //
-//   aeo check examples/silly_addition_load_balanced.ae   model checks, no deploy (OK today)
-//   aeo up    examples/silly_addition_load_balanced.ae   NOT YET — no LB provisioning
+//   aeo check examples/silly_addition_load_balanced.ae   model checks, no deploy
+//   aeo up    examples/silly_addition_load_balanced.ae   deploy (bakes aeo-lb image)
 //   aeo down  examples/silly_addition_load_balanced.ae   teardown (reverse)
 
 import compose (system, container, load_balancer)
 import compose (image, env, depends, health)
 import compose (publish, listens, balance_to, lb_health, balancer_weight)
 import compose (health_retry, every, up_within, down_within)
-import compose (check, smoke, suite)
+import compose (check)
 
 exports ( aeo_orchestration )
 
@@ -93,12 +87,10 @@ aeo_orchestration() {
         }
 
         // ---- declared verification ----
-        // check: MODEL assertions only (no deploy) — the balancer grammar +
-        // model-check rules. This is the phase that is meaningful TODAY.
+        // check: MODEL assertions (no deploy) — the balancer grammar + model-check
+        // rules. A live smoke()/suite() (deploy + assert the 3:1 split + health-
+        // eject through the running LB) is a follow-up; the step-3 proof in
+        // docs/built_in_load_balancing.md §9 already demonstrates that path.
         check("examples/checks/load_balanced_model.spec.ae")
-        // smoke/suite: PLACEHOLDERS for when `aeo up` learns to provision an LB
-        // (doc §9 step 2). They will fail today because nothing is provisioned.
-        smoke("examples/checks/load_balanced_smoke.spec.ae")
-        suite("examples/checks/load_balanced_suite.spec.ae")
     }
 }

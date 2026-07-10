@@ -528,6 +528,15 @@ driver_up(nm: string, k: string) -> string {
         // real nested-execution path that makes `aeo up <dsl>` converge to a
         // host-reachable service in the guest (not a host-local podman run).
         host = compose.get_host(nm)
+        // A load_balancer BACKEND has host == the LB node (a container, not a VM).
+        // It deploys as an ordinary HOST container on the internal net — reachable
+        // by the LB by name — NOT nested-in-a-guest. Only a VM/guest host takes the
+        // ssh/agent nested path below.
+        if host != "" {
+            if compose.is_load_balancer(host) == 1 {
+                host = ""
+            }
+        }
         if host != "" {
             // AGENT PATH (containment-correct): when enabled, aeo does NOT reach
             // into the guest over ssh — it sends a `delegate` to the guest's
@@ -1001,6 +1010,25 @@ run_up() -> int {
 // BOOTING != UP, so a node whose dep is booting in the SAME level is correctly
 // deferred to the next pass — preserving depends() ordering under fan-out.
 _deps_ready(nm: string) -> int {
+    // A load_balancer IMPLICITLY depends on all its backends (children) being UP:
+    // its std.http.proxy pool should start against ready upstreams, not race them
+    // (a pool built before a backend is up admits it only after health checks
+    // converge — correct eventually, but skews early traffic). Wait for every
+    // child here so the LB is the LAST node in its subtree to boot.
+    if compose.is_load_balancer(nm) == 1 {
+        n = compose.count()
+        i = 0
+        while i < n {
+            cn = compose.name_at(i)
+            if compose.get_host(cn) == nm {
+                if get_state(cn) != STATE_UP() {
+                    return 0
+                }
+            }
+            i = i + 1
+        }
+        // fall through to the explicit depends() check too
+    }
     dep = compose.get_depends(nm)
     if dep == "" {
         return 1
@@ -2887,6 +2915,13 @@ _kind_runnable(k: string, fam: string) -> int {
     }
     if k == "kata" {
         return _eq(fam, "linux")
+    }
+    if k == "load_balancer" {
+        // The L7 balancer node runs the aeo-lb front-door (an std.http.proxy)
+        // locally — host-family-agnostic; the driver's available() (is aeo-lb
+        // built?) is the real gate. Its :container substrate is a separate
+        // concern realized by the backend children, not this node.
+        return 1
     }
     return 0
 }
