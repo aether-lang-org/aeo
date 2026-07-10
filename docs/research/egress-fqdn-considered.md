@@ -7,10 +7,15 @@ primitives it needed: length-aware TCP I/O (aether#1079, from aether#1078) and
 std.http server tunnel handoff (`http.response_accept_tunnel`, aether#1086).
 `lib/egress_gateway` provides std.http-facing CONNECT decision helpers, and
 `bin/aeo-egress-gateway.ae` accepts an allowed `CONNECT`, takes ownership of the
-accepted connection, opens the upstream socket, and pumps opaque bytes. The
-remaining work is integrating that gateway into node networking so
-`egress_fqdn(...)` is enforced rather than just available as a standalone
-executable.
+accepted connection, opens the upstream socket, and pumps opaque bytes. The byte
+pump is currently **half-duplex** (`_relay_alternating`: `client→upstream` then
+`upstream→client`, in lockstep) — correct for request/response HTTPS, but it will
+stall a server-speaks-first or both-sides-streaming protocol (some TLS
+renegotiation patterns, WebSocket-over-`CONNECT`, gRPC streaming). A full-duplex
+splice wants a stdlib poll/select helper or a callback-safe actor handoff (§8d).
+The remaining work is that full-duplex pump plus integrating the gateway into node
+networking so `egress_fqdn(...)` is enforced rather than just available as a
+standalone executable.
 This note records the reasoning for a layer-7 egress control, what to build, what
 to reject and *why*, and the trust invariants that make the hierarchical
 (agent-relayed) form sound. Written 2026-07-08 after a design conversation prompted by Jeroen
@@ -432,6 +437,11 @@ future runtime code from inventing a second policy store.
    `http.response_accept_tunnel` for allowed tunnels. Covered by
    `test/spec_egress_gateway.ae` for the std.http decision edge; a local
    embedded-NUL smoke test has also proven the standalone tunnel path.
+   **Caveat: the pump is half-duplex** (`_relay_alternating`, lockstep
+   `client→upstream` then `upstream→client`) — fine for request/response HTTPS,
+   but it stalls server-speaks-first / both-streaming protocols. Full-duplex is a
+   §8d follow-up; there is not yet a live loopback tunnel test in the normal
+   suite, so that behavior is unverified by CI.
 3. **Wire the gateway into node enforcement.** The standalone gateway exists;
    the next aeo work is provisioning it on the parent side of a node, routing
    `http_proxy`/`https_proxy` to it, and making direct raw egress impossible.
@@ -460,6 +470,13 @@ future runtime code from inventing a second policy store.
    cannot mutate its own allowlist.
 
 ### 8d. Later thickening
+
+**Full-duplex splice.** Replace `_relay_alternating`'s lockstep pump with a true
+bidirectional relay — a stdlib poll/select over both fds, or two actors each
+owning one direction with a callback-safe handoff. This lifts the half-duplex
+limitation (§8b caveat) that today confines the gateway to request/response HTTPS.
+Land it with a loopback echo-server tunnel test in the normal suite so the byte
+pump — where the surprising behavior lives — is covered by CI.
 
 Hierarchy + parent-stamped path waits for the aeo-agent http transport's
 authenticated single-parent identity (§5b rule 2). Wildcards, DNS-firewall/SNI
