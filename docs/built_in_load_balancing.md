@@ -1,18 +1,26 @@
-# Built-in load balancing in aeo — considered (design, model built)
+# Built-in load balancing in aeo — considered (design, model + provisioning built)
 
-**STATUS: MODEL BUILT; NO PROVISIONING.** §9 step 1 has landed: the compose
-grammar (`load_balancer`, `publish`/`listens`, `balance_to { algorithm / lb_health }`,
-`balancer_weight`), the model accessors (`lb_backends`, `lb_algorithm`,
-`lb_weight_ignored`), and the model-check rules (`lb_model_errors` — the three §3/§4
-checks) are in `lib/compose`, covered by `test/spec_load_balancer.ae` (12 passing).
-Nothing is provisioned yet — no `aeo up` lowering onto `std.http.proxy` (§9 step 2),
-no live proof (step 3). This note captures the design of an aeo-native HTTP load
+**STATUS: MODEL + PROVISIONING BUILT.** §9 steps 1 AND 2 have landed:
+- **Step 1** — the compose grammar (`load_balancer`, `publish`/`listens`,
+  `balance_to { algorithm / lb_health }`, `balancer_weight`), model accessors
+  (`lb_backends`, `lb_algorithm`, `lb_weight_ignored`), and model-check rules
+  (`lb_model_errors` — the three §3/§4 checks) in `lib/compose`
+  (`test/spec_load_balancer.ae`, 12 passing).
+- **Step 2** — `aeo up` now PROVISIONS a `load_balancer` node: `lib/driver_loadbalancer`
+  renders the pool from the model and backgrounds the `bin/aeo-lb` front-door (an
+  `std.http.proxy` reverse proxy), wired into the runner's driver_up/down/probe.
+  Renderers unit-tested (`test/spec_driver_loadbalancer.ae`, 4 passing) and the
+  up→answers→down lifecycle live-proven through the real binary
+  (`test/spec_driver_loadbalancer_live.ae`, 3 passing). The datapath itself
+  (weighted split + health-eject) was proven live via `bin/aeo-lb` directly.
+
+Remaining: a full deploy-and-route example proof on CachyOS/Bazzite (step 3 — two
+real backends, weighted split observed, health-eject observed, backend not
+directly reachable). This note captures the design of an aeo-native HTTP load
 balancer: a `load_balancer` node that *contains* its backends, derives its pool
 from the containment tree, and lowers onto Aether's already-shipped
 `std.http.proxy` (nginx-class reverse proxy — weighted RR, active health checks,
-drain/undrain, circuit breaker, LRU cache). The datapath is not new work; the aeo
-work is the **declarative grammar** and the **provisioning of a balancer as a node
-in the hierarchy**. Written 2026-07-10.
+drain/undrain, circuit breaker, LRU cache). Written 2026-07-10.
 
 The guiding discipline is the same one that governs `egress_fqdn`
 ([egress-fqdn-considered.md](research/egress-fqdn-considered.md)): **the model may
@@ -366,13 +374,27 @@ are later thickening.
    `lb_health("/healthz", 200)` (not `health("/healthz", expect: 200)`) — `health`
    was already a container-scope verb, and named args aren't used elsewhere in the
    grammar; the doc's `health(..., expect:)` sketch reads better but collides.
-2. **`aeo up` lowering onto `std.http.proxy`** as above, for the `:container`
-   substrate only, with the health contract lowered to both enforcers (§6) and the
-   weight/algorithm mismatch surfaced into the `up` summary/audit trail (§5).
-3. **Live proof** (CachyOS/Bazzite): two backends behind `web`, a request reaches
-   an app through the LB, `/healthz` failing on one backend ejects it and traffic
-   rebalances, `balancer_weight` produces the declared split, and a backend is
-   **not** directly reachable from outside (only `web:9000` is).
+2. **`aeo up` lowering onto `std.http.proxy` — DONE.** `lib/driver_loadbalancer`
+   renders the pool from the model (children + `listens` + `balancer_weight` →
+   `http://name:port|weight`, the inferred/declared algorithm, the health contract)
+   and backgrounds `bin/aeo-lb` (an `std.http.proxy` reverse proxy) tracked by a
+   pidfile; wired into the runner's `driver_up`/`driver_down`/`driver_probe` for
+   kind `load_balancer`. The launcher uses `os_system` (not `run_capture` — a
+   long-running server never closes run_capture's stdout pipe, the documented
+   detach-stdio block). Renderers unit-tested (`test/spec_driver_loadbalancer.ae`);
+   up→answers→down live-proven (`test/spec_driver_loadbalancer_live.ae`); the
+   weighted split + health-eject datapath proven live via `bin/aeo-lb` directly.
+   *Still to wire:* the health contract's interval/thresholds are passed through
+   (path+status today; the system `health_retry` interval lowering onto the pool
+   checker is a follow-up), and the weight/algorithm mismatch surfacing into the
+   `up` summary (§5) — the model signal `lb_weight_ignored` exists; the runner
+   emit is pending.
+3. **Live deploy-and-route proof** (CachyOS/Bazzite): two REAL backends behind
+   `web`, a request reaches an app through the LB, `/healthz` failing on one
+   backend ejects it and traffic rebalances, `balancer_weight` produces the
+   declared split, and a backend is **not** directly reachable from outside (only
+   `web:9000` is). The mechanisms are each proven in isolation; this is the
+   end-to-end aeo-up-on-real-containers proof.
 4. **Later thickening:** drain/undrain in reconcile, circuit breaker, cache; `:vm`
    substrate; then the `:host` and multi-host epics (§7); and, gated on
    aether#1092, the L4 TCP balancer (§8).

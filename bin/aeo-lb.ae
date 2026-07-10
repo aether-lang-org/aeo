@@ -1,0 +1,130 @@
+// aeo-lb — the load_balancer front-door: an std.http.proxy reverse proxy that
+// fans inbound HTTP to a pool of backends. Provisioned by driver_loadbalancer
+// (lib/aeo/runner.ae driver_up for kind "load_balancer"); the pool is rendered
+// from the compose model (backends = the LB node's children, weights, algorithm,
+// one health contract) and handed in via env.
+//
+// Env contract (all set by the driver):
+//   AEO_LB_HOST              bind host (default 0.0.0.0 — the LB IS the boundary)
+//   AEO_LB_PORT              publish() port to listen on
+//   AEO_LB_ALGO              "weighted_rr" | "round_robin" | …
+//   AEO_LB_BACKENDS          "url|weight,url|weight,…" (url e.g. http://app-1:8080)
+//   AEO_LB_HEALTH_PATH       probe path (e.g. /healthz); "" disables health checks
+//   AEO_LB_HEALTH_STATUS     expected status int (e.g. 200)
+//   AEO_LB_HEALTH_INTERVAL   probe interval ms (from system health_retry every())
+//   AEO_LB_HEALTH_TIMEOUT    per-probe timeout ms
+//   AEO_LB_HEALTH_HEALTHY    healthy_threshold (consecutive OK to readmit)
+//   AEO_LB_HEALTH_UNHEALTHY  unhealthy_threshold (consecutive fail to eject)
+//
+import std.http (http_server_create, http_server_set_host, http_server_start_raw)
+import std.http.proxy (upstream_pool_new, upstream_add, health_checks_enable,
+                       opts_new, mount)
+import std.os (os_getenv)
+import std.string (string_length, string_get_int, string_index_of, string_substring)
+
+main() {
+    host = _env("AEO_LB_HOST", "0.0.0.0")
+    port = _env_int("AEO_LB_PORT", 9000)
+    algo = _env("AEO_LB_ALGO", "round_robin")
+    backends = _env("AEO_LB_BACKENDS", "")
+    if string_length(backends) == 0 {
+        println("aeo-lb: no backends (AEO_LB_BACKENDS empty)")
+        return
+    }
+
+    // request_timeout 30s, dial_timeout reserved (0), no per-upstream inflight cap.
+    pool = upstream_pool_new(algo, 30, 0, 0)
+    if pool == 0 {
+        println("aeo-lb: pool_new failed (bad algorithm '${algo}'?)")
+        return
+    }
+
+    n = _add_backends(pool, backends)
+    if n == 0 {
+        println("aeo-lb: no valid backends parsed from '${backends}'")
+        return
+    }
+
+    hpath = _env("AEO_LB_HEALTH_PATH", "")
+    if string_length(hpath) > 0 {
+        hstatus   = _env_int("AEO_LB_HEALTH_STATUS", 200)
+        hinterval = _env_int("AEO_LB_HEALTH_INTERVAL", 500)
+        htimeout  = _env_int("AEO_LB_HEALTH_TIMEOUT", 1000)
+        hhealthy  = _env_int("AEO_LB_HEALTH_HEALTHY", 2)
+        hunhealthy = _env_int("AEO_LB_HEALTH_UNHEALTHY", 3)
+        herr = health_checks_enable(pool, hpath, hstatus, hinterval, htimeout, hhealthy, hunhealthy)
+        if string_length(herr) > 0 {
+            println("aeo-lb: health_checks_enable: ${herr}")
+        }
+    }
+
+    server = http_server_create(port)
+    if server == 0 {
+        println("aeo-lb: server_create failed on ${port}")
+        return
+    }
+    http_server_set_host(server, host)
+    opts = opts_new()
+    merr = mount(server, "/", pool, opts)
+    if string_length(merr) > 0 {
+        println("aeo-lb: mount: ${merr}")
+        return
+    }
+
+    println("aeo-lb: listening on ${host}:${port} — ${algo}, ${_i(n)} backend(s)")
+    rc = http_server_start_raw(server)      // blocks; the driver backgrounds us
+    if rc < 0 {
+        println("aeo-lb: server start failed")
+    }
+}
+
+// Parse "url|weight,url|weight,…" and upstream_add each. Returns the count added.
+_add_backends(pool: ptr, csv: string) -> int {
+    added = 0
+    rest = csv
+    more = 1
+    while more == 1 {
+        idx = string_index_of(rest, ",")
+        entry = rest
+        if idx >= 0 {
+            entry = string_substring(rest, 0, idx)
+            rest = string_substring(rest, idx + 1, string_length(rest))
+        } else {
+            more = 0
+        }
+        if string_length(entry) > 0 {
+            bar = string_index_of(entry, "|")
+            url = entry
+            weight = 1
+            if bar > 0 {
+                url = string_substring(entry, 0, bar)
+                ws = string_substring(entry, bar + 1, string_length(entry))
+                w = string_get_int(ws)
+                if w > 0 { weight = w }
+            }
+            if string_length(url) > 0 {
+                _ = upstream_add(pool, url, weight)
+                added = added + 1
+            }
+        }
+    }
+    return added
+}
+
+_env(name: string, fallback: string) -> string {
+    v = os_getenv(name)
+    if v == null { return fallback }
+    if string_length(v) == 0 { return fallback }
+    return v
+}
+_env_int(name: string, fallback: int) -> int {
+    v = os_getenv(name)
+    if v == null { return fallback }
+    if string_length(v) == 0 { return fallback }
+    n = string_get_int(v)
+    if n <= 0 { return fallback }
+    return n
+}
+_i(n: int) -> string {
+    return "${n}"
+}

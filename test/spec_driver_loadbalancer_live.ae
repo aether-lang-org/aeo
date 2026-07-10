@@ -1,0 +1,113 @@
+// spec_driver_loadbalancer_live.ae — LIVE lifecycle proof of driver_loadbalancer
+// through the real aeo-lb binary (docs §9 step 2): up() starts a tracked LB
+// process, probe() sees it alive, the LB answers on its publish() port, and
+// down() stops it. Backend routing correctness (weighted split, health-eject) is
+// proven at the binary level; here the focus is the DRIVER lifecycle.
+//
+// Results are gathered into config BEFORE the describe() blocks (the actor/probe
+// work must complete up front — assertions then just read the recorded facts).
+// Requires AEO_HOME/bin/aeo-lb (run-spec.sh builds it); self-skips as UNAVAILABLE.
+
+import aeocha
+import compose (system, container, load_balancer, listens, publish, balance_to, reset_nodes)
+import driver_loadbalancer (up, down, probe, available)
+import std.config
+import std.os (run_capture)
+import std.string
+import std.list
+
+const LB_PORT = 18810
+
+_declare() {
+    reset_nodes()
+    system("lblive") {
+        web = load_balancer("weblive", "container") {
+            publish(18810)
+            balance_to(18581)
+            b = container("backend-x") { listens(18581) }   // placeholder; LB 502s but IS up
+        }
+    }
+}
+
+main() {
+    fw = aeocha.init()
+    _declare()
+
+    avail = available()
+    config.put("lb.avail", "${avail}")
+    config.put("lb.up_err", "skip")
+    config.put("lb.up_alive", "0")
+    config.put("lb.answers", "0")
+    config.put("lb.down_alive", "1")
+
+    if avail == 1 {
+        e = up("weblive")
+        config.put("lb.up_err", e)
+        pa = probe("weblive", "", "")
+        config.put("lb.up_alive", "${pa}")
+        ans = _answers()
+        config.put("lb.answers", "${ans}")
+        _ = down("weblive")
+        pd = probe("weblive", "", "")
+        config.put("lb.down_alive", "${pd}")
+    }
+
+    aeocha.describe(fw, "driver_loadbalancer live lifecycle") {
+        aeocha.it("up() starts a tracked LB process") callback {
+            if _skip() == 1 {
+                aeocha.expect_int(1).to_equal(1)
+            } else {
+                aeocha.expect_str(config.get("lb.up_err")).to_equal_str("")
+                aeocha.expect_str(config.get("lb.up_alive")).to_equal_str("1")
+            }
+        }
+        aeocha.it("the LB answers on its publish() port") callback {
+            if _skip() == 1 {
+                aeocha.expect_int(1).to_equal(1)
+            } else {
+                aeocha.expect_str(config.get("lb.answers")).to_equal_str("1")
+            }
+        }
+        aeocha.it("down() stops the tracked process") callback {
+            if _skip() == 1 {
+                aeocha.expect_int(1).to_equal(1)
+            } else {
+                aeocha.expect_str(config.get("lb.down_alive")).to_equal_str("0")
+            }
+        }
+    }
+
+    aeocha.run_summary(fw)
+}
+
+_skip() -> int {
+    if config.get("lb.avail") == "1" { return 0 }
+    return 1
+}
+
+// 1 if the LB answers HTTP at all (even 502 = it's up + listening). Polls briefly
+// for the async bind, then curls. curl exit 0 (2xx/3xx) or 22 (HTTP error) both
+// mean "answered".
+_answers() -> int {
+    i = 0
+    while i < 25 {
+        s = _curl()
+        if s == 0 { return 1 }
+        if s == 22 { return 1 }
+        sleep(100)
+        i = i + 1
+    }
+    return 0
+}
+_curl() -> int {
+    av = list_new()
+    list_add(av, "-s")
+    list_add(av, "-o")
+    list_add(av, "/dev/null")
+    list_add(av, "--max-time")
+    list_add(av, "2")
+    list_add(av, "http://127.0.0.1:18810/")
+    _o, status, _e = run_capture("/usr/bin/curl", av, null)
+    list_free(av)
+    return status
+}

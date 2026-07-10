@@ -1,0 +1,273 @@
+// driver_loadbalancer — provisions a load_balancer node (docs §9 step 2).
+//
+// A load_balancer lowers onto the aeo-lb front-door binary (bin/aeo-lb.ae), an
+// std.http.proxy reverse proxy. This driver renders the pool from the compose
+// model — backends are the LB node's children (get_host(child) == lb), their
+// listens() ports + balancer_weight, the inferred/declared algorithm, and the
+// one health contract (§6) — hands it to aeo-lb via env, and backgrounds it
+// tracked by a pidfile (the driver_bwrap pattern: fire-and-forget + $! pidfile).
+//
+// Backends reach each other by NAME on the aeo net, so a backend URL is
+// http://<backend-name>:<listens-port>. The LB binds publish() (the boundary).
+//
+// up/down/probe are keyed on the pidfile so they work across separate aeo
+// invocations. probe = "the LB process is alive" (its own health-checking of
+// backends is internal to std.http.proxy).
+
+import compose
+import std.os (run_capture, os_system, getenv)
+import std.string (
+    string_length, string_concat, string_from_int, string_index_of, string_substring
+)
+import std.list
+
+exports (
+    up, down, probe, available,
+    pidfile_for, logfile_for, backend_specs, lb_binary
+)
+
+pidfile_for(res_name: string) -> string { return "/tmp/aeo-lb-${res_name}.pid" }
+logfile_for(res_name: string) -> string { return "/tmp/aeo-lb-${res_name}.log" }
+
+// The aeo-lb front-door binary, built under AEO_HOME/bin (mirrors driver_vm's
+// agent_bin resolution). Built once by run-spec.sh / the aeo build; a missing
+// binary surfaces as an up() error pointing at the build.
+lb_binary() -> string {
+    h = getenv("AEO_HOME")
+    if string_length(h) == 0 {
+        home = getenv("HOME")
+        h = "${home}/aeo"
+    }
+    return "${h}/bin/aeo-lb"
+}
+
+available() -> int {
+    // available iff the front-door binary exists (built).
+    av = list_new()
+    list_add(av, "-x")
+    list_add(av, lb_binary())
+    _o, status, _e = run_capture("/usr/bin/test", av, null)
+    list_free(av)
+    if status == 0 { return 1 }
+    return 0
+}
+
+// backend_specs(lb) — the "url|weight,…" string aeo-lb parses. Pure model→string;
+// unit-testable. Each child of `lb` (a backend) → http://<name>:<listens>|<weight>.
+// A backend with no listens() is skipped (can't be routed to) — the model check
+// (compose.lb_model_errors) is what flags that upstream; here we just omit it.
+backend_specs(lb: string) -> string {
+    out = ""
+    n = compose.count()
+    i = 0
+    while i < n {
+        nm = compose.name_at(i)
+        if compose.get_host(nm) == lb {
+            if compose.is_load_balancer(nm) == 0 {
+                port = compose.get_listens(nm)
+                if string_length(port) > 0 {
+                    w = compose.get_weight(nm)
+                    if string_length(w) == 0 { w = "1" }
+                    spec = "http://${nm}:${port}|${w}"
+                    if string_length(out) == 0 { out = spec } else { out = "${out},${spec}" }
+                }
+            }
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// Bring the balancer up idempotently. Renders the pool from the model, sets the
+// AEO_LB_* env, and backgrounds aeo-lb tracked by a pidfile.
+up(res_name: string) -> string {
+    if probe(res_name, "", "") == 1 {
+        return ""
+    }
+    if available() == 0 {
+        return "aeo: aeo-lb binary not found at ${lb_binary()} (build it: ae build bin/aeo-lb.ae -o ${lb_binary()} --lib lib)"
+    }
+    backends = backend_specs(res_name)
+    if string_length(backends) == 0 {
+        return "aeo: load_balancer '${res_name}' has no routable backends (children need listens())"
+    }
+    port = compose.get_publish(res_name)
+    if string_length(port) == 0 {
+        return "aeo: load_balancer '${res_name}' has no publish() port"
+    }
+    algo = compose.lb_algorithm(res_name)
+
+    log = logfile_for(res_name)
+    bg = _bg_command(res_name, backends, port, algo)
+    // os_system (system(3)) NOT run_capture: run_capture reads the child's stdout
+    // pipe until EOF, and aeo-lb (a long-running Aether server) never closes it —
+    // so run_capture would block forever (the documented detach-stdio busy-spin).
+    // os_system just fork/execs a shell and waitpid's it; the shell backgrounds
+    // aeo-lb and exits, so this returns while the LB keeps running.
+    _rc = os_system(bg)
+    // The `& echo $!` writes the pidfile asynchronously; poll briefly for it
+    // rather than racing an immediate read (mirrors driver_bwrap's info-fd wait).
+    _wait_pidfile(res_name)
+    if _read_pid(res_name) <= 0 {
+        return "aeo: load_balancer '${res_name}' did not start (see ${log})"
+    }
+    return ""
+}
+
+down(res_name: string) -> string {
+    pid = _read_pid(res_name)
+    if pid > 0 {
+        _kill(pid)
+    }
+    _rm_pidfile(res_name)
+    return ""
+}
+
+probe(res_name: string, _health: string, _unused: string) -> int {
+    return _pid_alive(res_name)
+}
+
+// ---- the backgrounding command (env + aeo-lb & + record $!) -----------------
+// Shape:  AEO_LB_*=... <bin> </dev/null >LOG 2>&1 & echo $! > PIDFILE
+_bg_command(res_name: string, backends: string, port: string, algo: string) -> string {
+    hpath = compose.get_lb_health_path(res_name)
+    hstatus = compose.get_lb_health_expect(res_name)
+    s = "AEO_LB_HOST=0.0.0.0"
+    s = string_concat(s, " AEO_LB_PORT=")
+    s = string_concat(s, _shq(port))
+    s = string_concat(s, " AEO_LB_ALGO=")
+    s = string_concat(s, _shq(algo))
+    s = string_concat(s, " AEO_LB_BACKENDS=")
+    s = string_concat(s, _shq(backends))
+    if string_length(hpath) > 0 {
+        s = string_concat(s, " AEO_LB_HEALTH_PATH=")
+        s = string_concat(s, _shq(hpath))
+        if string_length(hstatus) > 0 {
+            s = string_concat(s, " AEO_LB_HEALTH_STATUS=")
+            s = string_concat(s, _shq(hstatus))
+        }
+        // interval/thresholds inherited from the system health_retry window; the
+        // driver passes the interval it resolves (falls back to aeo-lb's default).
+    }
+    // os_system runs this via `sh -c`, so a plain background + pidfile suffices:
+    //   <env> BIN </dev/null >LOG 2>&1 & echo $! > PID
+    // All of aeo-lb's stdio is redirected to the log/​/dev/null, and system(3)
+    // does not hold a capture pipe, so the launcher returns immediately.
+    s = string_concat(s, " ")
+    s = string_concat(s, _shq(lb_binary()))
+    s = string_concat(s, " </dev/null >")
+    s = string_concat(s, logfile_for(res_name))
+    s = string_concat(s, " 2>&1 & echo $! > ")
+    s = string_concat(s, pidfile_for(res_name))
+    return s
+}
+
+// Poll up to ~2s for the pidfile to appear + be non-empty (the async `echo $!`).
+_wait_pidfile(res_name: string) {
+    pf = pidfile_for(res_name)
+    i = 0
+    while i < 20 {
+        av = list_new()
+        list_add(av, "-s")
+        list_add(av, pf)
+        _o, status, _e = run_capture("/usr/bin/test", av, null)
+        list_free(av)
+        if status == 0 {
+            return
+        }
+        sleep(100)
+        i = i + 1
+    }
+}
+
+_read_pid(res_name: string) -> int {
+    av = list_new()
+    list_add(av, pidfile_for(res_name))
+    out, status, err = run_capture("/bin/cat", av, null)
+    list_free(av)
+    if err != "" { return 0 }
+    if status != 0 { return 0 }
+    return _to_int(out)
+}
+_pid_alive(res_name: string) -> int {
+    pid = _read_pid(res_name)
+    if pid <= 0 { return 0 }
+    av = list_new()
+    list_add(av, "-0")
+    list_add(av, string_from_int(pid))
+    _o, status, err = run_capture("/bin/kill", av, null)
+    list_free(av)
+    if err != "" { return 0 }
+    if status == 0 { return 1 }
+    return 0
+}
+_kill(pid: int) {
+    av = list_new()
+    list_add(av, "-KILL")
+    list_add(av, string_from_int(pid))
+    _o, _s, _e = run_capture("/bin/kill", av, null)
+    list_free(av)
+}
+_rm_pidfile(res_name: string) {
+    av = list_new()
+    list_add(av, "-f")
+    list_add(av, pidfile_for(res_name))
+    _o, _s, _e = run_capture("/bin/rm", av, null)
+    list_free(av)
+}
+
+// Minimal single-quote shell escape (the driver builds one `sh -c` line).
+_shq(s: string) -> string {
+    return "'${_sq_body(s)}'"
+}
+_sq_body(s: string) -> string {
+    out = ""
+    n = string_length(s)
+    i = 0
+    while i < n {
+        c = string_substring(s, i, i + 1)
+        if c == "'" {
+            out = string_concat(out, "'\\''")
+        } else {
+            out = string_concat(out, c)
+        }
+        i = i + 1
+    }
+    return out
+}
+
+_to_int(s: string) -> int {
+    // reuse compose-free int parse via string_from_int inverse isn't available;
+    // fall back to a tiny digit scan (tolerates trailing newline).
+    n = string_length(s)
+    v = 0
+    i = 0
+    seen = 0
+    while i < n {
+        c = string_substring(s, i, i + 1)
+        d = _digit(c)
+        if d >= 0 {
+            v = v * 10 + d
+            seen = 1
+        } else {
+            if seen == 1 {
+                return v
+            }
+        }
+        i = i + 1
+    }
+    return v
+}
+_digit(c: string) -> int {
+    if c == "0" { return 0 }
+    if c == "1" { return 1 }
+    if c == "2" { return 2 }
+    if c == "3" { return 3 }
+    if c == "4" { return 4 }
+    if c == "5" { return 5 }
+    if c == "6" { return 6 }
+    if c == "7" { return 7 }
+    if c == "8" { return 8 }
+    if c == "9" { return 9 }
+    return -1
+}

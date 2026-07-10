@@ -1,0 +1,73 @@
+// spec_driver_loadbalancer.ae — the load_balancer driver's pure renderers
+// (docs §9 step 2). backend_specs() maps the model (children + listens + weight)
+// to the "url|weight,…" string aeo-lb parses; lb_binary() resolves under AEO_HOME.
+// No process launch here — that's the live proof (test/lb_live_harness).
+
+import aeocha
+import compose (
+    system, container, load_balancer, listens, publish, balance_to, balancer_weight,
+    reset_nodes
+)
+import driver_loadbalancer (backend_specs, lb_binary)
+import std.string
+
+_declare() {
+    reset_nodes()
+    system("lbsys") {
+        web = load_balancer("web", "container") {
+            publish(9000)
+            balance_to(8080)
+            app1 = container("app-1") { listens(8080); balancer_weight(3) }
+            app2 = container("app-2") { listens(8080); balancer_weight(1) }
+        }
+    }
+}
+
+main() {
+    fw = aeocha.init()
+    _declare()
+
+    aeocha.describe(fw, "driver_loadbalancer pure renderers") {
+        aeocha.it("renders backends as http://name:port|weight, weighted") callback {
+            aeocha.expect_str(backend_specs("web")).to_equal_str(
+                "http://app-1:8080|3,http://app-2:8080|1")
+        }
+        aeocha.it("defaults weight to 1 when unset") callback {
+            reset_nodes()
+            system("s2") {
+                lb = load_balancer("lb", "container") {
+                    publish(80)
+                    balance_to(8080)
+                    a = container("a") { listens(8080) }          // no weight
+                }
+            }
+            aeocha.expect_str(backend_specs("lb")).to_equal_str("http://a:8080|1")
+        }
+        aeocha.it("skips a child with no listens() (not routable)") callback {
+            reset_nodes()
+            system("s3") {
+                lb = load_balancer("lb", "container") {
+                    publish(80)
+                    balance_to(8080)
+                    good = container("good") { listens(8080) }
+                    bad  = container("bad")  { }                  // no listens
+                }
+            }
+            aeocha.expect_str(backend_specs("lb")).to_equal_str("http://good:8080|1")
+        }
+        aeocha.it("lb_binary resolves under AEO_HOME/bin") callback {
+            aeocha.expect_int(_ends_with(lb_binary(), "/bin/aeo-lb")).to_be_truthy()
+        }
+    }
+
+    aeocha.run_summary(fw)
+}
+
+_ends_with(s: string, suffix: string) -> int {
+    ls = string.length(s)
+    lf = string.length(suffix)
+    if lf > ls { return 0 }
+    tail = string.substring(s, ls - lf, ls)
+    if tail == suffix { return 1 }
+    return 0
+}

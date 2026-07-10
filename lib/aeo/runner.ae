@@ -30,6 +30,7 @@ import driver_firecracker
 import driver_kata
 import driver_windows
 import driver_wslc
+import driver_loadbalancer
 import compose
 import ipam
 import pf
@@ -480,6 +481,13 @@ _realize_build_steps(img: string) -> string {
 
 // ---- driver dispatch by kind (exported; pure routing) ----
 driver_up(nm: string, k: string) -> string {
+    if k == "load_balancer" {
+        // The L7 balancer front-door (docs §9 step 2): render the pool from this
+        // node's children and background aeo-lb. The backends themselves are
+        // ordinary container nodes booted by their own actors (they live INSIDE
+        // this LB via get_host==nm, so they're on the internal net, not published).
+        return driver_loadbalancer.up(nm)
+    }
     if k == "lxc" {
         // REAL LXC system container (driver_lxc), not podman. image() is the
         // download-template "dist:release" (e.g. "alpine:3.21").
@@ -689,6 +697,9 @@ driver_exec(nm: string, k: string, cmd: string) -> string {
 }
 
 driver_down(nm: string, k: string) -> string {
+    if k == "load_balancer" {
+        return driver_loadbalancer.down(nm)
+    }
     if k == "jail" {
         return driver_bsd.down(nm)
     }
@@ -727,6 +738,9 @@ driver_down(nm: string, k: string) -> string {
 }
 
 driver_probe(nm: string, k: string, health: string) -> int {
+    if k == "load_balancer" {
+        return driver_loadbalancer.probe(nm, health, "")
+    }
     // AGENT PATH: a nested container (get_host != "") runs INSIDE its guest, so a
     // HOST podman probe can't see it — health must be asked of the guest's agent
     // (a `status` check via agent_delegate's polling already confirmed up at
