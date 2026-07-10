@@ -471,12 +471,55 @@ future runtime code from inventing a second policy store.
 
 ### 8d. Later thickening
 
-**Full-duplex splice.** Replace `_relay_alternating`'s lockstep pump with a true
-bidirectional relay — a stdlib poll/select over both fds, or two actors each
-owning one direction with a callback-safe handoff. This lifts the half-duplex
-limitation (§8b caveat) that today confines the gateway to request/response HTTPS.
-Land it with a loopback echo-server tunnel test in the normal suite so the byte
-pump — where the surprising behavior lives — is covered by CI.
+#### Full-duplex splice — the true root cause (an Aether `std.tcp` gap, not aeo)
+
+The half-duplex `_relay_alternating` is **not a shortcut we chose** — it is the
+only shape the current Aether stdlib can express *correctly*. The blocker is in
+`aether/std/net/aether_net.c`, at the read primitive both directions must share.
+Two defects, either one alone fatal to a naive bidirectional pump:
+
+1. **No readiness/multiplexing primitive.** `std.tcp` exposes only blocking
+   `read_n`/`write_n` (`recv(2)`/`send(2)`); there is no `poll`/`select`, no
+   nonblocking mode, no "read whichever fd is ready first." A true splice must
+   wait on *both* fds at once and service whichever speaks — impossible with two
+   blocking reads from one thread of control. (The runtime *has* an I/O poller —
+   `aether/runtime/io/aether_poller_{epoll,kqueue}.c` — but it is **not surfaced
+   to `std.tcp`**. The gap is exposure, not absence.)
+
+2. **A blocking read's timeout is indistinguishable from EOF, and is fatal.**
+   Every socket gets a fixed 30 s `SO_RCVTIMEO` (`net_set_socket_timeouts`,
+   applied in `tcp_connect_raw` and on accept). When it fires, `recv` returns
+   `-1`/`EAGAIN`; but `tcp_receive_n_raw` collapses **all** `received <= 0` into
+   one branch that sets `sock->connected = 0` and returns the *same* string a
+   real FIN returns (`"connection closed or receive failed"`). So even a
+   timeout-poll loop can't work: a quiet-but-live direction times out, the socket
+   is marked dead, and the tunnel is torn down mid-stream. Aeo cannot distinguish
+   "peer idle" from "peer closed" through the stdlib.
+
+Why two blocking actors don't rescue it either: each actor runs on its own OS
+thread (`aether_actor_thread.c`), so parking on `recv` blocks only that thread —
+good. But defect #2 still bites (an idle direction's 30 s timeout kills the
+socket the *other* actor is also using), and the CONNECT tunnel fd handed back by
+`http.response_accept_tunnel` is a plain `TcpSocket*`
+(`tcp_socket_from_fd_owned`) carrying exactly these semantics. The concurrency
+model is fine; the socket read contract is what's wrong.
+
+**The fix is upstream in Aether**, and small — one of:
+- expose the existing runtime poller to `std.tcp` (`tcp.poll([fds], timeout)` /
+  nonblocking `read_n`), **and** split the `recv <= 0` branch so `EAGAIN`/timeout
+  returns a distinct "would-block/timeout" signal rather than tearing the socket
+  down; or
+- add a dedicated `tcp.splice(a, b)` that owns the bidirectional pump in C over
+  the runtime poller (aeo passes two fds, gets back opaque full-duplex relay).
+
+Filed upstream as **aether#1092**. Until it lands, `_relay_alternating` is the
+honest ceiling; do not paper over it with a timeout-poll loop — defect #2 makes
+that *silently* lossy.
+
+**When it lands**, replace `_relay_alternating` with the poller/splice call and add
+a loopback echo-server tunnel test to the normal suite (both-sides-streaming, not
+just request/response) so the byte pump — where the surprising behavior lives — is
+covered by CI.
 
 Hierarchy + parent-stamped path waits for the aeo-agent http transport's
 authenticated single-parent identity (§5b rule 2). Wildcards, DNS-firewall/SNI
