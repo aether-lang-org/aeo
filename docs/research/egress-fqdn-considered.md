@@ -2,13 +2,15 @@
 
 **STATUS: PARTIAL BUILD.** The compose/model surface (`egress_fqdn(...)`), the
 CONNECT parser/decision core, and the length-aware relay helpers
-(`lib/egress_relay`) are built. Runtime gateway enforcement is not wired yet;
-the Aether length-aware TCP prerequisite has merged to `origin/main` (aether#1079,
-from aether#1078), `lib/egress_gateway` now provides std.http-facing CONNECT
-decision helpers, and `bin/aeo-egress-gateway.ae` is a minimal std.http gateway
-shell. The remaining runtime blocker is std.http server tunnel handoff after an
-allowed `CONNECT`: a route handler can return `200`, but cannot yet take
-ownership of the accepted connection and pump opaque bytes.
+(`lib/egress_relay`) are built. Runtime gateway enforcement now has the Aether
+primitives it needed: length-aware TCP I/O (aether#1079, from aether#1078) and
+std.http server tunnel handoff (`http.response_accept_tunnel`, aether#1086).
+`lib/egress_gateway` provides std.http-facing CONNECT decision helpers, and
+`bin/aeo-egress-gateway.ae` accepts an allowed `CONNECT`, takes ownership of the
+accepted connection, opens the upstream socket, and pumps opaque bytes. The
+remaining work is integrating that gateway into node networking so
+`egress_fqdn(...)` is enforced rather than just available as a standalone
+executable.
 This note records the reasoning for a layer-7 egress control, what to build, what
 to reject and *why*, and the trust invariants that make the hierarchical
 (agent-relayed) form sound. Written 2026-07-08 after a design conversation prompted by Jeroen
@@ -21,9 +23,9 @@ aeo-agent, built over `std.tcp`** — decide on the name at the CONNECT line
 (fail-closed, no MITM), then splice — which **complements** aeo's already-coded
 `allow_egress(ip)` (the L3 floor that makes the gateway unbypassable). The name
 decision is built in pure Aether; the opaque byte pump now uses length-aware
-`std.tcp.read_n`/`write_n`. The std.http-facing gateway can decide CONNECT today;
-the actual tunnel needs a public std.http handoff/hijack API. Concrete build in
-§8.
+`std.tcp.read_n`/`write_n`. The std.http-facing gateway now uses
+`http.response_accept_tunnel` from Aether #1086 for the accepted-tunnel handoff.
+Concrete build in §8.
 
 The motivating threat: an agent container feeds attacker-influenceable text
 (issue bodies, PR comments) through an LLM **that holds live credentials**. A
@@ -315,7 +317,7 @@ surface because the node has no other route out). At each level up the tree the
 relaying parent re-decides on the CONNECT and may deny a host its child approved
 (narrow-only, §5b) — the denial lands at CONNECT, so nothing leaks.
 
-### 6.5c. Primitives — length-aware TCP present; std.http handoff missing
+### 6.5c. Primitives — length-aware TCP and std.http handoff present
 
 `std.tcp` (aka `std.net`) exposes the control-plane set: `connect`,
 `listen`/`accept`, `read`/`write`, `close`, and `fd()`/`server_fd()` (the raw OS
@@ -332,15 +334,13 @@ opaque TLS splice: any embedded NUL could truncate the relay. The needed
 primitive was length-aware TCP I/O. `lib/egress_relay` now uses those primitives
 for `relay_once`/`write_all`.
 
-**std.http-only runtime constraint:** `lib/egress_gateway` maps std.http
-`request_method` + `request_path` into the relay decision, and the
-`bin/aeo-egress-gateway.ae` shell registers a `CONNECT *` std.http route that
-returns 200/403/400. That covers the fail-closed name decision using std.http. It
-still cannot perform the opaque TLS tunnel because std.http route handlers do not
-expose a public way to take over the accepted connection after emitting
-`200 Connection Established`. Do not ship a gateway that returns 200 and then
-closes as if it were containment; the next Aether ask is a std.http tunnel
-handoff/hijack API, not another raw TCP helper.
+**std.http runtime path:** `lib/egress_gateway` maps std.http
+`request_method` + `request_path` into the relay decision, and
+`bin/aeo-egress-gateway.ae` registers a `CONNECT *` std.http route. Rejected
+requests still return ordinary 400/403 responses. Allowed requests connect to
+the upstream host, call `http.response_accept_tunnel(res)`, and hand both
+sockets to a length-aware relay. This is the aether#1086 closure: the gateway no
+longer stops at an advisory `200`.
 
 ### 6.5d. How this COMPLEMENTS the already-coded `allow_egress(ip)`
 
@@ -376,7 +376,7 @@ gateway unbypassable; the gateway makes the floor name-aware. Full seal.
 | **proxy shape** | **minimal CONNECT gateway in aeo-agent over `std.tcp`** | not a Squid sidecar, not a full HTTP proxy; agent = brain (name decision + path stamp), a dumb 2-actor splice = bloodstream; deny at CONNECT, fail-closed, no MITM |
 | **relation to `allow_egress(ip)`** | **complements — stacked layers** | node floor `allow_egress(gateway)` makes the gateway unbypassable; gateway pins `allow_egress(resolved_ip)` after approving the name; kernel floor + name-aware gateway = full seal |
 | **`tcp_splice` upstream ask** | **filed/fixed as length-aware TCP I/O (aether#1078/#1079)** | not a proxy ask; `lib/egress_relay` now has the small library pump |
-| **std.http tunnel handoff** | **needed next** | `lib/egress_gateway` can decide CONNECT over std.http; the real tunnel needs route-handler ownership of the connection after 200 |
+| **std.http tunnel handoff** | **built via Aether #1086** | `bin/aeo-egress-gateway.ae` takes ownership with `http.response_accept_tunnel` and pumps bytes with `std.tcp.read_n`/`write_n` |
 
 ## 8. First buildable slice (the concrete build)
 
@@ -426,16 +426,15 @@ future runtime code from inventing a second policy store.
    `relay_once`/`write_all` over `std.tcp.read_n`/`write_n`. Covered by
    `test/spec_egress_relay.ae`.
 2. **`lib/egress_gateway` + `bin/aeo-egress-gateway.ae` — DONE for std.http
-   CONNECT decision shell.** The library maps std.http request fields into the
-   relay decision; the executable registers a `CONNECT *` route with
-   `std.http.server` and returns 200/403/400. Covered by
-   `test/spec_egress_gateway.ae`, including a loopback std.http client/server
-   proof.
-3. **std.http tunnel handoff — BLOCKER.** After an allowed CONNECT, a real proxy
-   must emit `200 Connection Established` and then hand the accepted connection to
-   an opaque two-direction pump. Current public std.http route handlers cannot
-   take over that connection. Add or depend on a std.http server API for CONNECT
-   tunnel handoff/hijack, then wire the pump through `lib/egress_relay`.
+   CONNECT gateway.** The library maps std.http request fields into the relay
+   decision; the executable registers a `CONNECT *` route with `std.http.server`,
+   rejects malformed/denied requests with ordinary HTTP responses, and uses
+   `http.response_accept_tunnel` for allowed tunnels. Covered by
+   `test/spec_egress_gateway.ae` for the std.http decision edge; a local
+   embedded-NUL smoke test has also proven the standalone tunnel path.
+3. **Wire the gateway into node enforcement.** The standalone gateway exists;
+   the next aeo work is provisioning it on the parent side of a node, routing
+   `http_proxy`/`https_proxy` to it, and making direct raw egress impossible.
 4. **Audit callback.** Log both allow and deny decisions into the aeo audit trail.
 
 ### 8c. Cut 3 — rootless Linux container enforcement

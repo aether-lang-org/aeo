@@ -1,30 +1,81 @@
-// aeo-egress-gateway — std.http CONNECT decision gateway shell.
+// aeo-egress-gateway — std.http CONNECT gateway for egress_fqdn.
 //
 // Env:
 //   AEO_EGRESS_ALLOW   comma-separated FQDN allowlist
 //   AEO_EGRESS_HOST    bind host, default 127.0.0.1
 //   AEO_EGRESS_PORT    bind port, default 9470
 //
-// This intentionally stops at the std.http CONNECT decision response. A real
-// tunnel still needs std.http.server to expose connection handoff after 200.
-
 import std.http (http_server_create, http_server_set_host, http_server_add_route,
                  http_server_start_raw, http_response_set_status,
                  http_response_set_header, http_response_set_body,
-                 request_method, request_path)
+                 response_accept_tunnel, request_method, request_path)
 import std.os (os_getenv)
 import std.string (string_length, string_get_int)
+import std.tcp (connect, read_n, write_n, close)
 import egress_gateway (
     set_allowlist, allowlist, decision_status_for_http,
-    response_body_for_status, tunnel_blocker
+    response_body_for_status, connect_host_from_path, connect_port_from_path
 )
 
+const CHUNK = 16384
+
+message StartServer { srv: ptr }
+message Noop {}
+
+actor SchedHelper {
+    state x = 0
+
+    receive {
+        Noop() -> { x = 1 }
+    }
+}
+
+actor ServerActor {
+    state raw = 0
+
+    receive {
+        StartServer(srv) -> {
+            raw = srv
+            rc = http_server_start_raw(raw)
+            if rc < 0 {
+                println("aeo-egress-gateway: server_start failed")
+            }
+        }
+    }
+}
+
 @c_callback h_connect(req: ptr, res: ptr, ud: ptr) {
-    st = decision_status_for_http(request_method(req), request_path(req), allowlist())
+    method = request_method(req)
+    path = request_path(req)
+    st = decision_status_for_http(method, path, allowlist())
     http_response_set_status(res, st)
+    if st != 200 {
+        http_response_set_header(res, "Connection", "close")
+        http_response_set_header(res, "Content-Type", "text/plain")
+        http_response_set_body(res, response_body_for_status(st))
+        return
+    }
+
+    host = connect_host_from_path(path)
+    port = connect_port_from_path(path)
+    upstream, cerr = connect(host, port)
+    if cerr != "" {
+        http_response_set_status(res, 502)
+        http_response_set_header(res, "Connection", "close")
+        http_response_set_header(res, "Content-Type", "text/plain")
+        http_response_set_body(res, "connect failed")
+        return
+    }
     http_response_set_header(res, "Connection", "close")
-    http_response_set_header(res, "Content-Type", "text/plain")
-    http_response_set_body(res, response_body_for_status(st))
+    tunnel = response_accept_tunnel(res)
+    if tunnel == 0 {
+        close(upstream)
+        return
+    }
+
+    _relay_alternating(tunnel, upstream)
+    close(upstream)
+    close(tunnel)
 }
 
 main() {
@@ -41,11 +92,13 @@ main() {
     http_server_set_host(raw, host)
     http_server_add_route(raw, "CONNECT", "*", h_connect, 0)
 
+    spawn(SchedHelper())
     println("aeo-egress-gateway: listening on ${host}:${port}")
-    println("aeo-egress-gateway: ${tunnel_blocker()}")
-    rc = http_server_start_raw(raw)
-    if rc < 0 {
-        println("aeo-egress-gateway: server_start failed")
+    println("aeo-egress-gateway: CONNECT tunnel takeover enabled")
+    srv = spawn(ServerActor())
+    srv ! StartServer { srv: raw }
+    while 1 == 1 {
+        sleep(60000)
     }
 }
 
@@ -73,4 +126,56 @@ _env_int_default(name: string, fallback: int) -> int {
         return fallback
     }
     return n
+}
+
+// First-cut stdlib-only relay: alternate client->upstream then
+// upstream->client. This proves #1086's std.http takeover path and handles
+// request/response-shaped tunnels; a true arbitrary full-duplex splice wants a
+// stdlib poll/select helper or a callback-thread-safe actor handoff.
+_relay_alternating(client: ptr, upstream: ptr) {
+    active = 1
+    while active == 1 {
+        data, n, rerr = read_n(client, CHUNK)
+        if rerr != "" {
+            active = 0
+        } else {
+            if n <= 0 {
+                active = 0
+            } else {
+                werr = _write_all(upstream, data, n)
+                if werr != "" {
+                    active = 0
+                } else {
+                    updata, rn, uerr = read_n(upstream, CHUNK)
+                    if uerr != "" {
+                        active = 0
+                    } else {
+                        if rn <= 0 {
+                            active = 0
+                        } else {
+                            cerr = _write_all(client, updata, rn)
+                            if cerr != "" {
+                                active = 0
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+_write_all(sock: ptr, data: string, length: int) -> string {
+    off = 0
+    while off < length {
+        sent, err = write_n(sock, data, length - off)
+        if err != "" {
+            return err
+        }
+        if sent <= 0 {
+            return "short write"
+        }
+        off = off + sent
+    }
+    return ""
 }

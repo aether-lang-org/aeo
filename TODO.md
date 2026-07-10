@@ -229,10 +229,13 @@ driver picks rctl/Capsicum/pf on FreeBSD vs cgroups/seccomp/network on Linux).
 - [ ] **Layer-7 egress: `egress_fqdn(...)` allowlist** — PARTIAL BUILD:
       compose/model surface + CONNECT parser/decision core + length-aware relay
       helpers landed (`lib/egress_relay`, `test/spec_egress_relay.ae`), and the
-      std.http CONNECT decision shell landed (`lib/egress_gateway`,
+      std.http CONNECT gateway landed (`lib/egress_gateway`,
       `bin/aeo-egress-gateway.ae`, `test/spec_egress_gateway.ae`). Aether's
       length-aware TCP prerequisite is merged to `origin/main` (aether#1079 from
-      aether#1078). Design captured in
+      aether#1078), and Aether #1086 added std.http server tunnel handoff via
+      `http.response_accept_tunnel`; the standalone gateway now takes ownership
+      after an allowed CONNECT and pumps opaque bytes with length-aware TCP I/O.
+      Design captured in
       `docs/research/egress-fqdn-considered.md` (2026-07-08, prompted by Formae's
       FQDN-allowlist agent setup). The layer-3/4 netpolicy above filters by
       IP/net; the exfil-hardening threat (a prompt-injected agent holding live
@@ -245,12 +248,11 @@ driver picks rctl/Capsicum/pf on FreeBSD vs cgroups/seccomp/network on Linux).
       the child never owns its own gateway; hierarchy = each level enforced by
       the level above; any `X-Aeo-Path` containment context is **parent-stamped,
       never child-asserted** (narrow-only, identity bound by the authenticated
-      channel). Next blocker: std.http server tunnel handoff — current std.http
-      can route CONNECT and return 200/403/400, but does not expose a public API
-      for taking over the accepted connection after 200 and pumping opaque bytes.
-      After that: audit + namespace/routing enforcement that makes the gateway
-      unbypassable. Residual hole (exfil THROUGH an allowed host) is answered by
-      credential scoping, not more network filtering.
+      channel). Next: audit + namespace/routing enforcement that makes the
+      gateway unbypassable, plus committing the live loopback tunnel smoke into
+      the normal test suite.
+      Residual hole (exfil THROUGH an allowed host) is answered by credential
+      scoping, not more network filtering.
 
 ## Lifecycle & state ops (snapshot / rollback / backup / prune / exec / restart)
 Day-2 operability for a STANDING deployment: capture point-in-time state, restore

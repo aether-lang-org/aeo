@@ -81,10 +81,9 @@ main() {
         }
 
         aeocha.describe("tunnel handoff readiness") {
-            aeocha.it("does not claim opaque tunnel support until std.http exposes handoff") callback {
-                aeocha.expect_int(tunnel_supported()).to_equal(0)
-                aeocha.expect_int(_has(tunnel_blocker(), "std.http.server")).to_be_truthy()
-                aeocha.expect_int(_has(tunnel_blocker(), "handoff")).to_be_truthy()
+            aeocha.it("claims opaque tunnel support now that std.http exposes takeover") callback {
+                aeocha.expect_int(tunnel_supported()).to_equal(1)
+                aeocha.expect_str(tunnel_blocker()).to_equal_str("")
             }
         }
     }

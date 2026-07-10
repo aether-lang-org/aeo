@@ -1,11 +1,9 @@
 // lib/egress_gateway — std.http-facing CONNECT gateway shell for egress_fqdn.
 //
 // This is the runtime HTTP edge around egress_relay's pure decision core. It
-// intentionally uses std.http server/client APIs only. Current std.http.server
-// can route CONNECT and emit the pre-tunnel decision response, but it does not
-// yet expose a public "take over this accepted connection after 200" hook, so
-// the opaque tunnel pump is still a std.http API follow-up rather than raw TCP
-// code in aeo.
+// intentionally keeps reusable policy/parsing helpers here; the live tunnel
+// relay lives in bin/aeo-egress-gateway.ae where the std.http route owns the
+// accepted connection.
 
 import std.http.client (request, use_http_proxy, set_timeout, send_request,
                         response_status, response_free, request_free)
@@ -19,6 +17,7 @@ exports (
     set_allowlist, allowlist,
     decision_status_for_http, decision_reason_for_http,
     response_body_for_status, connect_request_from_http,
+    connect_host_from_path, connect_port_from_path,
     tunnel_supported, tunnel_blocker,
     probe_direct_connect_status, probe_connect_denied
 )
@@ -122,7 +121,7 @@ host_allowed(csv: string, host: string) -> int {
 
 response_body_for_status(status: int) -> string {
     if status == 200 {
-        return "connect allowed; std.http tunnel handoff not wired"
+        return "connect allowed"
     }
     if status == 403 {
         return "connect denied: not allowlisted"
@@ -130,16 +129,12 @@ response_body_for_status(status: int) -> string {
     return "bad connect request"
 }
 
-// A real CONNECT proxy must keep the client socket open after the 200 and pump
-// opaque bytes. std.http.server route handlers do not currently expose that
-// connection takeover; keep this explicit so aeo does not silently ship an
-// advisory-only proxy.
 tunnel_supported() -> int {
-    return 0
+    return 1
 }
 
 tunnel_blocker() -> string {
-    return "std.http.server can route CONNECT but does not expose a public tunnel handoff/hijack API after 200"
+    return ""
 }
 
 // Client-side probe for the deny path using std.http.client's proxy support.
