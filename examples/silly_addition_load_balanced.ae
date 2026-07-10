@@ -1,0 +1,104 @@
+// examples/silly_addition_load_balanced.ae — the LOAD-BALANCED cell: two
+// identical `app` replicas behind an aeo-native L7 HTTP load balancer, on the
+// host-container (podman) substrate. The balancer CONTAINS its backends — the
+// pool membership IS the set of children, so the upstream list can never drift.
+//
+//   system("silly_addition_load_balanced")  (on a Linux/podman host)
+//     ├─ db                (container) — redis, a TCP cache
+//     └─ load_balancer("web")           — L7 HTTP LB, published to the outside
+//          ├─ app-1        (container) — the /add service ──depends──► db
+//          └─ app-2        (container) — a second identical replica
+//
+// The world hits web:9000; the balancer fans to each backend's 8080 by NAME on
+// the internal net (the backends are NOT publishable). weighted_rr is INFERRED
+// from the balancer_weight() on the children (3:1). Health is ONE contract: the
+// system health_retry() clock, with the balancer contributing only the probe
+// path + expected status; aeo lowers that single contract onto both its own
+// up/reconcile loop and std.http.proxy's pool health checker.
+// See docs/built_in_load_balancing.md for the full grammar rationale.
+//
+// ┌─────────────────────────────────────────────────────────────────────────┐
+// │ ⚠ NOT YET TESTED — DEMONSTRATES THE MODEL/GRAMMAR ONLY.                   │
+// │                                                                          │
+// │ The load-balancer COMPOSE GRAMMAR + model checks are built and unit-     │
+// │ tested (lib/compose, test/spec_load_balancer.ae). But `aeo up` does NOT  │
+// │ yet PROVISION a load_balancer node — there is no lowering onto           │
+// │ std.http.proxy yet (docs/built_in_load_balancing.md §9 step 2), and no   │
+// │ live proof (step 3). So this file PARSES and MODEL-CHECKS, but           │
+// │ `aeo up`/`smoke`/`suite` on it will NOT stand up a working balancer.     │
+// │ It exists to show the intended DECLARATION shape and to exercise the     │
+// │ model — treat it as documentation-in-code, not a runnable deploy. The    │
+// │ check() spec below is a MODEL check (no deploy) and is the only phase     │
+// │ meaningful today; smoke()/suite() are placeholders for when step 2 lands.│
+// └─────────────────────────────────────────────────────────────────────────┘
+//
+//   aeo check examples/silly_addition_load_balanced.ae   model checks, no deploy (OK today)
+//   aeo up    examples/silly_addition_load_balanced.ae   NOT YET — no LB provisioning
+//   aeo down  examples/silly_addition_load_balanced.ae   teardown (reverse)
+
+import compose (system, container, load_balancer)
+import compose (image, env, depends, health)
+import compose (publish, listens, balance_to, lb_health, balancer_weight)
+import compose (health_retry, every, up_within, down_within)
+import compose (check, smoke, suite)
+
+exports ( aeo_orchestration )
+
+// ---- the composition — db, and two app replicas behind an L7 balancer ----
+aeo_orchestration() {
+    system("silly_addition_load_balanced") {
+        // ONE health clock at system scope (see doc §6): the balancer's own
+        // health() adds only path + expected-status; interval/thresholds inherit
+        // from here. aeo lowers this single contract to BOTH its reconcile loop
+        // AND std.http.proxy's pool health checker.
+        health_retry() {
+            every(500ms)
+            up_within(30s)
+            down_within(10s)
+        }
+
+        // db tier — stock redis container (a plain leaf; not balanced).
+        db = container("db") {
+            image("docker.io/library/redis:alpine")
+            health("redis-cli ping")
+        }
+
+        // web tier — the L7 balancer NODE, published to the outside on 9000,
+        // forwarding to each backend's 8080. weighted_rr is inferred from the
+        // balancer_weight() below (no explicit algorithm() needed).
+        web = load_balancer("web", "container") {
+            publish(9000)                          // world:9000 -> the LB
+            balance_to(8080) {                     // fan to each backend's 8080
+                lb_health("/add/0/0", 200)         // pool ejects a backend on non-200
+            }
+
+            // app-1 / app-2 — two IDENTICAL replicas of the /add service. Each
+            // listens 8080 (matched against balance_to's 8080 at model-check),
+            // and carries a pool weight. They reach db by name; they are NOT
+            // publishable (only the balancer is a boundary node).
+            app1 = container("app-1") {
+                image("localhost/aeo-examples/silly-add:latest")
+                listens(8080)
+                balancer_weight(3)                 // gets 3/4 of traffic
+                env("REDIS_HOST", "db")
+                depends("db")
+            }
+            app2 = container("app-2") {
+                image("localhost/aeo-examples/silly-add:latest")
+                listens(8080)
+                balancer_weight(1)                 // gets 1/4 of traffic
+                env("REDIS_HOST", "db")
+                depends("db")
+            }
+        }
+
+        // ---- declared verification ----
+        // check: MODEL assertions only (no deploy) — the balancer grammar +
+        // model-check rules. This is the phase that is meaningful TODAY.
+        check("examples/checks/load_balanced_model.spec.ae")
+        // smoke/suite: PLACEHOLDERS for when `aeo up` learns to provision an LB
+        // (doc §9 step 2). They will fail today because nothing is provisioned.
+        smoke("examples/checks/load_balanced_smoke.spec.ae")
+        suite("examples/checks/load_balanced_suite.spec.ae")
+    }
+}

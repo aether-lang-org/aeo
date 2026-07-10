@@ -44,6 +44,19 @@ it's the `containers` cell with the **confinement** vocabulary turned on
 (`limit{}` caps + `constrain{}` + `deny_egress`), so it showcases the Linux
 containment axes rather than another backend (see [Confinement](#confinement-the-impregnable-axis-live) below).
 
+The **[`silly_addition_load_balanced.ae`](silly_addition_load_balanced.ae)** demo is
+*not* a new substrate cell either — it's the `containers` cell with two identical
+`app` replicas behind an aeo-native **L7 HTTP load balancer**
+(`load_balancer("web"){ publish / balance_to / listens / balancer_weight }`), so it
+showcases the load-balancing grammar rather than another backend. See
+[docs/built_in_load_balancing.md](../docs/built_in_load_balancing.md).
+**⚠ NOT YET TESTED / not a runnable deploy.** The compose grammar + model checks
+are built and green (`test/spec_load_balancer.ae`, and this demo's `aeo check`
+passes), but `aeo up` does **not** yet provision a `load_balancer` node — there is
+no lowering onto `std.http.proxy` (doc §9 step 2). So `aeo up`/`smoke`/`suite` on it
+will not stand up a working balancer; treat it as documentation-in-code that
+model-checks, not a deploy. Only `aeo check` is meaningful today.
+
 The naming is by SUBSTRATE (bhyve_podman / kvm / containers / jails / lxc / bwrap),
 not the workload. (The original demo was `silly_addition_cache.ae`; renamed for
 consistency. Its internal `system("silly_addition_cache")` IDENTIFIER stays —

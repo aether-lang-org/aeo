@@ -1,0 +1,90 @@
+// examples/checks/load_balanced_model.spec.ae — the DATA-MODEL check for the
+// silly_addition_load_balanced composition. Declared by `check(...)` in that
+// example; run by `aeo check examples/silly_addition_load_balanced.ae` (no
+// deploy). It re-declares the composition (a spec is its own process) and
+// asserts the resolved LOAD-BALANCER model + the model-check rules.
+//
+//   sh test/run-spec.sh examples/checks/load_balanced_model.spec.ae
+//
+// NOTE: this is the MODEL check — the only phase meaningful today. `aeo up` does
+// not yet PROVISION a load_balancer (docs/built_in_load_balancing.md §9 step 2),
+// so the sibling smoke/suite specs are placeholders. The grammar + these checks
+// ARE built and green (mirrors test/spec_load_balancer.ae).
+
+import aeocha
+import compose (system, container, load_balancer)
+import compose (image, env, depends, health)
+import compose (publish, listens, balance_to, lb_health, balancer_weight)
+import compose (health_retry, every, up_within, down_within)
+import compose (
+    is_load_balancer, get_lb_substrate, get_publish, get_listens, get_balance_to,
+    lb_backends, lb_algorithm, lb_weight_ignored, lb_model_errors, reset_nodes
+)
+import std.string
+
+// The SAME declaration the example carries. Kept in sync with
+// examples/silly_addition_load_balanced.ae.
+_declare() {
+    reset_nodes()
+    system("silly_addition_load_balanced") {
+        health_retry() {
+            every(500ms)
+            up_within(30s)
+            down_within(10s)
+        }
+        db = container("db") {
+            image("docker.io/library/redis:alpine")
+            health("redis-cli ping")
+        }
+        web = load_balancer("web", "container") {
+            publish(9000)
+            balance_to(8080) {
+                lb_health("/add/0/0", 200)
+            }
+            app1 = container("app-1") {
+                image("localhost/aeo-examples/silly-add:latest")
+                listens(8080)
+                balancer_weight(3)
+                env("REDIS_HOST", "db")
+                depends("db")
+            }
+            app2 = container("app-2") {
+                image("localhost/aeo-examples/silly-add:latest")
+                listens(8080)
+                balancer_weight(1)
+                env("REDIS_HOST", "db")
+                depends("db")
+            }
+        }
+    }
+}
+
+main() {
+    _declare()
+    fw = aeocha.init()
+
+    aeocha.describe(fw, "silly_addition_load_balanced — load-balancer model") {
+        aeocha.it("web is a container-substrate load_balancer") callback {
+            aeocha.expect_int(is_load_balancer("web")).to_be_truthy()
+            aeocha.expect_str(get_lb_substrate("web")).to_equal_str("container")
+        }
+        aeocha.it("the pool is derived from the two child replicas") callback {
+            aeocha.expect_str(lb_backends("web")).to_equal_str("app-1, app-2")
+        }
+        aeocha.it("publishes 9000 outward; forwards to the backends' 8080") callback {
+            aeocha.expect_str(get_publish("web")).to_equal_str("9000")
+            aeocha.expect_str(get_balance_to("web")).to_equal_str("8080")
+            aeocha.expect_str(get_listens("app-1")).to_equal_str("8080")
+            aeocha.expect_str(get_listens("app-2")).to_equal_str("8080")
+        }
+        aeocha.it("infers weighted_rr from the 3:1 balancer_weight, none ignored") callback {
+            aeocha.expect_str(lb_algorithm("web")).to_equal_str("weighted_rr")
+            aeocha.expect_int(lb_weight_ignored("web")).to_equal(0)
+        }
+        aeocha.it("the composition is model-clean (no LB model errors)") callback {
+            aeocha.expect_str(lb_model_errors()).to_equal_str("")
+        }
+    }
+
+    aeocha.run_summary(fw)
+}

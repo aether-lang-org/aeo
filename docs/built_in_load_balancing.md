@@ -1,12 +1,18 @@
-# Built-in load balancing in aeo — considered (design)
+# Built-in load balancing in aeo — considered (design, model built)
 
-**STATUS: DESIGN ONLY.** Nothing here is built. This note captures a design
-conversation about an aeo-native HTTP load balancer: a `load_balancer` node that
-*contains* its backends, derives its pool from the containment tree, and lowers
-onto Aether's already-shipped `std.http.proxy` (nginx-class reverse proxy —
-weighted RR, active health checks, drain/undrain, circuit breaker, LRU cache).
-The datapath is not new work; the aeo work is the **declarative grammar** and the
-**provisioning of a balancer as a node in the hierarchy**. Written 2026-07-10.
+**STATUS: MODEL BUILT; NO PROVISIONING.** §9 step 1 has landed: the compose
+grammar (`load_balancer`, `publish`/`listens`, `balance_to { algorithm / lb_health }`,
+`balancer_weight`), the model accessors (`lb_backends`, `lb_algorithm`,
+`lb_weight_ignored`), and the model-check rules (`lb_model_errors` — the three §3/§4
+checks) are in `lib/compose`, covered by `test/spec_load_balancer.ae` (12 passing).
+Nothing is provisioned yet — no `aeo up` lowering onto `std.http.proxy` (§9 step 2),
+no live proof (step 3). This note captures the design of an aeo-native HTTP load
+balancer: a `load_balancer` node that *contains* its backends, derives its pool
+from the containment tree, and lowers onto Aether's already-shipped
+`std.http.proxy` (nginx-class reverse proxy — weighted RR, active health checks,
+drain/undrain, circuit breaker, LRU cache). The datapath is not new work; the aeo
+work is the **declarative grammar** and the **provisioning of a balancer as a node
+in the hierarchy**. Written 2026-07-10.
 
 The guiding discipline is the same one that governs `egress_fqdn`
 ([egress-fqdn-considered.md](research/egress-fqdn-considered.md)): **the model may
@@ -351,11 +357,15 @@ are later thickening.
 
 ### First buildable slice, in dependency order
 
-1. **Model + grammar, no provisioning.** `load_balancer`, `publish`, `listens`,
-   `balance_to`, `balancer_weight`, and the role-relative model-check rules (§3):
-   `publish`-only-on-boundary, `balancer_weight`-only-under-a-balancer,
-   backend-port-agreement (§4). Plus an aeocha spec — mirrors how `egress_fqdn`
-   landed (model surface first, enforcement later).
+1. **Model + grammar, no provisioning. — DONE.** `load_balancer`, `publish`,
+   `listens`, `balance_to`, `balancer_weight`, and the role-relative model-check
+   rules (§3): `publish`-only-on-boundary, `balancer_weight`-only-under-a-balancer,
+   backend-port-agreement (§4). Landed in `lib/compose`, covered by
+   `test/spec_load_balancer.ae`. Mirrors how `egress_fqdn` landed (model surface
+   first, enforcement later). *Grammar note:* the health verb is spelled
+   `lb_health("/healthz", 200)` (not `health("/healthz", expect: 200)`) — `health`
+   was already a container-scope verb, and named args aren't used elsewhere in the
+   grammar; the doc's `health(..., expect:)` sketch reads better but collides.
 2. **`aeo up` lowering onto `std.http.proxy`** as above, for the `:container`
    substrate only, with the health contract lowered to both enforcers (§6) and the
    weight/algorithm mismatch surfaced into the `up` summary/audit trail (§5).

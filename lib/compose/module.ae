@@ -57,6 +57,10 @@ exports (
     suspend, constrain, grant_fd, egress, egress_fqdn, ingress, ingress_from, deny_egress, deny_ingress, start,
     get_suspended, get_started, get_constraints, get_netpolicy, has_egress_fqdn, egress_fqdn_csv, pf_rules_for,
     limit, limit_mem, limit_vmem, limit_cpu, limit_maxproc, limit_openfiles, get_rctl,
+    load_balancer, listens, publish, publish_map, balance_to, algorithm, lb_health, balancer_weight,
+    is_load_balancer, get_lb_substrate, get_listens, get_publish, get_publish_inner,
+    get_balance_to, get_weight, get_lb_health_path, get_lb_health_expect,
+    lb_backends, lb_algorithm, lb_weight_ignored, lb_model_errors,
     describe_tree, dns_hosts
 )
 
@@ -147,6 +151,25 @@ kvm_vm(nm: string) -> string {
     config.put("aeo.cmp.curhost", "")
     resource(nm, "kvm")
     config.put("aeo.cmp.curhost", nm)
+    return nm
+}
+
+// load_balancer(nm, substrate) — an L7 HTTP balancer node that CONTAINS its
+// backends. Like bhyve_vm/kvm_vm it is a node-WITH-CHILDREN: it is itself a
+// declared resource (so aeo provisions it, gives it an IP, binds publish()),
+// and it sets curhost so backends declared inside record it as their parent
+// (aeo.cmp.host.${backend} == nm). The pool membership IS the set of children;
+// aeo reads their listens() ports directly, so the upstream list cannot drift.
+// `substrate` is the LB node's own kind: "container" (real today), "vm", "host"
+// (later — see docs/built_in_load_balancing.md §7). Lowers onto std.http.proxy
+// at aeo up (§9); this layer only records the model. See the doc for the full
+// grammar rationale (publish/listens directions, balance_to, weight/algo, health).
+load_balancer(nm: string, substrate: string) -> string {
+    config.put("aeo.cmp.curhost", "")
+    resource(nm, "load_balancer")
+    config.put("aeo.cmp.lb.${nm}", "1")            // mark: this node is a balancer
+    config.put("aeo.cmp.lbsubstrate.${nm}", substrate)
+    config.put("aeo.cmp.curhost", nm)              // backends nest under it
     return nm
 }
 
@@ -438,6 +461,54 @@ ingress_from(_ctx: ptr, port: int, peer: string) {
 }
 deny_egress(_ctx: ptr)  { _net_add(_ctx, "egress:DENY-ALL") }
 deny_ingress(_ctx: ptr) { _net_add(_ctx, "ingress:DENY-ALL") }
+
+// ---- Load-balancer grammar (docs/built_in_load_balancing.md) --------------
+// Two directional port verbs (§2):
+//   listens(p)      — a BACKEND (or any leaf) binds `p`; peers reach it by name
+//                     on the internal net. Intrinsic: true of the node alone.
+//   publish(ext)    — a BOUNDARY node (the LB) exposes `ext` OUTWARD to whatever
+//   publish(ext,inn)  contains it. inn defaults to ext (the single-arg collapse).
+//                     Role-relative: only legal on a boundary node (§3), checked
+//                     by lb_model_errors below. Never binds 0.0.0.0 by default —
+//                     that lowering is the driver's job; the model records intent.
+listens(_ctx: ptr, port: int) {
+    config.put("aeo.cmp.listens.${_ctx}", string_from_int(port))
+}
+publish(_ctx: ptr, ext: int) {
+    config.put("aeo.cmp.publish.ext.${_ctx}", string_from_int(ext))
+    config.put("aeo.cmp.publish.inner.${_ctx}", string_from_int(ext))
+}
+publish_map(_ctx: ptr, ext: int, inner: int) {
+    config.put("aeo.cmp.publish.ext.${_ctx}", string_from_int(ext))
+    config.put("aeo.cmp.publish.inner.${_ctx}", string_from_int(inner))
+}
+
+// balance_to(port) { … } — the explicit LB→backend forward FACT (§4): the SPEC
+// each backend's listens() is the CLAIM checked against. Home for pool policy:
+//   algorithm(a)             — "weighted_rr" | "round_robin" | … ; inferred from
+//                              balancer_weight presence if omitted (§5).
+//   health(path, expect: st) — the balancer-specific health facts ONLY; interval
+//                              and thresholds are inherited from system
+//                              health_retry (§6). `_ctx` is the LB node name.
+// Returns _ctx (the LB name) so its trailing block's algorithm()/lb_health() key
+// onto the same LB — the policy(_ctx)->_ctx sub-block precedent.
+balance_to(_ctx: ptr, port: int) -> ptr {
+    config.put("aeo.cmp.balanceto.${_ctx}", string_from_int(port))
+    return _ctx
+}
+algorithm(_ctx: ptr, a: string) {
+    config.put("aeo.cmp.lbalgo.${_ctx}", a)
+}
+lb_health(_ctx: ptr, path: string, expect: int) {
+    config.put("aeo.cmp.lbhealthpath.${_ctx}", path)
+    config.put("aeo.cmp.lbhealthexpect.${_ctx}", string_from_int(expect))
+}
+
+// balancer_weight(w) — per-backend pool weight (§4). Role-relative: only legal on
+// a node whose parent is a load_balancer (checked by lb_model_errors).
+balancer_weight(_ctx: ptr, w: int) {
+    config.put("aeo.cmp.weight.${_ctx}", string_from_int(w))
+}
 _net_add(vm: string, entry: string) {
     prev = config.get("aeo.cmp.netpolicy.${vm}")
     if string_length(prev) == 0 {
@@ -941,10 +1012,25 @@ reset_nodes() {
         config.put("aeo.cmp.pol.reprobe.${nm}", "")
         config.put("aeo.cmp.pol.maxfail.${nm}", "")
         config.put("aeo.cmp.pol.reattest.${nm}", "")
+        // ...and per-node LOAD-BALANCER keys — a re-declared name in a later tree
+        // would otherwise inherit a prior node's publish/listens/weight/lb-ness and
+        // make lb_model_errors fire on ghosts. Same test-isolation rationale.
+        config.put("aeo.cmp.lb.${nm}", "")
+        config.put("aeo.cmp.host.${nm}", "")
+        config.put("aeo.cmp.listens.${nm}", "")
+        config.put("aeo.cmp.publish.ext.${nm}", "")
+        config.put("aeo.cmp.publish.inner.${nm}", "")
+        config.put("aeo.cmp.balanceto.${nm}", "")
+        config.put("aeo.cmp.lbalgo.${nm}", "")
+        config.put("aeo.cmp.weight.${nm}", "")
         i = i + 1
     }
     config.put("aeo.cmp.count", "0")
     config.put("aeo.cmp.syscount", "0")
+    // Reset the block cursors so top-level nodes in the NEXT tree don't inherit a
+    // prior host/system as their parent (else a bare container() reads curhost=="web").
+    config.put("aeo.cmp.curhost", "")
+    config.put("aeo.cmp.cursystem", "")
 }
 
 _count() -> int {
@@ -966,6 +1052,124 @@ get_system(nm: string) -> string { return config.get("aeo.cmp.system.${nm}") }
 // Which host (VM) a resource is nested INSIDE ("" if at the system/top
 // level — i.e. it runs directly on the orchestrator host).
 get_host(nm: string) -> string { return config.get("aeo.cmp.host.${nm}") }
+
+// ---- Load-balancer model accessors (docs/built_in_load_balancing.md) -------
+is_load_balancer(nm: string) -> int {
+    if config.get("aeo.cmp.lb.${nm}") == "1" { return 1 }
+    return 0
+}
+get_lb_substrate(nm: string) -> string { return config.get("aeo.cmp.lbsubstrate.${nm}") }
+get_listens(nm: string) -> string      { return config.get("aeo.cmp.listens.${nm}") }
+get_publish(nm: string) -> string       { return config.get("aeo.cmp.publish.ext.${nm}") }
+get_publish_inner(nm: string) -> string { return config.get("aeo.cmp.publish.inner.${nm}") }
+get_balance_to(nm: string) -> string    { return config.get("aeo.cmp.balanceto.${nm}") }
+get_weight(nm: string) -> string        { return config.get("aeo.cmp.weight.${nm}") }
+get_lb_health_path(nm: string) -> string   { return config.get("aeo.cmp.lbhealthpath.${nm}") }
+get_lb_health_expect(nm: string) -> string { return config.get("aeo.cmp.lbhealthexpect.${nm}") }
+
+// The backends of an LB, in declaration order, comma-joined. Membership IS the
+// set of children (get_host(child) == lb), so the pool can never drift.
+lb_backends(lb: string) -> string {
+    out = ""
+    n = count()
+    i = 0
+    while i < n {
+        nm = name_at(i)
+        if get_host(nm) == lb {
+            if is_load_balancer(nm) == 0 {
+                if string_length(out) == 0 { out = nm } else { out = "${out}, ${nm}" }
+            }
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// The effective LB algorithm (§5): explicit algorithm() wins; else inferred —
+// any backend carrying balancer_weight ⇒ "weighted_rr", otherwise "round_robin".
+// The presence of weights IS the intent to weight, so the data picks the algo.
+lb_algorithm(lb: string) -> string {
+    a = config.get("aeo.cmp.lbalgo.${lb}")
+    if string_length(a) > 0 { return a }
+    n = count()
+    i = 0
+    while i < n {
+        nm = name_at(i)
+        if get_host(nm) == lb {
+            if string_length(get_weight(nm)) > 0 { return "weighted_rr" }
+        }
+        i = i + 1
+    }
+    return "round_robin"
+}
+
+// A weight is being IGNORED (§5): an explicit algorithm that isn't weighted_rr
+// while some backend declares balancer_weight. Returns 1 when this LB is in that
+// state — the runner surfaces it at `aeo up` (not model-check; it's advisory).
+lb_weight_ignored(lb: string) -> int {
+    a = config.get("aeo.cmp.lbalgo.${lb}")
+    if string_length(a) == 0 { return 0 }      // inferred → never ignores
+    if a == "weighted_rr" { return 0 }
+    n = count()
+    i = 0
+    while i < n {
+        nm = name_at(i)
+        if get_host(nm) == lb {
+            if string_length(get_weight(nm)) > 0 { return 1 }
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+// lb_model_errors() — the role-relative / consistency checks (§3, §4). Returns a
+// newline-joined list of HARD model errors ("" = clean), for `aeo check` to fail
+// on. Three rules:
+//   (1) publish on a non-boundary node (a backend can't be published — §3);
+//   (2) balancer_weight on a node whose parent is not a load_balancer (§3);
+//   (3) a backend whose listens() disagrees with its LB's balance_to() (§4).
+lb_model_errors() -> string {
+    out = ""
+    n = count()
+    i = 0
+    while i < n {
+        nm = name_at(i)
+        parent = get_host(nm)
+        parent_is_lb = 0
+        if string_length(parent) > 0 { parent_is_lb = is_load_balancer(parent) }
+
+        // (1) publish only on a boundary node (the LB itself).
+        if string_length(get_publish(nm)) > 0 {
+            if is_load_balancer(nm) == 0 {
+                out = _lb_err(out, "node '${nm}' declares publish() but is not a load_balancer (a backend cannot be published)")
+            }
+        }
+        // (2) balancer_weight only under a load_balancer parent.
+        if string_length(get_weight(nm)) > 0 {
+            if parent_is_lb == 0 {
+                out = _lb_err(out, "node '${nm}' declares balancer_weight() but its parent is not a load_balancer")
+            }
+        }
+        // (3) backend listens() must match its LB's balance_to().
+        if parent_is_lb == 1 {
+            bt = get_balance_to(parent)
+            ls = get_listens(nm)
+            if string_length(bt) > 0 {
+                if string_length(ls) > 0 {
+                    if ls != bt {
+                        out = _lb_err(out, "load_balancer '${parent}' forwards to ${bt} but backend '${nm}' listens on ${ls}")
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    return out
+}
+_lb_err(acc: string, msg: string) -> string {
+    if string_length(acc) == 0 { return msg }
+    return "${acc}\n${msg}"
+}
 
 // Declared systems (the depth-0 containers), in declaration order.
 syscount() -> int {
