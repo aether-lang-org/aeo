@@ -414,10 +414,15 @@ are later thickening.
      early traffic skews. `_deps_ready` now makes a `load_balancer` implicitly
      depend on all its children being UP, so it's the last node in its subtree to
      boot; the 3:1 split is then exact from the first request.
+   The weight/algorithm mismatch surfacing (§5) is **DONE**: the runner's
+   `_surface_lb_weight_ignored` hook fires when an LB comes UP with weights an
+   explicit non-`weighted_rr` algorithm ignores — a loud `WARNING` line AND a
+   hash-chained `weight-ignored` entry in the audit trail (so an unattended `up`
+   still carries the signal), never a hard error. Live-proven: the warning fires,
+   the audit entry is recorded, and the split is genuinely round-robin (10:10, the
+   3:1 weights truly dropped — the warning is truthful).
    *Still to wire:* the health interval/thresholds (path+status pass through today;
-   the system `health_retry` interval lowering onto the pool checker is a follow-up),
-   and the weight/algorithm mismatch surfacing into the `up` summary (§5 — the
-   model signal `lb_weight_ignored` exists; the runner emit is pending).
+   the system `health_retry` interval lowering onto the pool checker is a follow-up).
 4. **Later thickening:** drain/undrain in reconcile, circuit breaker, cache; `:vm`
    substrate; then the `:host` and multi-host epics (§7); and, gated on aether#1092,
    the L4 TCP balancer (§8). (The aeo-lb image build is already folded in — the

@@ -159,6 +159,7 @@ _await_level(booted: ptr, min_secs: int) -> int {
                         println("aeo: [${bn}] up")
                         _enforce_netpolicy(bn)
                         _enforce_limits(bn)
+                        _surface_lb_weight_ignored(bn)
                         promoted = 1
                     }
                 }
@@ -1120,6 +1121,26 @@ _enforce_limits(nm: string) {
     } else {
         println("aeo: [${nm}] rctl resource caps applied (jail:${nm})")
     }
+}
+
+// Surface a weight/algorithm mismatch at `aeo up` (docs §5): an explicit
+// algorithm() that ignores weights while some backend declares balancer_weight
+// means those weights are SILENTLY dropped — the "model says something it won't
+// do" failure the discipline forbids. NOT a hard error (the LB still works, just
+// unweighted); we WARN loudly AND record it to the hash-chained audit trail so an
+// unattended `up` still carries the signal (a bare log line scrolls past in CI).
+// A no-op for every non-LB node and for LBs whose algorithm honours the weights.
+_surface_lb_weight_ignored(nm: string) {
+    if compose.is_load_balancer(nm) == 0 {
+        return
+    }
+    if compose.lb_weight_ignored(nm) == 0 {
+        return
+    }
+    algo = compose.lb_algorithm(nm)
+    detail = "balancer_weight ignored by algorithm '${algo}' (not weighted_rr)"
+    println("aeo: [${nm}] WARNING load_balancer weights IGNORED — ${detail}; declare weighted_rr or drop the weights")
+    _ = audit.record(nm, "load_balancer", "weight-ignored", detail)
 }
 
 // ---- teardown engine ----
