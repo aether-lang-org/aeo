@@ -345,17 +345,16 @@ Gaps:
       host is deploy-ready AND the token is least-priv (create-user / self-ACL /
       node-reboot all DENIED 403); self-skips as PASS with no PVE_TOKEN. FRONTIER
       follow-ups: (3) POST-PROVISION / in-guest completion — see the dedicated item
-      below; (4) TLS CA PIN (driver currently set_insecure(1) = blind trust). DESIGN
-      SETTLED + BLOCKED ON AETHER (2026-07-11): courier PVE's own CA over the initial
-      ssh (proven: `cat /etc/pve/pve-root-ca.pem` -> orchestrator; `openssl s_client
-      -CAfile` verifies OK; 8006 cert SAN has IP Address:192.168.0.204 so IP-connect
-      matches), then PIN it for all 8006 calls. BLOCKER: std.http.client has no
-      custom-CA hook — only system-store-verify or set_insecure (all-or-nothing);
-      SSL_CERT_FILE is Windows-only in aether_http.c. Filed the ask:
-      ../aether/asks/http-client-custom-ca-pin.md (set_cafile(req, path); small change,
-      SSL_CTX_load_verify_locations already in the file). When it lands: driver
-      couriers the CA (AEO_PVE_CACERT) + set_cafile + set_insecure(0). See token
-      hardening below.
+      below; (4) TLS CA PIN — DONE + LIVE-PROVEN 2026-07-11 (commit 00e537e). The
+      driver couriers PVE's own private CA over the initial ssh
+      (examples/checks/proxmox_pin_ca.sh -> AEO_PVE_CACERT) and PINS it: _pve() does
+      set_cafile(ca)+set_insecure(0) when AEO_PVE_CACERT is set (verify against THAT
+      cert, fail-closed), else set_insecure(1) fallback. Unblocked by aether
+      set_cafile (#1107 + trust-store fix #1110, v0.384.0 — both were filed as
+      ../aether/asks/ and landed). PROVEN: right CA -> preflight VERIFIES + passes;
+      wrong CA -> 8006 verify fails (rejected, not blind-trusted); full up/down over
+      pinned TLS. Remaining nit: the couriered CA is one file for the whole box
+      (fine); a per-node cert or a fingerprint-only pin could follow if ever needed.
 - [~] **PVE post-provision: complete the node IN-GUEST via cloud-init (RUNG 1 LIVE-
       PROVEN 2026-07-11); aeo-agent seeding is the next layer.** BUILT + proven:
       compose grammar `cloud_init(snippet)` + `agent(on)` (+ getters, reset, exports,
