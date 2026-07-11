@@ -344,10 +344,54 @@ Gaps:
       also gained reachable(). (2) test/spec_pve_host_live.ae — executable proof the
       host is deploy-ready AND the token is least-priv (create-user / self-ACL /
       node-reboot all DENIED 403); self-skips as PASS with no PVE_TOKEN. FRONTIER
-      follow-ups: (3) in-guest health probe (ssh/qemu-agent) so probe() checks the
-      WORKLOAD not just "hypervisor says running" — needs a workload baked into the
-      template + guest network reachability from the orchestrator (the bigger piece);
-      TLS CA/fingerprint pin (driver currently set_insecure). See token hardening below.
+      follow-ups: (3) POST-PROVISION / in-guest completion — see the dedicated item
+      below; (4) TLS CA/fingerprint pin (driver currently set_insecure). See token
+      hardening below.
+- [ ] **PVE post-provision: complete the node IN-GUEST via aeo-agent (not by baking
+      the template).** DECISION (2026-07-11, debated + spiked live): the template
+      stays a GENERIC cloud image; the node's identity is completed at runtime from
+      inside, by aeo-agent (aeo's native "act inside, report outward" recursion — a
+      PVE VM is just another boundary; the agent one level down completes it). Baking
+      a workload into the template is the anti-pattern (makes the template node-
+      specific, bypasses the agent boundary). The substrate is a VM RUNNING A
+      CONTAINER (driver_proxmox VM -> guest aeo-agent -> workload container via
+      driver_linux; the kvm_podman cell, one substrate over) — NOT a PVE LXC (PVE CTs
+      exist at /nodes/*/lxc but we deploy /qemu VMs).
+      LAYERING (irreducible order, spiked live):
+        1. cloud-init is the TRUE first rung (only thing that runs with zero guest
+           cooperation): installs qemu-guest-agent, drops+starts aeo-agent, seeds
+           AEO_NODE/AEO_TOKEN/AEO_RENDEZVOUS (token via lib/secrets). cicustom=
+           user=local:snippets/<f>.yaml needs snippets enabled on a storage +
+           admin to set (operator prereq, not the least-priv token).
+        2. IGNITION options to launch/drive the agent:
+           (B) exec-in over 8006: /qemu/<id>/agent/{exec,file-write} (virtio-serial,
+               no guest net). LIVE-PROVEN COST: least-priv token gets 403
+               (VM.GuestAgent.Audit|Unrestricted) — REQUIRES widening the role.
+               Best used as one-shot IGNITION only (open GuestAgent for one call,
+               then the agent's own report-out is the control plane).
+           (A) report-out: agent dials a rendezvous outbound; parent never connects
+               in; token stays pristine. Needs a rendezvous both sides see.
+        3. aeo-agent = the DOER: runs the workload container, reports outward; probe()
+           upgrades from "hypervisor says running" to "agent announced".
+      BOX-SPECIFIC FINDING: this PVE's vmbr0 is 192.168.0.204/24 = the home LAN, so
+      guests get LAN IPs and are DIRECTLY reachable from the orchestrator (agent
+      transport_http works with NEITHER the 8006 hole NOR a host agent). On a
+      hardened prod PVE (isolated/NAT'd guest bridge, hypervisor firewalled to 8006)
+      the wall is real and the above matters; here the direct-LAN happy path is the
+      place to build+prove first. (efs2 /home/paul/scm/efs2 is the prior reach-in
+      RUN/PUT-over-ssh model — correctly demoted to IGNITION-only, not the operating
+      model, because ssh-at-distance has no socket through 8006.)
+- [ ] **PVE host-resident aeo-agent = health MULTIPLEXER + depth-1 sub-runner.**
+      Paul's idea (2026-07-11): put an aeo-agent ON the PVE host (unusual for PVE).
+      Because the host sits ON the guest net (vmbr0 = the LAN here), it reaches every
+      guest DIRECTLY and reports ONE aggregated health signal outward — no per-guest
+      8006 hole, NO GuestAgent token-widening (health goes host->guest over the
+      bridge, not the API). It's aeo's depth-1 sub-runner landing on a remote host
+      (the PVE box BECOMES an aeo node that contains VMs). COMPLEMENTARY to the
+      post-provision item (health layer, not provisioning). COST: an agent on the
+      hypervisor (operator imposition). RECONCILE with [[aeo-supervisor-design]] —
+      a host-side PVE agent is arguably that supervisor specialized to a hypervisor;
+      don't build twice.
 - [ ] **PVE token hardening (deferred — not now).** The current least-priv token
       is CISO-grade for the demo, but a larger-org prod bar could add: (a) TOKEN
       IP-ALLOWLIST so a leaked secret is useless off-network; (b) prove EXPIRY
