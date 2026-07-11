@@ -86,8 +86,13 @@ write_files:
         setsid /usr/local/bin/aeo-agent >/var/log/aeo-agent.log 2>&1 &
       echo "agent started (node=$(hostname))"
 
-      # 3. podman IN THE BACKGROUND (the agent waits/retries for it at delegate time;
-      #    installing it here must not block agent start).
+      # 3. podman IN THE BACKGROUND (installing it here must NOT block agent start).
+      #    READINESS ORDERING (proven live): agent-up != podman-ready. The agent
+      #    serves /health + /dispatch immediately, but a `boot` that runs the
+      #    workload CONTAINER fails until podman finishes installing (~1-2 min on
+      #    first boot). The agent's DELEGATE path already waits/retries for podman;
+      #    a direct boot does not — so a parent should treat "container workload
+      #    ready" as gated on podman, not just on the agent answering /health.
       ( DEBIAN_FRONTEND=noninteractive apt-get update -qq \
         && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq podman ) \
         >/var/log/aeo-podman-install.log 2>&1 &
