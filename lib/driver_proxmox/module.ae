@@ -47,7 +47,7 @@ import std.json (
     json_object_get_raw, json_get_string_raw, json_array_get_raw, json_array_size
 )
 import std.http.client (
-    request, set_header, set_body, set_insecure, send_request,
+    request, set_header, set_body, set_insecure, set_cafile, send_request,
     response_status, response_body, response_free
 )
 
@@ -67,15 +67,26 @@ _auth(nm: string) -> string {
     return "PVEAPIToken=${compose.get_pve_token(nm)}"
 }
 
+// The couriered PVE CA to pin (AEO_PVE_CACERT — a path to pve-root-ca.pem pulled
+// back over the initial ssh). "" = not pinned (the driver falls back to accept-any).
+_pve_cacert() -> string {
+    return getenv("AEO_PVE_CACERT")
+}
+
 // ---- the one HTTP primitive (std.http.client) ---------------------------------
 // _pve(nm, method, path, fields) -> (body, http_code, err). fields is a std.list of
 // "k=v" strings; we render them into an application/x-www-form-urlencoded body,
 // percent-encoding each VALUE once (curl's --data-urlencode did this for us before;
 // with the native client we own the encoding, which makes the sshkeys double-encode
-// finding explicit rather than curl-layer magic). set_insecure(1) accepts PVE's
-// default self-signed cert (a CA/fingerprint pin is the prod follow-up). The status
-// code comes back as an int; we stringify it so the rest of the driver's string
-// comparisons are unchanged.
+// finding explicit rather than curl-layer magic).
+//
+// TLS TRUST (the "1970s courier" pin): PVE ships a PRIVATE CA (/etc/pve/pve-root-ca.pem)
+// — no public chain. If AEO_PVE_CACERT points at that CA (couriered back over the
+// initial ssh — see examples/checks/proxmox_pin_ca.sh), we PIN it: verify the peer
+// against exactly that cert (set_cafile + set_insecure(0)) — strictly stronger than
+// blind trust, and it rejects any other cert fail-closed. If unset, we fall back to
+// set_insecure(1) (accept any cert) so existing deploys keep working, but that's the
+// un-pinned path. The status code comes back as an int; we stringify it.
 _pve(nm: string, method: string, path: string, fields: ptr) -> ptr {
     req = request(method, "${api_base(nm)}${path}")
     res = list_new()          // [body, http_code, err]
@@ -86,7 +97,13 @@ _pve(nm: string, method: string, path: string, fields: ptr) -> ptr {
         return res
     }
     _e = set_header(req, "Authorization", _auth(nm))
-    _i = set_insecure(req, 1)
+    ca = _pve_cacert()
+    if string_length(ca) > 0 {
+        _c = set_cafile(req, ca)        // PIN the couriered PVE CA
+        _i = set_insecure(req, 0)       // ...and VERIFY against it (no blind trust)
+    } else {
+        _i = set_insecure(req, 1)       // un-pinned fallback (accept any cert)
+    }
     body = _form_encode(fields)
     if string_length(body) > 0 {
         _b = set_body(req, body, string_length(body), "application/x-www-form-urlencoded")
