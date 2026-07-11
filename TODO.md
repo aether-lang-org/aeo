@@ -345,7 +345,16 @@ Gaps:
       host is deploy-ready AND the token is least-priv (create-user / self-ACL /
       node-reboot all DENIED 403); self-skips as PASS with no PVE_TOKEN. FRONTIER
       follow-ups: (3) POST-PROVISION / in-guest completion — see the dedicated item
-      below; (4) TLS CA/fingerprint pin (driver currently set_insecure). See token
+      below; (4) TLS CA PIN (driver currently set_insecure(1) = blind trust). DESIGN
+      SETTLED + BLOCKED ON AETHER (2026-07-11): courier PVE's own CA over the initial
+      ssh (proven: `cat /etc/pve/pve-root-ca.pem` -> orchestrator; `openssl s_client
+      -CAfile` verifies OK; 8006 cert SAN has IP Address:192.168.0.204 so IP-connect
+      matches), then PIN it for all 8006 calls. BLOCKER: std.http.client has no
+      custom-CA hook — only system-store-verify or set_insecure (all-or-nothing);
+      SSL_CERT_FILE is Windows-only in aether_http.c. Filed the ask:
+      ../aether/asks/http-client-custom-ca-pin.md (set_cafile(req, path); small change,
+      SSL_CTX_load_verify_locations already in the file). When it lands: driver
+      couriers the CA (AEO_PVE_CACERT) + set_cafile + set_insecure(0). See token
       hardening below.
 - [~] **PVE post-provision: complete the node IN-GUEST via cloud-init (RUNG 1 LIVE-
       PROVEN 2026-07-11); aeo-agent seeding is the next layer.** BUILT + proven:
