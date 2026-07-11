@@ -113,15 +113,16 @@ jobs:
             aeo-agent-linux-x86_64-glibc.sha256
           tag_name: ${{ github.ref_name }}
           body: |
-            aeo-agent (linux-amd64, glibc) — the in-guest orchestration agent a
+            aeo-agent (linux, x86_64, glibc) — the in-guest orchestration agent a
             proxmox_vm fetches via cloud-init to complete its node and run its
             workload container.
 
+            **Asset:** `aeo-agent-linux-x86_64-glibc`
             **SHA256:** `${{ steps.sum.outputs.sha256 }}`
 
             Verify + run in cloud-init:
             ```
-            curl -fsSL <this-asset-url> -o /usr/local/bin/aeo-agent
-            echo "<sha256>  /usr/local/bin/aeo-agent" | sha256sum -c -
+            curl -fsSL https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/aeo-agent-linux-x86_64-glibc -o /usr/local/bin/aeo-agent
+            echo "${{ steps.sum.outputs.sha256 }}  /usr/local/bin/aeo-agent" | sha256sum -c -
             chmod +x /usr/local/bin/aeo-agent
             ```
