@@ -127,6 +127,28 @@ main() {
             }
         }
 
+        aeocha.describe("model error (§7): unsupported substrate") {
+            aeocha.it("flags a :vm balancer (only :container is realized today)") callback {
+                reset_nodes()
+                load_balancer("web", "vm") {
+                    publish(9000)
+                    balance_to(8080)
+                    container("app-1") { listens(8080) }
+                }
+                errs = lb_model_errors()
+                aeocha.expect_int(_has(errs, "substrate 'vm' is not yet supported")).to_be_truthy()
+            }
+            aeocha.it("a :container balancer is clean") callback {
+                reset_nodes()
+                load_balancer("web", "container") {
+                    publish(9000)
+                    balance_to(8080)
+                    container("app-1") { listens(8080) }
+                }
+                aeocha.expect_str(lb_model_errors()).to_equal_str("")
+            }
+        }
+
         aeocha.describe("model error (§3): publish() on a non-boundary node") {
             aeocha.it("flags a backend that tries to publish") callback {
                 reset_nodes()

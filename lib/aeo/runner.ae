@@ -2767,6 +2767,14 @@ _atoi_env(s: string) -> int {
 // time — not a silent no-op, not a failure three nodes deep. Returns ""
 // if all kinds are runnable here, else the first offending error.
 _preflight() -> string {
+    // Load-balancer model checks FIRST (docs §3/§4/§7): publish-only-on-boundary,
+    // balancer_weight-only-under-an-LB, backend-port agreement, supported
+    // substrate. A loud eval-time error before any resource is touched — the same
+    // discipline as the host-kind gate below.
+    lberr = compose.lb_model_errors()
+    if string_length(lberr) > 0 {
+        return "aeo: load_balancer model error(s):\n${lberr}"
+    }
     fam = family()
     n = compose.count()
     i = 0
@@ -3061,6 +3069,15 @@ main() {
         gerr = compose.gpu_alloc_error()
         if gerr != "" {
             println(gerr)
+            exit(1)
+        }
+        // Load-balancer model gate (docs §3/§4/§7): the same data-model check the
+        // up/down path runs, applied at `check` too so a bad balancer (publish on
+        // a backend, weight without an LB parent, backend-port mismatch,
+        // unsupported substrate) fails BEFORE any deploy.
+        lberr = compose.lb_model_errors()
+        if lberr != "" {
+            println("aeo: load_balancer model error(s):\n${lberr}")
             exit(1)
         }
         // Host preflight: if any container gpu() claim needs a DRI render node,

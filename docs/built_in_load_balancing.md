@@ -460,9 +460,21 @@ are later thickening.
      connections greeted within 0.02s. Live-proven via `aeo up`: two redis
      backends behind an L4 balancer, real RESP relayed (PING→PONG, SET→OK), and
      the 1:1 spread routes independent connections to different backends.
-   - **Still ahead:** `:vm` substrate; the `:host`/multi-host epics (§7); and
-     wiring drain/undrain into an automated rolling-cutover in the runner. (The
-     balancer image build is already folded in — the driver bakes it on demand.)
+   - **`:vm` substrate — gated with a loud error (not silently broken).** A
+     balancer in a VM sits on a DIFFERENT network (tap/bridge) from its container
+     backends, so it cannot reach them by name — that's the cross-network
+     multi-host problem §7 defers, not a quick driver branch. Rather than ship a
+     `:vm` balancer that can't route, `lb_model_errors` now rejects any substrate
+     but `:container` with a message pointing at the multi-host epic, and (this
+     also retroactively wires ALL the §3/§4 LB model checks, which existed but
+     never fired in production) `lb_model_errors` is now run at `aeo check` AND in
+     the up/down/dry-run `_preflight` — so a bad balancer fails loud before any
+     deploy. Live: `aeo check` on a `:vm` balancer exits 1 with the substrate
+     error; a `:container` balancer is clean.
+   - **Still ahead:** the real `:vm`/`:host`/multi-host epics (§7 — cross-network
+     routing, cross-host health/identity); and wiring drain/undrain into an
+     automated rolling-cutover in the runner. (The balancer image build is already
+     folded in — the driver bakes it on demand.)
 
 ---
 

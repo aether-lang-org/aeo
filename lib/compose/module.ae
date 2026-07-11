@@ -1169,6 +1169,17 @@ lb_model_errors() -> string {
         parent_is_lb = 0
         if string_length(parent) > 0 { parent_is_lb = is_load_balancer(parent) }
 
+        // (0) substrate gate: only :container is realized today. :vm / :host put
+        // the balancer on a DIFFERENT network from its container backends, so it
+        // can't reach them by name — that's the cross-network multi-host epic
+        // (docs §7), deliberately deferred. Fail LOUD rather than deploy a
+        // balancer that can't route (the "never say what you can't do" rule).
+        if is_load_balancer(nm) == 1 {
+            sub = get_lb_substrate(nm)
+            if sub != "container" {
+                out = _lb_err(out, "load_balancer '${nm}' substrate '${sub}' is not yet supported — only :container is realized (:vm/:host need cross-network routing, the multi-host epic; docs §7)")
+            }
+        }
         // (1) publish only on a boundary node (the LB itself).
         if string_length(get_publish(nm)) > 0 {
             if is_load_balancer(nm) == 0 {
