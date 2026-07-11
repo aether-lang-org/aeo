@@ -311,6 +311,42 @@ aeo's own verbs; the inline "Proxmox-X" notes just point at the familiar analog.
 
 aeo's grammar exposes 6 kinds + a flavor. Demo'd: container/jail/bhyve/kvm/lxc.
 Gaps:
+- [x] **`proxmox` — REMOTE substrate (first API-driven kind). LIVE-PROVEN
+      2026-07-11 (up + down against a real PVE box, 192.168.0.204).** aeo's first
+      substrate driven over an HTTPS API (PVE :8006) rather than local shell-out.
+      `proxmox_vm(){ host/node/auth_token/storage/bridge/template }`; flat leaf VM
+      (mirrors kvm_vm). Grammar (`071cba9`): compose 6 setters/getters,
+      `proxmox_model_errors()` gate wired into runner `_preflight` + `check`,
+      `proxmox` host-family-agnostic in `_kind_runnable`, reset_nodes clears pve*.
+      DRIVER `lib/driver_proxmox`: a pure API client on **std.http.client** (native
+      Aether HTTP — NOT curl; the same stack std.http.proxy backs the LB with).
+      up: resolve template VMID → clone into pool → poll → PUT cloud-init → start →
+      poll running. down: resolve → stop → destroy(--purge) → poll gone. probe:
+      status/current == running. LIVE: `aeo up examples/silly_addition_proxmox.ae`
+      → db_vm+app_vm RUNNING on the box; `aeo down` → both destroyed, template
+      preserved; clean up→down cycle repeatable. Specs green (proxmox_model 7,
+      proxmox_suite 2, LB 16, reconcile 11, confine_linux 16).
+      THREE live findings baked into the driver + docs: (1) a least-priv token can
+      only clone a template that is a MEMBER of its pool (else invisible); (2)
+      PVE `sshkeys` is DOUBLE-url-encoded; (3) PVE VM names must be DNS labels — an
+      aeo node `db_vm` is sanitized to `db-vm`. Also fixed a RUNNER bug that bit the
+      new kind: `_kind_has_driver` didn't list `proxmox`, so `_engine_downable`
+      routed it to the podman/docker down-sweep, which no-op'd — `aeo down`
+      falsely reported "gone" while the VMs kept running. Any future dedicated-
+      driver kind must be added to `_kind_has_driver` too. TOKEN: least-priv CISO
+      setup (`examples/checks/proxmox_token_setup.sh`+`.md`) — dedicated user,
+      custom minimal role, resource-pool blast radius, privsep+expiring token,
+      PROVEN allowed-vs-denied. FRONTIER follow-ups: in-guest health probe
+      (ssh/qemu-agent) so probe() checks the workload not just the hypervisor; TLS
+      CA/fingerprint pin (driver currently set_insecure). See token hardening below.
+- [ ] **PVE token hardening (deferred — not now).** The current least-priv token
+      is CISO-grade for the demo, but a larger-org prod bar could add: (a) TOKEN
+      IP-ALLOWLIST so a leaked secret is useless off-network; (b) prove EXPIRY
+      actually 401s after the timestamp (we set expire= but haven't watched it
+      lapse); (c) a read-only `aeo-auditor` role split from the deployer (status/
+      audit needn't carry VM.Clone/PowerMgmt); (d) an ACL-DRIFT detector (aeo
+      re-reads /access/acl at check and flags scope creep vs the declared grant).
+      None block the driver; all are defense-in-depth polish.
 - [x] **`lxc` is now REAL** — was a misnomer (routed to podman). driver_lxc built
       + wired (runner up/down/probe/exec) + silly_addition_lxc.ae; LIVE on Bazzite
       2026-06-27 (rootful via the lxc-* NOPASSWD sudoers grant + `systemctl enable

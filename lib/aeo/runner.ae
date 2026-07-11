@@ -31,6 +31,7 @@ import driver_kata
 import driver_windows
 import driver_wslc
 import driver_loadbalancer
+import driver_proxmox
 import compose
 import ipam
 import pf
@@ -635,6 +636,13 @@ driver_up(nm: string, k: string) -> string {
     if k == "kvm" {
         return driver_vm.up("kvm", nm, compose.get_image(nm), compose.get_cpus(nm), compose.get_memory(nm), compose.get_nic(nm))
     }
+    if k == "proxmox" {
+        // REMOTE VM on a Proxmox VE host, over its HTTPS API (driver_proxmox):
+        // clone the template -> cloud-init config -> start. All node inputs
+        // (host/node/token/storage/bridge/template/cpus/memory) come from the
+        // compose model; the driver is a pure API client (std.http.client).
+        return driver_proxmox.up(nm)
+    }
     if k == "bwrap" {
         // UNPRIVILEGED bubblewrap sandbox (driver_bwrap): the lightest tier, no
         // host setup. image() is an optional rootfs dir ("" = sandbox the host
@@ -719,6 +727,11 @@ driver_down(nm: string, k: string) -> string {
     if k == "kvm" {
         return driver_vm.down("kvm", nm)
     }
+    if k == "proxmox" {
+        // Remote PVE VM: stop -> destroy(--purge) over the API (idempotent — a
+        // VM that isn't there is already down).
+        return driver_proxmox.down(nm)
+    }
     if k == "lxc" {
         return driver_lxc.down(nm)
     }
@@ -779,6 +792,12 @@ driver_probe(nm: string, k: string, health: string) -> int {
     }
     if k == "kvm" {
         return driver_vm.probe("kvm", nm, health)
+    }
+    if k == "proxmox" {
+        // Remote PVE VM liveness == status/current is "running" (API probe). A
+        // deeper in-guest health() check (ssh/qemu-agent) is a follow-up; for now
+        // "the hypervisor reports it running" is the readiness signal.
+        return driver_proxmox.probe(nm)
     }
     if k == "lxc" {
         return driver_lxc.probe(nm, health, "")
@@ -1286,6 +1305,9 @@ _kind_has_driver(k: string) -> int {
         return 1
     }
     if k == "kvm" {
+        return 1
+    }
+    if k == "proxmox" {
         return 1
     }
     if k == "lxc" {

@@ -1,0 +1,502 @@
+// driver_proxmox — provisions a proxmox_vm node on a REMOTE Proxmox VE host over
+// its HTTPS API (:8006). aeo's first substrate driven by an API rather than local
+// shell-out: this driver is a PVE API CLIENT built on std.http.client (native
+// Aether HTTP — no /usr/bin/curl dependency; the same HTTP stack std.http.proxy
+// backs the load balancer with), not a hypervisor.
+//
+// LIFECYCLE (each step PROVEN live against a real PVE box, 2026-07-11, with the
+// least-privilege token from examples/checks/proxmox_token_setup.sh):
+//   up(nm):   resolve template VMID by name -> clone into the pool -> poll clone
+//             task -> PUT cloud-init config (ciuser/sshkeys/ipconfig/cores/memory)
+//             -> POST status/start -> poll running.
+//   down(nm): resolve the VM by name -> POST status/stop -> poll stopped ->
+//             DELETE ?purge=1 (idempotent: a not-found VM is already-down).
+//   probe(nm):status/current == "running" ? 1 : 0.
+//
+// THREE NON-OBVIOUS API FINDINGS baked in (each cost a real debugging round live):
+//   1. LEAST-PRIV CLONE NEEDS THE TEMPLATE IN THE POOL. A privsep token scoped to
+//      /pool/<pool> can only clone a template that is ITSELF a member of that pool.
+//      So the operator must `pvesh set /pools/<pool> --vms <templateid>` once; we
+//      detect "template not visible" and say exactly that.
+//   2. sshkeys IS DOUBLE-URL-ENCODED. PVE URL-decodes the form value once and
+//      expects the RESULT to still be URL-encoded. So we encode the key ONCE
+//      ourselves (_pct_encode) and _form_encode encodes it AGAIN; PVE's single
+//      decode leaves our one encoding intact. Passing the raw key (single or zero
+//      encode) is rejected "invalid urlencoded string".
+//   3. PVE VM NAMES MUST BE DNS LABELS — no underscores. An aeo node 'db_vm' is
+//      rejected "does not look like a valid DNS name", so _pve_name maps it to
+//      'db-vm' (and down/probe resolve by that same mapped name).
+//
+// CONFIG comes from the compose model: get_pve_host/node/token/storage/bridge/
+// template + get_cpus/get_memory. The token secret is read from the model (the
+// example puts it there via getenv("PVE_TOKEN")); it never appears on an argv we
+// log — it rides the Authorization header value only.
+//
+// Async ops (clone/start/stop/destroy) return a UPID; rather than parse task logs
+// we POLL the resource's own status, which is simpler and authoritative.
+
+import compose
+import std.os (run_capture, getenv)
+import std.string (
+    string_length, string_concat, string_from_int,
+    string_index_of, string_substring, string_char_at, string_from_char
+)
+import std.list
+import std.json (
+    parse, json_get_int, json_is_null,
+    json_object_get_raw, json_get_string_raw, json_array_get_raw, json_array_size
+)
+import std.http.client (
+    request, set_header, set_body, set_insecure, send_request,
+    response_status, response_body, response_free
+)
+
+exports ( up, down, probe, available, api_base, resolve_vmid )
+
+// ---- endpoint + auth ----------------------------------------------------------
+
+// The API base URL for node nm — "https://<host>/api2/json". host() is "ip:8006".
+api_base(nm: string) -> string {
+    h = compose.get_pve_host(nm)
+    return "https://${h}/api2/json"
+}
+
+// The Authorization header VALUE — "PVEAPIToken=<user!token=secret>". Kept off the
+// visible argv list narration by living inside the header arg only.
+_auth(nm: string) -> string {
+    return "PVEAPIToken=${compose.get_pve_token(nm)}"
+}
+
+// ---- the one HTTP primitive (std.http.client) ---------------------------------
+// _pve(nm, method, path, fields) -> (body, http_code, err). fields is a std.list of
+// "k=v" strings; we render them into an application/x-www-form-urlencoded body,
+// percent-encoding each VALUE once (curl's --data-urlencode did this for us before;
+// with the native client we own the encoding, which makes the sshkeys double-encode
+// finding explicit rather than curl-layer magic). set_insecure(1) accepts PVE's
+// default self-signed cert (a CA/fingerprint pin is the prod follow-up). The status
+// code comes back as an int; we stringify it so the rest of the driver's string
+// comparisons are unchanged.
+_pve(nm: string, method: string, path: string, fields: ptr) -> ptr {
+    req = request(method, "${api_base(nm)}${path}")
+    res = list_new()          // [body, http_code, err]
+    if req == null {
+        list_add(res, "")
+        list_add(res, "000")
+        list_add(res, "http request alloc failed")
+        return res
+    }
+    _e = set_header(req, "Authorization", _auth(nm))
+    _i = set_insecure(req, 1)
+    body = _form_encode(fields)
+    if string_length(body) > 0 {
+        _b = set_body(req, body, string_length(body), "application/x-www-form-urlencoded")
+    }
+    resp, err = send_request(req)
+    if err != "" {
+        list_add(res, "")
+        list_add(res, "000")
+        list_add(res, err)
+        return res
+    }
+    code = response_status(resp)
+    rbody = response_body(resp)
+    response_free(resp)
+    list_add(res, rbody)
+    list_add(res, string_from_int(code))
+    list_add(res, "")
+    return res
+}
+
+_res_body(r: ptr) -> string { return _lg(r, 0) }
+_res_code(r: ptr) -> string { return _lg(r, 1) }
+_res_err(r: ptr)  -> string { return _lg(r, 2) }
+
+// list element as a string. list_get() is a tuple-returning convenience wrapper
+// (value, err) which mis-infers when assigned to a local; the *_raw accessor gives
+// the plain element ptr, which IS the string (Aether strings are ptrs). Wrapping it
+// in a string-typed function pins the type so callers get a clean string.
+_lg(l: ptr, i: int) -> string { return list_get_raw(l, i) }
+
+// Render a std.list of "k=v" fields as an x-www-form-urlencoded body. The KEY is
+// left as-is (all our keys are unreserved); the VALUE (everything after the first
+// '=') is percent-encoded once. sshkeys arrives here already encoded once (finding
+// #2), so this makes it twice — PVE's single decode leaves one encoding intact.
+_form_encode(fields: ptr) -> string {
+    out = ""
+    n = list_size(fields)
+    i = 0
+    while i < n {
+        kv = _lg(fields, i)
+        eq = string_index_of(kv, "=")
+        key = kv
+        val = ""
+        if eq >= 0 {
+            key = string_substring(kv, 0, eq)
+            val = string_substring(kv, eq + 1, string_length(kv))
+        }
+        if i > 0 { out = string_concat(out, "&") }
+        out = string_concat(out, key)
+        out = string_concat(out, "=")
+        out = string_concat(out, _pct_encode(val))
+        i = i + 1
+    }
+    return out
+}
+
+// ---- percent-encode (for form values, and the double-encoded sshkeys field) ----
+// Encode every byte that isn't unreserved (A-Za-z0-9-_.~) as %XX. Applied to every
+// form VALUE by _form_encode. For sshkeys the caller pre-encodes once more, so the
+// key is encoded TWICE on the wire -> PVE decodes once -> our single encoding
+// survives (finding #2 above).
+_pct_encode(s: string) -> string {
+    out = ""
+    n = string_length(s)
+    i = 0
+    while i < n {
+        c = string_char_at(s, i)
+        if _is_unreserved(c) == 1 {
+            out = string_concat(out, string_from_char(c))
+        } else {
+            out = string_concat(out, "%")
+            out = string_concat(out, _hex2(c))
+        }
+        i = i + 1
+    }
+    return out
+}
+_is_unreserved(c: int) -> int {
+    if c >= 65 { if c <= 90  { return 1 } }   // A-Z
+    if c >= 97 { if c <= 122 { return 1 } }   // a-z
+    if c >= 48 { if c <= 57  { return 1 } }   // 0-9
+    if c == 45 { return 1 }                   // -
+    if c == 95 { return 1 }                   // _
+    if c == 46 { return 1 }                   // .
+    if c == 126 { return 1 }                  // ~
+    return 0
+}
+_hex2(c: int) -> string {
+    hi = c / 16
+    lo = c - (hi * 16)
+    return string_concat(_hexd(hi), _hexd(lo))
+}
+_hexd(v: int) -> string {
+    if v < 10 { return string_from_char(48 + v) }     // 0-9
+    return string_from_char(65 + (v - 10))            // A-F
+}
+
+// ---- JSON helpers over a PVE response body ------------------------------------
+// Field accessors over the RAW json ptrs (single-return, null-safe) — the std.json
+// convenience wrappers (object_get/get_string) return (value, err) tuples, so we
+// use the *_raw accessors directly for the single-value ergonomics this driver wants.
+_gs(obj: ptr, key: string) -> string {           // string field, "" if absent/not-string
+    if obj == null { return "" }
+    v = json_object_get_raw(obj, key)
+    if v == null { return "" }
+    s = json_get_string_raw(v)
+    if s == null { return "" }
+    return s
+}
+_gi(obj: ptr, key: string) -> int {              // int field, -1 if absent
+    if obj == null { return -1 }
+    v = json_object_get_raw(obj, key)
+    if v == null { return -1 }
+    return json_get_int(v)
+}
+
+// PVE wraps every payload as {"data": ...}. Return the "data" node, or null.
+_data(body: string) -> ptr {
+    v, e = parse(body)
+    if string_length(e) > 0 { return null }
+    if json_is_null(v) == 1 { return null }
+    return json_object_get_raw(v, "data")
+}
+
+// PVE VM names must be valid DNS labels — no underscores (an aeo node name like
+// 'db_vm' is rejected "does not look like a valid DNS name"). Map every char that
+// isn't [A-Za-z0-9-] to '-' so the aeo node name becomes a legal, stable PVE name.
+// down()/probe() resolve by this SAME mapped name, so the round-trip is consistent.
+_pve_name(nm: string) -> string {
+    out = ""
+    n = string_length(nm)
+    i = 0
+    while i < n {
+        c = string_char_at(nm, i)
+        ok = 0
+        if c >= 65 { if c <= 90  { ok = 1 } }   // A-Z
+        if c >= 97 { if c <= 122 { ok = 1 } }   // a-z
+        if c >= 48 { if c <= 57  { ok = 1 } }   // 0-9
+        if c == 45 { ok = 1 }                   // -
+        if ok == 1 {
+            out = string_concat(out, string_from_char(c))
+        } else {
+            out = string_concat(out, "-")
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// ---- resolve a VM/template VMID by name via /cluster/resources ----------------
+// The token sees only its own pool's resources, so a name lookup here also proves
+// pool membership. Returns the VMID as int, or -1 if not visible.
+resolve_vmid(nm: string, want_name: string) -> int {
+    r = _pve(nm, "GET", "/cluster/resources?type=vm", list_new())
+    if _res_code(r) != "200" { return -1 }
+    d = _data(_res_body(r))
+    if d == null { return -1 }
+    cnt = json_array_size(d)
+    i = 0
+    while i < cnt {
+        row = json_array_get_raw(d, i)
+        nmv = _gs(row, "name")
+        if _eq(nmv, want_name) == 1 {
+            return _gi(row, "vmid")
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+_eq(a: string, b: string) -> int {
+    if string_length(a) != string_length(b) { return 0 }
+    n = string_length(a)
+    i = 0
+    while i < n {
+        if string_char_at(a, i) != string_char_at(b, i) { return 0 }
+        i = i + 1
+    }
+    return 1
+}
+
+// status/current -> status string ("running"/"stopped"/"") for a known VMID.
+_status_of(nm: string, vmid: int) -> string {
+    r = _pve(nm, "GET", "/nodes/${compose.get_pve_node(nm)}/qemu/${string_from_int(vmid)}/status/current", list_new())
+    if _res_code(r) != "200" { return "" }
+    d = _data(_res_body(r))
+    if d == null { return "" }
+    return _gs(d, "status")
+}
+
+// poll _status_of(vmid) until it equals `want`, up to `tries` (2s apart). 1=ok.
+_poll_status(nm: string, vmid: int, want: string, tries: int) -> int {
+    i = 0
+    while i < tries {
+        s = _status_of(nm, vmid)
+        if _eq(s, want) == 1 { return 1 }
+        _sleep2()
+        i = i + 1
+    }
+    return 0
+}
+
+// poll until the VM no longer exists (destroy done). 1=gone.
+_poll_gone(nm: string, vmid: int, tries: int) -> int {
+    i = 0
+    while i < tries {
+        s = _status_of(nm, vmid)
+        if _eq(s, "") == 1 { return 1 }
+        _sleep2()
+        i = i + 1
+    }
+    return 0
+}
+
+// 2-second sleep via /bin/sleep (no busy loop; keeps the actor thread parked).
+_sleep2() {
+    av = list_new()
+    list_add(av, "2")
+    _o, _s, _e = run_capture("/bin/sleep", av, null)
+    list_free(av)
+}
+
+// next free VMID (token-visible) from /cluster/nextid. PVE returns "data":"100"
+// (the id as a JSON STRING), so pull the string off the data node and parse it.
+_nextid(nm: string) -> int {
+    r = _pve(nm, "GET", "/cluster/nextid", list_new())
+    if _res_code(r) != "200" { return -1 }
+    d = _data(_res_body(r))
+    if d == null { return -1 }
+    s = json_get_string_raw(d)
+    if s == null { return -1 }
+    if string_length(s) == 0 { return -1 }
+    return _to_int(s)
+}
+_to_int(s: string) -> int {
+    n = string_length(s)
+    acc = 0
+    i = 0
+    while i < n {
+        c = string_char_at(s, i)
+        if c >= 48 { if c <= 57 { acc = (acc * 10) + (c - 48) } }
+        i = i + 1
+    }
+    return acc
+}
+
+// ---- available() — is this node's remote host reachable + authorized? ----------
+// A cheap GET /version with the token. "" = good; else a loud reason. The model
+// gate (proxmox_model_errors) already guaranteed host/node/token/template are set.
+available(nm: string) -> string {
+    if string_length(compose.get_pve_token(nm)) == 0 {
+        return "aeo: proxmox_vm '${nm}' has no auth_token (PVE_TOKEN unset?) — see examples/checks/proxmox_token_setup.md"
+    }
+    r = _pve(nm, "GET", "/version", list_new())
+    if _res_err(r) != "" {
+        return "aeo: proxmox_vm '${nm}' cannot reach ${compose.get_pve_host(nm)}: ${_res_err(r)}"
+    }
+    c = _res_code(r)
+    if _eq(c, "200") == 1 { return "" }
+    if _eq(c, "401") == 1 {
+        return "aeo: proxmox_vm '${nm}' — PVE rejected the token (401). Rotate via examples/checks/proxmox_token_setup.sh (expired?)."
+    }
+    return "aeo: proxmox_vm '${nm}' — PVE ${compose.get_pve_host(nm)} returned HTTP ${c} for /version"
+}
+
+// ---- up(nm) — clone -> config -> start ----------------------------------------
+up(nm: string) -> string {
+    av = available(nm)
+    if string_length(av) > 0 { return av }
+
+    node = compose.get_pve_node(nm)
+    tmpl = compose.get_pve_template(nm)
+
+    // The VM name on PVE is the aeo node name (so down/probe can resolve it back).
+    // If it already exists (idempotent re-up), just ensure it's running.
+    existing = resolve_vmid(nm, _pve_name(nm))
+    if existing >= 0 {
+        s = _status_of(nm, existing)
+        if _eq(s, "running") == 1 { return "" }
+        return _start(nm, existing)
+    }
+
+    // resolve the template by name — also proves it's in the token's pool (finding #1)
+    tid = resolve_vmid(nm, tmpl)
+    if tid < 0 {
+        return "aeo: proxmox_vm '${nm}' — template '${tmpl}' is not visible to the token. It must be a MEMBER of aeo's pool so a least-priv token may clone it: `pvesh set /pools/aeo-prod --vms <templateid>` (see examples/checks/proxmox_token_setup.md)."
+    }
+
+    newid = _nextid(nm)
+    if newid < 0 { return "aeo: proxmox_vm '${nm}' — could not get a free VMID from ${node}" }
+    sid = string_from_int(newid)
+
+    // CLONE template tid -> newid, full clone into the pool + storage.
+    f = list_new()
+    list_add(f, "newid=${sid}")
+    list_add(f, "name=${_pve_name(nm)}")
+    list_add(f, "pool=aeo-prod")
+    list_add(f, "full=1")
+    st = compose.get_pve_storage(nm)
+    if string_length(st) > 0 { list_add(f, "storage=${st}") }
+    r = _pve(nm, "POST", "/nodes/${node}/qemu/${string_from_int(tid)}/clone", f)
+    list_free(f)
+    if _eq(_res_code(r), "200") == 0 {
+        return "aeo: proxmox_vm '${nm}' clone failed (HTTP ${_res_code(r)}): ${_res_body(r)}"
+    }
+    // clone is async — wait for the new VM to exist + settle to stopped.
+    if _poll_status(nm, newid, "stopped", 60) == 0 {
+        return "aeo: proxmox_vm '${nm}' clone did not finish (VMID ${sid} never reached 'stopped')"
+    }
+
+    // CONFIGURE cloud-init: cores/memory from the model, a login user, our ssh key
+    // (DOUBLE-ENCODED per finding #2), dhcp on the guest NIC.
+    cf = list_new()
+    list_add(cf, "cores=${string_from_int(compose.get_cpus(nm))}")
+    list_add(cf, "memory=${_mem_mb(nm)}")
+    list_add(cf, "ciuser=aeo")
+    list_add(cf, "ipconfig0=ip=dhcp")
+    key = _ssh_pubkey()
+    if string_length(key) > 0 {
+        // encode ONCE here; _form_encode encodes the value AGAIN; PVE decodes once,
+        // leaving one encoding — the double-encode sshkeys requires (finding #2).
+        list_add(cf, "sshkeys=${_pct_encode(key)}")
+    }
+    rc = _pve(nm, "PUT", "/nodes/${node}/qemu/${sid}/config", cf)
+    list_free(cf)
+    if _eq(_res_code(rc), "200") == 0 {
+        return "aeo: proxmox_vm '${nm}' cloud-init config failed (HTTP ${_res_code(rc)}): ${_res_body(rc)}"
+    }
+
+    return _start(nm, newid)
+}
+
+// POST status/start + poll running.
+_start(nm: string, vmid: int) -> string {
+    r = _pve(nm, "POST", "/nodes/${compose.get_pve_node(nm)}/qemu/${string_from_int(vmid)}/status/start", list_new())
+    if _eq(_res_code(r), "200") == 0 {
+        return "aeo: proxmox_vm '${nm}' start failed (HTTP ${_res_code(r)}): ${_res_body(r)}"
+    }
+    if _poll_status(nm, vmid, "running", 30) == 0 {
+        return "aeo: proxmox_vm '${nm}' started but never reached 'running'"
+    }
+    return ""
+}
+
+// memory() is "2G"/"512M"/"2048" — normalize to MiB for PVE's `memory` (MB int).
+_mem_mb(nm: string) -> string {
+    v = compose.get_memory(nm)
+    n = string_length(v)
+    if n == 0 { return "2048" }
+    last = string_char_at(v, n - 1)
+    num = _to_int(v)
+    if last == 71 { return string_from_int(num * 1024) }   // 'G'
+    if last == 103 { return string_from_int(num * 1024) }  // 'g'
+    if last == 77 { return string_from_int(num) }          // 'M'
+    if last == 109 { return string_from_int(num) }         // 'm'
+    return string_from_int(num)                            // bare int = MB
+}
+
+// operator ssh pubkey — AEO_PVE_SSHKEY (a path), else ~/.ssh/id_rsa.pub. "" if none.
+_ssh_pubkey() -> string {
+    p = getenv("AEO_PVE_SSHKEY")
+    if string_length(p) == 0 {
+        home = getenv("HOME")
+        p = "${home}/.ssh/id_rsa.pub"
+    }
+    av = list_new()
+    list_add(av, p)
+    out, status, err = run_capture("/bin/cat", av, null)
+    list_free(av)
+    if err != "" { return "" }
+    // strip a trailing newline
+    n = string_length(out)
+    if n > 0 {
+        if string_char_at(out, n - 1) == 10 {
+            return string_substring(out, 0, n - 1)
+        }
+    }
+    return out
+}
+
+// ---- down(nm) — stop -> destroy (idempotent) ----------------------------------
+down(nm: string) -> string {
+    vmid = resolve_vmid(nm, _pve_name(nm))
+    if vmid < 0 { return "" }                    // already gone -> down
+    node = compose.get_pve_node(nm)
+    sid = string_from_int(vmid)
+
+    s = _status_of(nm, vmid)
+    if _eq(s, "running") == 1 {
+        r = _pve(nm, "POST", "/nodes/${node}/qemu/${sid}/status/stop", list_new())
+        if _eq(_res_code(r), "200") == 0 {
+            return "aeo: proxmox_vm '${nm}' stop failed (HTTP ${_res_code(r)}): ${_res_body(r)}"
+        }
+        _poll_status(nm, vmid, "stopped", 30)    // best-effort settle before destroy
+    }
+
+    r = _pve(nm, "DELETE", "/nodes/${node}/qemu/${sid}?purge=1", list_new())
+    if _eq(_res_code(r), "200") == 0 {
+        return "aeo: proxmox_vm '${nm}' destroy failed (HTTP ${_res_code(r)}): ${_res_body(r)}"
+    }
+    if _poll_gone(nm, vmid, 30) == 0 {
+        return "aeo: proxmox_vm '${nm}' destroy issued but VMID ${sid} still present"
+    }
+    return ""
+}
+
+// ---- probe(nm) — 1 if the VM is running, else 0 -------------------------------
+probe(nm: string) -> int {
+    vmid = resolve_vmid(nm, _pve_name(nm))
+    if vmid < 0 { return 0 }
+    if _eq(_status_of(nm, vmid), "running") == 1 { return 1 }
+    return 0
+}

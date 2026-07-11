@@ -35,7 +35,7 @@ what changes is the substrate, never the app.
 | [`silly_addition_firecracker.ae`](silly_addition_firecracker.ae) | Linux   | microVM  | —               | minimal "smaller VM" (Firecracker) |
 | [`silly_addition_windows.ae`](silly_addition_windows.ae)     | Windows | WSL2     | podman (in WSL) | Linux container on Windows (bring-your-own engine) |
 | [`silly_addition_wslc.ae`](silly_addition_wslc.ae)         | Windows | WSL2     | wslc (native)   | Linux container on Windows (MSFT's native engine) |
-| [`silly_addition_proxmox.ae`](silly_addition_proxmox.ae)     | _any_ (remote) | PVE VM | — | **remote host, API-driven** (model + gate real; live `up` is frontier) |
+| [`silly_addition_proxmox.ae`](silly_addition_proxmox.ae)     | _any_ (remote) | PVE VM | — | **remote host, API-driven** (up/down LIVE-PROVEN over the PVE API) |
 
 `−VMM −podman` is **not** a cell — a compute node has to run *somewhere*, so "no
 VM, no container" is degenerate.
@@ -68,11 +68,15 @@ prod**: a dedicated service user, a custom least-privilege role, a resource-pool
 blast radius, and a privilege-separated, expiring API token — provisioned by
 [`checks/proxmox_token_setup.sh`](checks/proxmox_token_setup.sh) and proven
 allowed-vs-denied in [`checks/proxmox_token_setup.md`](checks/proxmox_token_setup.md).
-**PARTIAL** — the data model + the `aeo check` gate are real (a missing/empty
-`auth_token()`, usually an unset `PVE_TOKEN`, fails LOUD; the token itself really
-authenticates to the PVE API), but `driver_proxmox` — the client that clones the
-template and starts the VM — is the documented **frontier**, so `aeo up` currently
-models-and-gates. The file states this plainly and claims no deploy it won't perform.
+**RUNNABLE** — the whole lifecycle is **live-proven** (2026-07-11, against a real
+PVE box): `aeo up` clones the template → configures cloud-init → starts the VMs
+(db_vm + app_vm came up *running*, dependency-ordered); `aeo down` stops → destroys
+each and verifies gone (template preserved). `driver_proxmox` is a pure API client
+on `std.http.client` (native Aether HTTP, no curl). Operator prereqs on a bare box:
+a cloud-init template, and it must be a **member of aeo's pool** so the least-priv
+token can clone it (`pvesh set /pools/aeo-prod --vms <id>`). The `aeo check` gate
+still fails LOUD on a missing endpoint/token. Frontier follow-ups: an in-guest
+health probe (ssh/qemu-agent) and a TLS CA/fingerprint pin.
 
 The naming is by SUBSTRATE (bhyve_podman / kvm / containers / jails / lxc / bwrap),
 not the workload. (The original demo was `silly_addition_cache.ae`; renamed for

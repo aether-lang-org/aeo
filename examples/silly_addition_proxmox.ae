@@ -28,17 +28,32 @@
 //   aeo suite examples/silly_addition_proxmox.ae   deploy + suite() specs, tear down
 //   aeo down  examples/silly_addition_proxmox.ae   teardown (reverse)
 //
-// WHAT'S REAL vs the FRONTIER (honest — the proxmox arm is remote-API, model-first):
-//   - REAL: the data model + the check-gate (host/node/auth_token/template are
-//     required; a missing/empty token — usually PVE_TOKEN unset — fails LOUD at
-//     `aeo check`). The token itself really authenticates to the PVE API and is
-//     scoped to exactly what aeo needs — PROVEN against 192.168.0.204 (see
-//     examples/checks/proxmox_token_setup.md for the allowed/denied evidence).
-//   - FRONTIER: driver_proxmox — the API client that POSTs the clone, sets
-//     cloud-init, and starts the VM — is NOT yet realized. So `aeo up` currently
-//     models-and-gates; wiring the live create/start/teardown calls is the
-//     follow-up (model-surface first, exactly as load_balancer and egress_fqdn
-//     landed). This file does not claim a deploy it will not perform.
+// WHAT'S REAL (the whole lifecycle is LIVE-PROVEN, 2026-07-11, against a real PVE
+// box at 192.168.0.204, driven by the least-privilege token):
+//   - `aeo up`   clones the template -> configures cloud-init (ciuser/sshkeys/
+//                ipconfig/cores/memory) -> starts the VM -> polls running. Two VMs
+//                (db_vm, app_vm) came up RUNNING on the box, dependency-ordered.
+//   - `aeo down` stops -> destroys(--purge) each VM -> verifies gone. Clean: both
+//                VMs removed, the template preserved.
+//   - `aeo check` runs the model spec + the gate (host/node/auth_token/template
+//                required; a missing/empty token — usually PVE_TOKEN unset — fails
+//                LOUD). driver_proxmox is a pure API client on std.http.client
+//                (native Aether HTTP — no curl dependency).
+//   - the TOKEN is a least-privilege, CISO-grade credential, PROVEN allowed-vs-
+//                denied against the box (see examples/checks/proxmox_token_setup.md).
+//
+// OPERATOR PREREQUISITES (a bare PVE box ships neither):
+//   1. A cloud-init TEMPLATE named by template() (default "debian-12-cloudinit").
+//   2. That template must be a MEMBER of aeo's resource pool, else the least-priv
+//      token cannot see/clone it: `pvesh set /pools/aeo-prod --vms <templateid>`.
+//      (A least-priv token scoped to /pool/<pool> can only clone pool members —
+//      a real finding from live bring-up; the driver says exactly this if it's
+//      missing.) See examples/checks/proxmox_token_setup.md.
+//
+// FRONTIER (follow-ups, not blocking): an in-GUEST health()/exec path (ssh or the
+// qemu-guest-agent) so probe() checks the workload, not just "hypervisor says
+// running"; a CA/fingerprint pin instead of insecure-TLS; the /add app itself
+// (this demo proves the VM lifecycle; the workload bake is the next layer).
 //
 // The API TOKEN is read from the environment via getenv("PVE_TOKEN") — it NEVER
 // lives in this file. Provision it once with examples/checks/proxmox_token_setup.sh,
