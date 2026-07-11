@@ -66,7 +66,7 @@
 // then `export PVE_TOKEN="aeo@pve!deploy=<secret>"`.
 
 import compose (system, proxmox_vm)
-import compose (host, node, auth_token, storage, bridge, template)
+import compose (host, node, auth_token, storage, bridge, template, cloud_init, agent)
 import compose (cpus, memory, depends)
 import compose (check, suite)
 import std.os (getenv)
@@ -89,6 +89,15 @@ aeo_orchestration() {
             storage(_pve_storage())        // where the VM disk lands
             bridge(_pve_bridge())          // the guest NIC's bridge
             template(_pve_template())      // clone source (operator-provisioned)
+            // POST-PROVISION (the debated design): a GENERIC template completed
+            // IN-GUEST via cloud-init — the operator pre-places the snippet (see
+            // examples/checks/proxmox_cloudinit.yaml + proxmox_token_setup.md);
+            // the least-priv token references it. agent(1) upgrades probe() from
+            // "hypervisor says running" to "the guest-agent responds" (guest OS
+            // alive). Uncomment to use — needs the snippet placed + VM.GuestAgent.
+            // Audit on the token (the setup script grants it):
+            //   cloud_init("local:snippets/aeo-agent-init.yaml")
+            //   agent(1)
             cpus(2)
             memory("2G")
         }

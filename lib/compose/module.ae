@@ -32,8 +32,9 @@ import std.string (string_length, string_char_at, string_from_int, string_substr
 exports (
     system,
     bhyve_vm, freebsd_vm, get_flavor, kvm_vm, proxmox_vm,
-    host, node, auth_token, storage, bridge, template,
+    host, node, auth_token, storage, bridge, template, cloud_init, agent,
     get_pve_host, get_pve_node, get_pve_token, get_pve_storage, get_pve_bridge, get_pve_template,
+    get_pve_cloud_init, get_pve_agent,
     proxmox_model_errors,
     resource,
     container, lxc, kvm, jail, bhyve, bwrap, nspawn, firecracker, kata,
@@ -638,6 +639,21 @@ storage(_ctx: ptr, v: string)    { config.put("aeo.cmp.pvestorage.${_ctx}", v) }
 bridge(_ctx: ptr, v: string)     { config.put("aeo.cmp.pvebridge.${_ctx}", v) }
 template(_ctx: ptr, v: string)   { config.put("aeo.cmp.pvetemplate.${_ctx}", v) }
 
+// cloud_init(snippet) — POST-PROVISION completion. `snippet` is a PVE cicustom
+// user-data reference (e.g. "local:snippets/aeo-agent-init.yaml") the OPERATOR
+// pre-placed (writing snippet files needs storage perms the least-priv token
+// lacks; but REFERENCING one from the VM config does NOT — proven live, so the
+// driver sets cicustom with the deploy token). The snippet installs qemu-guest-
+// agent and completes the node IN-GUEST (the debated design: generic template +
+// in-guest completion via cloud-init, NOT a baked workload). Empty = no cloud-init
+// beyond the API params (ciuser/ip); the VM boots the bare template.
+cloud_init(_ctx: ptr, v: string) { config.put("aeo.cmp.pvecinit.${_ctx}", v) }
+// agent(on) — when 1, the node is completed by aeo-agent seeded via cloud_init,
+// and probe() checks GUEST-AGENT liveness (qemu-guest-agent responding) rather
+// than just "the hypervisor reports running". Requires cloud_init() to have
+// installed+started the guest agent. 0/unset = hypervisor-status probe only.
+agent(_ctx: ptr, on: int)        { config.put("aeo.cmp.pveagent.${_ctx}", string_from_int(on)) }
+
 // wsl_distro — for a `windows` node, which WSL2 distro hosts its podman
 // ("" = WSL's default distro). The driver_windows seam: the Linux under Windows.
 wsl_distro(_ctx: ptr, v: string) { config.put("aeo.cmp.wsldistro.${_ctx}", v) }
@@ -1091,6 +1107,8 @@ reset_nodes() {
         config.put("aeo.cmp.pvestorage.${nm}", "")
         config.put("aeo.cmp.pvebridge.${nm}", "")
         config.put("aeo.cmp.pvetemplate.${nm}", "")
+        config.put("aeo.cmp.pvecinit.${nm}", "")
+        config.put("aeo.cmp.pveagent.${nm}", "")
         i = i + 1
     }
     config.put("aeo.cmp.count", "0")
@@ -1418,6 +1436,12 @@ get_pve_token(nm: string) -> string    { return config.get("aeo.cmp.pvetoken.${n
 get_pve_storage(nm: string) -> string  { return config.get("aeo.cmp.pvestorage.${nm}") }
 get_pve_bridge(nm: string) -> string   { return config.get("aeo.cmp.pvebridge.${nm}") }
 get_pve_template(nm: string) -> string { return config.get("aeo.cmp.pvetemplate.${nm}") }
+get_pve_cloud_init(nm: string) -> string { return config.get("aeo.cmp.pvecinit.${nm}") }
+get_pve_agent(nm: string) -> int {
+    v = config.get("aeo.cmp.pveagent.${nm}")
+    if v == "1" { return 1 }
+    return 0
+}
 
 // proxmox_model_errors() — the honest check-gate for proxmox_vm nodes. A remote
 // substrate can silently do nothing if its endpoint/credential is missing, so we

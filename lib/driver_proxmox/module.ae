@@ -499,6 +499,18 @@ up(nm: string) -> string {
         // leaving one encoding — the double-encode sshkeys requires (finding #2).
         list_add(cf, "sshkeys=${_pct_encode(key)}")
     }
+    // POST-PROVISION: when cloud_init() names an operator-placed user-data snippet,
+    // point the VM's cicustom at it. This is the in-guest completion path (installs
+    // qemu-guest-agent, seeds+starts aeo-agent — the debated design). The least-priv
+    // token CAN set cicustom even though it can't WRITE the snippet (proven live:
+    // referencing a snippet only needs VM-write, not storage-write; the operator
+    // pre-places the file, like the template). NOTE: a cicustom user snippet may
+    // OVERRIDE the sshkeys/ciuser params above, so a snippet that wants key login
+    // must set the key itself — the driver still sends both; the snippet wins.
+    ci = compose.get_pve_cloud_init(nm)
+    if string_length(ci) > 0 {
+        list_add(cf, "cicustom=user=${ci}")
+    }
     rc = _pve(nm, "PUT", "/nodes/${node}/qemu/${sid}/config", cf)
     list_free(cf)
     if _eq(_res_code(rc), "200") == 0 {
@@ -582,10 +594,31 @@ down(nm: string) -> string {
     return ""
 }
 
-// ---- probe(nm) — 1 if the VM is running, else 0 -------------------------------
+// ---- probe(nm) — liveness ------------------------------------------------------
+// Default: the hypervisor reports the VM "running". When agent() is declared, that
+// is NOT enough — the guest may be booting, so we require the qemu-guest-agent to
+// RESPOND (proof the guest OS is up + cloud-init got far enough to start the agent).
+// This upgrades "the box started a VM" to "the guest is alive", the honest readiness
+// signal for an agent-completed node. (A deeper WORKLOAD probe — the agent reporting
+// its container healthy — is the next layer, once the agent's report-out lands.)
 probe(nm: string) -> int {
     vmid = resolve_vmid(nm, _pve_name(nm))
     if vmid < 0 { return 0 }
-    if _eq(_status_of(nm, vmid), "running") == 1 { return 1 }
+    if _eq(_status_of(nm, vmid), "running") == 0 { return 0 }
+    if compose.get_pve_agent(nm) == 1 {
+        return _agent_ping(nm, vmid)
+    }
+    return 1
+}
+
+// _agent_ping — POST /agent/ping; 1 iff the qemu-guest-agent answers 200. A 500
+// means "VM up but agent not responding yet" (still booting / cloud-init running);
+// a 403 means the token lacks VM.GuestAgent.* (agent() declared but the role wasn't
+// widened) — treated as not-ready so the readiness poll keeps waiting rather than
+// silently passing. NB agent() nodes REQUIRE the guest-agent role grant; see
+// examples/checks/proxmox_token_setup.md.
+_agent_ping(nm: string, vmid: int) -> int {
+    r = _pve(nm, "POST", "/nodes/${compose.get_pve_node(nm)}/qemu/${string_from_int(vmid)}/agent/ping", list_new())
+    if _eq(_res_code(r), "200") == 1 { return 1 }
     return 0
 }

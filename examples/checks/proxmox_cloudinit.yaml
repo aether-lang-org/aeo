@@ -1,0 +1,42 @@
+#cloud-config
+# proxmox_cloudinit.yaml — the aeo POST-PROVISION user-data snippet.
+#
+# The debated design (see docs/TODO): a proxmox_vm clones a GENERIC cloud image and
+# completes its node IN-GUEST via this cloud-init, NOT by baking a workload into the
+# template. This snippet is the irreducible first rung — the only thing that runs
+# with zero guest cooperation. It:
+#   1. installs + starts qemu-guest-agent  -> makes the /qemu/<id>/agent/* channel
+#      live (so aeo probe() can verify guest liveness, and the parent can exec-in),
+#   2. writes an aeo marker                -> a proof-of-completion aeo can read back
+#      over the agent channel (the rung-1 proof).
+#
+# OPERATOR PLACEMENT (once, like the template): copy this to the PVE host's snippet
+# storage, then reference it from the composition via cloud_init():
+#   scp examples/checks/proxmox_cloudinit.yaml root@<pve>:/var/lib/vz/snippets/aeo-agent-init.yaml
+#   # ensure snippets content is enabled on the storage:
+#   ssh root@<pve> "pvesm set local --content iso,vztmpl,backup,snippets"
+# The least-priv deploy token then REFERENCES it (proven: referencing a snippet needs
+# only VM-write, not storage-write — so the token sets cicustom, the operator places
+# the file). See examples/silly_addition_proxmox.ae and proxmox_token_setup.md.
+#
+# NEXT LAYER (aeo-agent seeding — the in-guest doer): extend runcmd to fetch+launch
+# bin/aeo-agent with AEO_NODE/AEO_TOKEN/AEO_RENDEZVOUS seeded here (token sealed via
+# lib/secrets), so the agent completes the node and runs its workload container. Left
+# as a documented hook below; rung-1 (guest-agent + marker) is what's live-proven.
+
+package_update: true
+packages:
+  - qemu-guest-agent
+
+runcmd:
+  # make the guest-agent channel live (probe() + exec-in depend on this).
+  - systemctl enable --now qemu-guest-agent
+  # rung-1 proof marker: aeo reads this back over /agent/exec to confirm completion.
+  - [ sh, -c, 'echo "AEO_PROVISIONED node=$(hostname) ip=$(hostname -I | awk "{print \$1}") at=$(date -u +%s)" > /var/lib/aeo-provisioned' ]
+  # --- NEXT LAYER HOOK (aeo-agent as the in-guest doer) ---
+  # The parent seeds AEO_NODE/AEO_TOKEN/AEO_RENDEZVOUS (per-node, token sealed) and
+  # drops the aeo-agent binary; here it would be launched, e.g.:
+  #   - [ sh, -c, 'install -m0755 /run/aeo/aeo-agent /usr/local/bin/aeo-agent' ]
+  #   - systemctl enable --now aeo-agent
+  # Until that lands, the node is "guest alive" (probe via /agent/ping); the workload
+  # container is the layer after (agent -> driver_linux -> container).

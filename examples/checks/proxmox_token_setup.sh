@@ -60,7 +60,13 @@ API="https://${PVE_HOST}/api2/json"
 
 # The MINIMAL privilege set: clone a template, give it disk/cpu/mem/net/cloud-init,
 # power it on/off, read its status — and NOTHING else. Trimmed from PVEVMAdmin.
-PRIVS="VM.Clone,VM.Allocate,VM.Config.Disk,VM.Config.CPU,VM.Config.Memory,VM.Config.Network,VM.Config.Options,VM.Config.Cloudinit,VM.Config.CDROM,VM.PowerMgmt,VM.Audit,Datastore.AllocateSpace,Datastore.Audit,SDN.Use,Pool.Audit"
+# VM.GuestAgent.Audit is the ONLY guest-agent priv, and only for READ-ONLY /agent/
+# ping (so aeo's agent()-mode probe can verify the guest OS is alive). We DELIBERATELY
+# exclude VM.GuestAgent.Exec / .Unrestricted / .FileRead / .FileWrite — no arbitrary
+# in-guest command execution or file access. So agent()-probe works; exec-in-as-
+# ignition (if ever added) would need a further, separate grant a CISO reviews on
+# its own merits.
+PRIVS="VM.Clone,VM.Allocate,VM.Config.Disk,VM.Config.CPU,VM.Config.Memory,VM.Config.Network,VM.Config.Options,VM.Config.Cloudinit,VM.Config.CDROM,VM.PowerMgmt,VM.Audit,VM.GuestAgent.Audit,Datastore.AllocateSpace,Datastore.Audit,SDN.Use,Pool.Audit"
 
 need() { command -v "$1" >/dev/null 2>&1 || { echo "missing: $1" >&2; exit 2; }; }
 need curl; need python3

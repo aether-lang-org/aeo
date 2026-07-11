@@ -13,8 +13,9 @@
 
 import aeocha
 import compose (system, proxmox_vm)
-import compose (host, node, auth_token, storage, bridge, template, cpus, memory, depends)
+import compose (host, node, auth_token, storage, bridge, template, cloud_init, agent, cpus, memory, depends)
 import compose (get_pve_host, get_pve_node, get_pve_token, get_pve_storage, get_pve_bridge, get_pve_template)
+import compose (get_pve_cloud_init, get_pve_agent)
 import compose (get_depends, proxmox_model_errors, reset_nodes)
 import std.os
 import std.string (string_length, string_from_int)
@@ -68,6 +69,28 @@ main() {
 
         aeocha.it("app_vm depends on db_vm (ordering edge)") callback {
             aeocha.expect_str(get_depends("app_vm")).to_equal_str("db_vm")
+        }
+
+        aeocha.describe("post-provision: cloud_init() + agent()") {
+            aeocha.it("records the cloud-init snippet + agent flag when declared") callback {
+                reset_nodes()
+                system("pvci") {
+                    proxmox_vm("v") {
+                        host("h:8006"); node("pve"); auth_token("x"); template("t")
+                        cloud_init("local:snippets/aeo-agent-init.yaml"); agent(1)
+                    }
+                }
+                aeocha.expect_str(get_pve_cloud_init("v")).to_equal_str("local:snippets/aeo-agent-init.yaml")
+                aeocha.expect_int(get_pve_agent("v")).to_equal(1)
+            }
+            aeocha.it("are absent/off when not declared (default: bare template, hypervisor probe)") callback {
+                reset_nodes()
+                system("pvci") {
+                    proxmox_vm("v") { host("h:8006"); node("pve"); auth_token("x"); template("t") }
+                }
+                aeocha.expect_str(get_pve_cloud_init("v")).to_equal_str("")
+                aeocha.expect_int(get_pve_agent("v")).to_equal(0)
+            }
         }
 
         aeocha.describe("the proxmox check-gate") {

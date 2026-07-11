@@ -347,8 +347,26 @@ Gaps:
       follow-ups: (3) POST-PROVISION / in-guest completion — see the dedicated item
       below; (4) TLS CA/fingerprint pin (driver currently set_insecure). See token
       hardening below.
-- [ ] **PVE post-provision: complete the node IN-GUEST via aeo-agent (not by baking
-      the template).** DECISION (2026-07-11, debated + spiked live): the template
+- [~] **PVE post-provision: complete the node IN-GUEST via cloud-init (RUNG 1 LIVE-
+      PROVEN 2026-07-11); aeo-agent seeding is the next layer.** BUILT + proven:
+      compose grammar `cloud_init(snippet)` + `agent(on)` (+ getters, reset, exports,
+      model spec 9); driver_proxmox up() sets `cicustom` from cloud_init() with the
+      LEAST-PRIV token (proven: referencing a snippet needs only VM-write, not
+      storage-write — operator places the file, token references it); probe()
+      upgraded so `agent(1)` waits for the qemu-guest-agent to RESPOND (guest OS
+      alive) before UP, not just "hypervisor running". LIVE: `aeo up` on a
+      cloud_init+agent node -> clone -> driver-set cicustom -> guest installs
+      qemu-guest-agent -> agent-probe 200 -> promoted UP; `AEO_PROVISIONED` marker
+      confirmed in-guest; `aeo down` clean. examples/checks/proxmox_cloudinit.yaml is
+      the operator snippet (installs guest-agent + marker; has the aeo-agent-seeding
+      hook stubbed). TOKEN: added VM.GuestAgent.Audit (READ-ONLY ping only; Exec/
+      Unrestricted/FileRead/Write still excluded — did NOT weaken any denial, host
+      spec still 4/4). NEXT LAYER (the aeo-agent DOER): extend the snippet's runcmd
+      to fetch+launch bin/aeo-agent with AEO_NODE/AEO_TOKEN/AEO_RENDEZVOUS seeded
+      (token via lib/secrets), so the agent completes the node + runs its workload
+      CONTAINER (driver_linux) and reports outward; probe() then checks the workload,
+      not just guest liveness. The design/layering below stands as the plan for it.
+      ORIGINAL DECISION (2026-07-11, debated + spiked live): the template
       stays a GENERIC cloud image; the node's identity is completed at runtime from
       inside, by aeo-agent (aeo's native "act inside, report outward" recursion — a
       PVE VM is just another boundary; the agent one level down completes it). Baking
