@@ -7,6 +7,7 @@
 import aeocha
 import compose (
     system, container, load_balancer, listens, publish, balance_to, lb_health, balancer_weight,
+    breaker, cache,
     health_retry, every, up_within, down_within,
     reset_nodes
 )
@@ -107,6 +108,24 @@ main() {
             e = lb_env("web")
             aeocha.expect_int(_has(e, "AEO_LB_HEALTH_INTERVAL=500")).to_be_truthy()
             aeocha.expect_int(_has(e, "AEO_LB_HEALTH_UNHEALTHY=20")).to_be_truthy()
+        }
+        // breaker/cache render into AEO_LB_BREAKER/AEO_LB_CACHE, comma->semicolon
+        // (driver_linux's -e splitter is comma-delimited, so values are ';'-joined).
+        aeocha.it("renders breaker + cache with ';' (comma-safe for -e)") callback {
+            reset_nodes()
+            system("s7") {
+                lb = load_balancer("web", "container") {
+                    publish(9000)
+                    balance_to(8080) {
+                        breaker(5, 30000, 1)
+                        cache(1000, 65536, 60, "method_url_vary")
+                    }
+                    a1 = container("app-1") { listens(8080) }
+                }
+            }
+            e = lb_env("web")
+            aeocha.expect_int(_has(e, "AEO_LB_BREAKER=5;30000;1")).to_be_truthy()
+            aeocha.expect_int(_has(e, "AEO_LB_CACHE=1000;65536;60;method_url_vary")).to_be_truthy()
         }
         // Defaults when no health_retry window is declared: interval falls to
         // get_interval's 1000 default; down_within unset => unhealthy 3.

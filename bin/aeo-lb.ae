@@ -18,11 +18,55 @@
 //   AEO_LB_HEALTH_HEALTHY    healthy_threshold (consecutive OK to readmit)
 //   AEO_LB_HEALTH_UNHEALTHY  unhealthy_threshold (consecutive fail to eject)
 //
-import std.http (http_server_create, http_server_set_host, http_server_start_raw)
+import std.http (http_server_create, http_server_set_host, http_server_start_raw,
+                 http_server_use_middleware, request_path, request_body,
+                 http_response_set_status, http_response_set_body)
 import std.http.proxy (upstream_pool_new, upstream_add, health_checks_enable,
-                       opts_new, mount)
+                       breaker_configure, cache_new, opts_new, opts_bind_cache, mount,
+                       upstream_drain, upstream_undrain)
 import std.os (os_getenv)
 import std.string (string_length, string_get_int, string_index_of, string_substring)
+
+// Admin MIDDLEWARE for zero-downtime rollout (docs §8): the driver POSTs a
+// backend URL as the body to drain/undrain it from the LIVE pool. This MUST be a
+// middleware (not a route) registered BEFORE the reverse-proxy middleware — the
+// proxy's "/" prefix matches everything and runs before the route table, so a
+// route would be shadowed. Middleware returns 1 to continue the chain, 0 to
+// short-circuit (handled). The pool ptr arrives as user_data. Draining stops NEW
+// traffic to an upstream; in-flight requests finish — then aeo can safely halt it.
+@c_callback mw_admin(req: ptr, res: ptr, ud: ptr) -> int {
+    path = request_path(req)
+    if path == "/_aeo/drain" {
+        _admin_op(req, res, ud, 1)
+        return 0
+    }
+    if path == "/_aeo/undrain" {
+        _admin_op(req, res, ud, 0)
+        return 0
+    }
+    return 1        // not an admin path — continue to the proxy
+}
+_admin_op(req: ptr, res: ptr, pool: ptr, is_drain: int) {
+    url = request_body(req)
+    if string_length(url) == 0 {
+        http_response_set_status(res, 400)
+        http_response_set_body(res, "empty backend url")
+        return
+    }
+    e = ""
+    if is_drain == 1 {
+        e = upstream_drain(pool, url)
+    } else {
+        e = upstream_undrain(pool, url)
+    }
+    if string_length(e) > 0 {
+        http_response_set_status(res, 500)
+        http_response_set_body(res, e)
+        return
+    }
+    http_response_set_status(res, 200)
+    http_response_set_body(res, "ok ${url}")
+}
 
 main() {
     host = _env("AEO_LB_HOST", "0.0.0.0")
@@ -60,6 +104,20 @@ main() {
         }
     }
 
+    // Circuit breaker (optional): "failures;open_ms;half_open".
+    brk = _env("AEO_LB_BREAKER", "")
+    if string_length(brk) > 0 {
+        bf = _field_int(brk, 0, 5)
+        bo = _field_int(brk, 1, 30000)
+        bh = _field_int(brk, 2, 1)
+        berr = breaker_configure(pool, bf, bo, bh)
+        if string_length(berr) > 0 {
+            println("aeo-lb: breaker_configure: ${berr}")
+        } else {
+            println("aeo-lb: circuit breaker — ${_i(bf)} fails, open ${_i(bo)}ms, ${_i(bh)} half-open")
+        }
+    }
+
     server = http_server_create(port)
     if server == 0 {
         println("aeo-lb: server_create failed on ${port}")
@@ -67,6 +125,27 @@ main() {
     }
     http_server_set_host(server, host)
     opts = opts_new()
+
+    // Response cache (optional): "entries;max_body;ttl_sec;key_strategy".
+    cac = _env("AEO_LB_CACHE", "")
+    if string_length(cac) > 0 {
+        ce = _field_int(cac, 0, 1000)
+        cm = _field_int(cac, 1, 65536)
+        ct = _field_int(cac, 2, 60)
+        ck = _field(cac, 3, "method_url_vary")
+        cache = cache_new(ce, cm, ct, ck)
+        if cache == 0 {
+            println("aeo-lb: cache_new failed (bad key strategy '${ck}'?)")
+        } else {
+            _ = opts_bind_cache(opts, cache)
+            println("aeo-lb: response cache — ${_i(ce)} entries, ${_i(ct)}s ttl, key=${ck}")
+        }
+    }
+
+    // Admin middleware FIRST — it must run before the reverse-proxy middleware
+    // (registered by mount below) so /_aeo/* is handled here, not proxied.
+    http_server_use_middleware(server, mw_admin, pool)
+
     merr = mount(server, "/", pool, opts)
     if string_length(merr) > 0 {
         println("aeo-lb: mount: ${merr}")
@@ -129,4 +208,37 @@ _env_int(name: string, fallback: int) -> int {
 }
 _i(n: int) -> string {
     return "${n}"
+}
+
+// The idx-th ';'-separated field of `s`, or `fallback` if absent/empty.
+_field(s: string, idx: int, fallback: string) -> string {
+    rest = s
+    i = 0
+    while i < idx {
+        sc = string_index_of(rest, ";")
+        if sc < 0 {
+            return fallback
+        }
+        rest = string_substring(rest, sc + 1, string_length(rest))
+        i = i + 1
+    }
+    sc = string_index_of(rest, ";")
+    if sc >= 0 {
+        rest = string_substring(rest, 0, sc)
+    }
+    if string_length(rest) == 0 {
+        return fallback
+    }
+    return rest
+}
+_field_int(s: string, idx: int, fallback: int) -> int {
+    f = _field(s, idx, "")
+    if string_length(f) == 0 {
+        return fallback
+    }
+    n = string_get_int(f)
+    if n < 0 {
+        return fallback
+    }
+    return n
 }

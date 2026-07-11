@@ -10,9 +10,10 @@
 import aeocha
 import compose (
     load_balancer, container, listens, publish, publish_map,
-    balance_to, algorithm, lb_health, balancer_weight,
+    balance_to, algorithm, lb_health, balancer_weight, breaker, cache,
     is_load_balancer, get_lb_substrate, get_listens, get_publish, get_publish_inner,
     get_balance_to, get_weight, get_lb_health_path, get_lb_health_expect,
+    get_lb_breaker, get_lb_cache,
     lb_backends, lb_algorithm, lb_weight_ignored,
     lb_model_errors, reset_nodes
 )
@@ -65,17 +66,46 @@ main() {
             }
         }
 
+        aeocha.describe("circuit breaker + response cache") {
+            aeocha.it("records breaker() and cache() on the LB, comma-joined") callback {
+                reset_nodes()
+                load_balancer("web", "container") {
+                    publish(9000)
+                    balance_to(8080) {
+                        breaker(5, 30000, 1)
+                        cache(1000, 65536, 60, "method_url_vary")
+                    }
+                    container("app-1") { listens(8080) }
+                }
+                aeocha.expect_str(get_lb_breaker("web")).to_equal_str("5,30000,1")
+                aeocha.expect_str(get_lb_cache("web")).to_equal_str("1000,65536,60,method_url_vary")
+            }
+            aeocha.it("are absent (empty) when not declared") callback {
+                reset_nodes()
+                load_balancer("web", "container") {
+                    publish(9000)
+                    balance_to(8080)
+                    container("app-1") { listens(8080) }
+                }
+                aeocha.expect_str(get_lb_breaker("web")).to_equal_str("")
+                aeocha.expect_str(get_lb_cache("web")).to_equal_str("")
+            }
+        }
+
         aeocha.describe("algorithm inference (§5)") {
             aeocha.it("infers weighted_rr because backends carry weights") callback {
+                reset_nodes(); declare_ok()   // independent of suite ordering
                 aeocha.expect_str(lb_algorithm("web")).to_equal_str("weighted_rr")
             }
             aeocha.it("no weight is ignored (inferred algo honours them)") callback {
+                reset_nodes(); declare_ok()
                 aeocha.expect_int(lb_weight_ignored("web")).to_equal(0)
             }
         }
 
         aeocha.describe("a well-formed tree has NO model errors") {
             aeocha.it("lb_model_errors is empty") callback {
+                reset_nodes(); declare_ok()
                 aeocha.expect_str(lb_model_errors()).to_equal_str("")
             }
         }

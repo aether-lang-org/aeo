@@ -30,7 +30,7 @@ import std.string (
 import std.list
 
 exports (
-    up, down, probe, available, ensure_image,
+    up, down, probe, available, ensure_image, drain, undrain,
     backend_specs, lb_env, lb_image, lb_net, lb_binary, lb_health_timing
 )
 
@@ -232,7 +232,36 @@ lb_env(lb: string) -> string {
         e = "${e},AEO_LB_HEALTH_UNHEALTHY=${_unhealthy(lb)}"
         e = "${e},AEO_LB_HEALTH_HEALTHY=${_healthy(lb)}"
     }
+    // Circuit breaker + response cache (optional). Their model values are stored
+    // comma-joined; re-join with ';' so driver_linux's comma env-splitter doesn't
+    // shred them (same reason backends use ';'). aeo-lb splits these on ';'.
+    br = compose.get_lb_breaker(lb)
+    if string_length(br) > 0 {
+        e = "${e},AEO_LB_BREAKER=${_commas_to_semis(br)}"
+    }
+    ca = compose.get_lb_cache(lb)
+    if string_length(ca) > 0 {
+        e = "${e},AEO_LB_CACHE=${_commas_to_semis(ca)}"
+    }
     return e
+}
+
+// Replace every ',' with ';' (breaker/cache values are comma-joined in the model
+// but must be comma-free to survive driver_linux's -e env splitter).
+_commas_to_semis(s: string) -> string {
+    out = ""
+    n = string_length(s)
+    i = 0
+    while i < n {
+        c = string_substring(s, i, i + 1)
+        if c == "," {
+            out = string_concat(out, ";")
+        } else {
+            out = string_concat(out, c)
+        }
+        i = i + 1
+    }
+    return out
 }
 
 // ---- §6 health-timing lowering (system health_retry -> pool checker) --------
@@ -308,4 +337,48 @@ down(res_name: string) -> string {
 
 probe(res_name: string, _health: string, _unused: string) -> int {
     return driver_linux.probe(res_name, "", "")
+}
+
+// drain/undrain a backend from the LIVE pool (zero-downtime rollout, docs §8).
+// POSTs the backend URL to the LB container's admin route (published on the host
+// at publish()). `backend` is a child NAME; the URL is http://<backend>:<listens>,
+// matching what backend_specs registered. Returns "" on success else an error.
+drain(lb: string, backend: string) -> string {
+    return _admin(lb, "/_aeo/drain", backend)
+}
+undrain(lb: string, backend: string) -> string {
+    return _admin(lb, "/_aeo/undrain", backend)
+}
+_admin(lb: string, route: string, backend: string) -> string {
+    port = compose.get_publish(lb)
+    if string_length(port) == 0 {
+        return "aeo: load_balancer '${lb}' has no publish() port for admin"
+    }
+    listens = compose.get_listens(backend)
+    if string_length(listens) == 0 {
+        return "aeo: backend '${backend}' has no listens() port"
+    }
+    url = "http://${backend}:${listens}"
+    av = list_new()
+    list_add(av, "-s")
+    list_add(av, "-o")
+    list_add(av, "/dev/null")
+    list_add(av, "-w")
+    list_add(av, "%{http_code}")
+    list_add(av, "--max-time")
+    list_add(av, "5")
+    list_add(av, "-X")
+    list_add(av, "POST")
+    list_add(av, "--data")
+    list_add(av, url)
+    list_add(av, "http://127.0.0.1:${port}${route}")
+    out, status, err = run_capture("/usr/bin/curl", av, null)
+    list_free(av)
+    if err != "" {
+        return "aeo: admin ${route} spawn failed: ${err}"
+    }
+    if out != "200" {
+        return "aeo: admin ${route} for '${backend}' returned HTTP ${out}"
+    }
+    return ""
 }

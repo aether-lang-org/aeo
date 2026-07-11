@@ -432,10 +432,24 @@ are later thickening.
    default + unhealthy 3. Unit-tested (`500ms`/`10s` → `500;500;20;2`); live-proven
    — the lowered `AEO_LB_HEALTH_*` env reached the container and a stopped backend
    ejected within the 10s `down_within` window.
-4. **Later thickening:** drain/undrain in reconcile, circuit breaker, cache; `:vm`
-   substrate; then the `:host` and multi-host epics (§7); and, gated on aether#1092,
-   the L4 TCP balancer (§8). (The aeo-lb image build is already folded in — the
-   driver bakes it on demand; see the step-3 finding above.)
+4. **Later thickening:**
+   - **Circuit breaker + response cache — DONE.** Grammar `breaker(failures,
+     open_ms, half_open)` and `cache(entries, max_body, ttl_sec, key_strategy)` in
+     `balance_to{}`, rendered to `AEO_LB_BREAKER`/`AEO_LB_CACHE` (`;`-joined,
+     comma-safe) and consumed by aeo-lb via `breaker_configure` /
+     `cache_new`+`opts_bind_cache`. Live-proven: both reach the container and
+     configure; routing intact.
+   - **drain/undrain — DONE.** aeo-lb exposes an admin **middleware** (`POST
+     /_aeo/drain` | `/_aeo/undrain`, backend URL in the body) that drains an
+     upstream from the LIVE pool; `driver_loadbalancer.drain/undrain` POST to it.
+     It had to be a middleware registered BEFORE the reverse-proxy middleware —
+     the proxy's `/` prefix matches everything and runs before the route table, so
+     a route is shadowed. Live-proven: draining a backend shifts ALL traffic off it
+     (zero-downtime), undrain restores the split. (Wiring it into an automated
+     rolling-cutover in the runner is the remaining reconcile step.)
+   - **Still ahead:** `:vm` substrate; the `:host`/multi-host epics (§7); and the
+     L4 TCP balancer (§8). (The aeo-lb image build is already folded in — the
+     driver bakes it on demand; see the step-3 finding above.)
 
 ---
 

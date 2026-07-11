@@ -58,8 +58,10 @@ exports (
     get_suspended, get_started, get_constraints, get_netpolicy, has_egress_fqdn, egress_fqdn_csv, pf_rules_for,
     limit, limit_mem, limit_vmem, limit_cpu, limit_maxproc, limit_openfiles, get_rctl,
     load_balancer, listens, publish, publish_map, balance_to, algorithm, lb_health, balancer_weight,
+    breaker, cache,
     is_load_balancer, get_lb_substrate, get_listens, get_publish, get_publish_inner,
     get_balance_to, get_weight, get_lb_health_path, get_lb_health_expect,
+    get_lb_breaker, get_lb_cache,
     lb_backends, lb_algorithm, lb_weight_ignored, lb_model_errors,
     describe_tree, dns_hosts
 )
@@ -502,6 +504,19 @@ algorithm(_ctx: ptr, a: string) {
 lb_health(_ctx: ptr, path: string, expect: int) {
     config.put("aeo.cmp.lbhealthpath.${_ctx}", path)
     config.put("aeo.cmp.lbhealthexpect.${_ctx}", string_from_int(expect))
+}
+// breaker(failures, open_ms, half_open) — per-upstream CIRCUIT BREAKER: after
+// `failures` consecutive errors the upstream is tripped OPEN for `open_ms`, then
+// `half_open` trial requests probe recovery. Maps to std.http.proxy
+// breaker_configure. Inside balance_to{} — `_ctx` is the LB name.
+breaker(_ctx: ptr, failures: int, open_ms: int, half_open: int) {
+    config.put("aeo.cmp.lbbreaker.${_ctx}", "${string_from_int(failures)},${string_from_int(open_ms)},${string_from_int(half_open)}")
+}
+// cache(entries, max_body, ttl_sec, key_strategy) — LRU RESPONSE CACHE across the
+// pool. key_strategy: "url" | "method_url" | "method_url_vary". Maps to
+// std.http.proxy cache_new + opts_bind_cache.
+cache(_ctx: ptr, entries: int, max_body: int, ttl_sec: int, key_strategy: string) {
+    config.put("aeo.cmp.lbcache.${_ctx}", "${string_from_int(entries)},${string_from_int(max_body)},${string_from_int(ttl_sec)},${key_strategy}")
 }
 
 // balancer_weight(w) — per-backend pool weight (§4). Role-relative: only legal on
@@ -1023,6 +1038,8 @@ reset_nodes() {
         config.put("aeo.cmp.balanceto.${nm}", "")
         config.put("aeo.cmp.lbalgo.${nm}", "")
         config.put("aeo.cmp.weight.${nm}", "")
+        config.put("aeo.cmp.lbbreaker.${nm}", "")
+        config.put("aeo.cmp.lbcache.${nm}", "")
         i = i + 1
     }
     config.put("aeo.cmp.count", "0")
@@ -1066,6 +1083,8 @@ get_balance_to(nm: string) -> string    { return config.get("aeo.cmp.balanceto.$
 get_weight(nm: string) -> string        { return config.get("aeo.cmp.weight.${nm}") }
 get_lb_health_path(nm: string) -> string   { return config.get("aeo.cmp.lbhealthpath.${nm}") }
 get_lb_health_expect(nm: string) -> string { return config.get("aeo.cmp.lbhealthexpect.${nm}") }
+get_lb_breaker(nm: string) -> string        { return config.get("aeo.cmp.lbbreaker.${nm}") }
+get_lb_cache(nm: string) -> string          { return config.get("aeo.cmp.lbcache.${nm}") }
 
 // The backends of an LB, in declaration order, comma-joined. Membership IS the
 // set of children (get_host(child) == lb), so the pool can never drift.
