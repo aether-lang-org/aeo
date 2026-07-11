@@ -1,0 +1,100 @@
+# release-aeo-agent.yml — build aeo-agent (linux-amd64, glibc) and publish it as a
+# GitHub Release asset, so a proxmox_vm guest's cloud-init can `curl` the binary in
+# (the aeo-agent "doer" delivery path) instead of baking it or shipping it over ssh.
+#
+# WHY a release asset: a PVE cicustom snippet is text-only and PVE has no snippet-
+# write API, so the guest must FETCH the agent. GitHub Releases is a durable,
+# globally-reachable, checksummed artifact host — the guest curls the asset and
+# VERIFIES a pinned SHA256 before running it (attest()-style, fail-closed). See
+# examples/checks/proxmox_cloudinit.yaml + docs.
+#
+# TRIGGER: a tag matching `aeo-agent-v*` (e.g. aeo-agent-v0.1.0), or manual dispatch.
+# We use a DEDICATED tag prefix so releasing the agent is decoupled from any aeo
+# versioning. The job prints the SHA256 in its summary so you can pin it in the
+# cloud-init snippet (AEO_AGENT_SHA256).
+#
+# TARGET MATCH: builds on ubuntu-latest -> glibc dynamic linux-amd64, which is what
+# a Debian/Ubuntu cloud image runs (verified: the local build is glibc-dynamic,
+# interpreter /lib64/ld-linux-x86-64.so.2). A guest on a different libc/arch would
+# need a matching asset — a matrix follow-up.
+
+name: release-aeo-agent
+
+on:
+  push:
+    tags:
+      - 'aeo-agent-v*'
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Optional: aether ref (tag/branch/sha) to build the toolchain from'
+        required: false
+        default: ''
+
+permissions:
+  contents: write        # create the release + upload the asset
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout aeo
+        uses: actions/checkout@v4
+
+      - name: Install build prerequisites
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq build-essential curl tar
+
+      - name: Install the Aether toolchain (ae)
+        # get.sh builds ae from source (Aether -> C -> make); no chicken-and-egg.
+        # AETHER_REF pins the toolchain version (input, else the latest tag).
+        run: |
+          curl -sSL https://raw.githubusercontent.com/aether-lang-org/aether/main/get.sh \
+            | AETHER_REF="${{ github.event.inputs.ref }}" PREFIX=/usr/local sh
+          ae --version
+
+      - name: Build aeo-agent (linux-amd64, glibc)
+        run: |
+          ae build bin/aeo-agent.ae -o aeo-agent-linux-amd64 --lib lib
+          file aeo-agent-linux-amd64
+          chmod +x aeo-agent-linux-amd64
+
+      - name: Checksum
+        id: sum
+        run: |
+          sha256sum aeo-agent-linux-amd64 | tee aeo-agent-linux-amd64.sha256
+          echo "sha256=$(cut -d' ' -f1 aeo-agent-linux-amd64.sha256)" >> "$GITHUB_OUTPUT"
+
+      - name: Summary (pin this SHA256 in the cloud-init snippet)
+        run: |
+          {
+            echo "### aeo-agent released"
+            echo ""
+            echo "- asset: \`aeo-agent-linux-amd64\`"
+            echo "- **SHA256:** \`${{ steps.sum.outputs.sha256 }}\`"
+            echo ""
+            echo "Pin it in the guest cloud-init: \`AEO_AGENT_SHA256=${{ steps.sum.outputs.sha256 }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create/attach the GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            aeo-agent-linux-amd64
+            aeo-agent-linux-amd64.sha256
+          # For a manual dispatch (no tag), fall back to a rolling pre-release tag so
+          # the asset URL is stable for testing.
+          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || 'aeo-agent-dev' }}
+          prerelease: ${{ github.ref_type != 'tag' }}
+          body: |
+            aeo-agent (linux-amd64, glibc) — the in-guest orchestration agent a
+            proxmox_vm fetches via cloud-init to complete its node and run its
+            workload container.
+
+            **SHA256:** `${{ steps.sum.outputs.sha256 }}`
+
+            Verify + run in cloud-init:
+            ```
+            curl -fsSL <this-asset-url> -o /usr/local/bin/aeo-agent
+            echo "<sha256>  /usr/local/bin/aeo-agent" | sha256sum -c -
+            chmod +x /usr/local/bin/aeo-agent
+            ```
