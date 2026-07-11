@@ -31,10 +31,11 @@ import std.string (string_length, string_char_at, string_from_int, string_substr
 
 exports (
     system,
-    bhyve_vm, freebsd_vm, get_flavor, kvm_vm, proxmox_vm,
+    bhyve_vm, freebsd_vm, get_flavor, kvm_vm, proxmox_vm, proxmox_ct,
     host, node, auth_token, storage, bridge, template, cloud_init, agent,
+    ostemplate, rootfs,
     get_pve_host, get_pve_node, get_pve_token, get_pve_storage, get_pve_bridge, get_pve_template,
-    get_pve_cloud_init, get_pve_agent,
+    get_pve_cloud_init, get_pve_agent, get_pve_ostemplate, get_pve_rootfs,
     proxmox_model_errors,
     resource,
     container, lxc, kvm, jail, bhyve, bwrap, nspawn, firecracker, kata,
@@ -178,6 +179,22 @@ kvm_vm(nm: string) -> string {
 proxmox_vm(nm: string) -> string {
     config.put("aeo.cmp.curhost", "")
     resource(nm, "proxmox")
+    config.put("aeo.cmp.curhost", nm)
+    return nm
+}
+
+// proxmox_ct(nm) — an LXC CONTAINER on a remote Proxmox host, the sibling of
+// proxmox_vm. Same remote-API model (host/node/auth_token/storage/bridge), but a
+// CT is fundamentally different from a VM: it is CREATED from an OS TEMPLATE TARBALL
+// (ostemplate — a vztmpl on storage, e.g. "local:vztmpl/debian-12-standard...zst"),
+// NOT cloned from a VM template. Lifecycle is /nodes/<node>/lxc (create/start/stop/
+// destroy) not /qemu. Attributes: ostemplate() (the tarball) + rootfs() (the root
+// disk spec, e.g. "local-lvm:2" for 2 GiB). LIVE-PROVEN create->start->stop->destroy
+// against a real box with the least-priv token (create needs Datastore read on the
+// vztmpl storage — see proxmox_token_setup.sh). Like proxmox_vm it's a flat leaf.
+proxmox_ct(nm: string) -> string {
+    config.put("aeo.cmp.curhost", "")
+    resource(nm, "proxmox_ct")
     config.put("aeo.cmp.curhost", nm)
     return nm
 }
@@ -638,6 +655,13 @@ auth_token(_ctx: ptr, v: string) { config.put("aeo.cmp.pvetoken.${_ctx}", v) }
 storage(_ctx: ptr, v: string)    { config.put("aeo.cmp.pvestorage.${_ctx}", v) }
 bridge(_ctx: ptr, v: string)     { config.put("aeo.cmp.pvebridge.${_ctx}", v) }
 template(_ctx: ptr, v: string)   { config.put("aeo.cmp.pvetemplate.${_ctx}", v) }
+
+// proxmox_ct attributes. ostemplate() is the OS TARBALL a CT is created from (a
+// vztmpl volid, e.g. "local:vztmpl/debian-12-standard_12.12-1_amd64.tar.zst").
+// rootfs() is the root disk spec ("<storage>:<GiB>", e.g. "local-lvm:2"; default
+// "<storage>:4" if unset). These are the CT analogs of proxmox_vm's template().
+ostemplate(_ctx: ptr, v: string) { config.put("aeo.cmp.pveostemplate.${_ctx}", v) }
+rootfs(_ctx: ptr, v: string)     { config.put("aeo.cmp.pverootfs.${_ctx}", v) }
 
 // cloud_init(snippet) — POST-PROVISION completion. `snippet` is a PVE cicustom
 // user-data reference (e.g. "local:snippets/aeo-agent-init.yaml") the OPERATOR
@@ -1109,6 +1133,8 @@ reset_nodes() {
         config.put("aeo.cmp.pvetemplate.${nm}", "")
         config.put("aeo.cmp.pvecinit.${nm}", "")
         config.put("aeo.cmp.pveagent.${nm}", "")
+        config.put("aeo.cmp.pveostemplate.${nm}", "")
+        config.put("aeo.cmp.pverootfs.${nm}", "")
         i = i + 1
     }
     config.put("aeo.cmp.count", "0")
@@ -1442,6 +1468,9 @@ get_pve_agent(nm: string) -> int {
     if v == "1" { return 1 }
     return 0
 }
+// proxmox_ct getters.
+get_pve_ostemplate(nm: string) -> string { return config.get("aeo.cmp.pveostemplate.${nm}") }
+get_pve_rootfs(nm: string) -> string     { return config.get("aeo.cmp.pverootfs.${nm}") }
 
 // proxmox_model_errors() — the honest check-gate for proxmox_vm nodes. A remote
 // substrate can silently do nothing if its endpoint/credential is missing, so we
@@ -1469,6 +1498,22 @@ proxmox_model_errors() -> string {
             }
             if get_pve_template(nm) == "" {
                 out = _pve_err(out, "proxmox_vm '${nm}' has no template() — the clone source (an operator-provisioned template, e.g. \"debian-12-cloudinit\") is required")
+            }
+        }
+        if config.get("aeo.cmp.kind.${nm}") == "proxmox_ct" {
+            // CT shares host/node/token; but the WHAT is an ostemplate tarball, not a
+            // VM template. Same loud-fail discipline.
+            if get_pve_host(nm) == "" {
+                out = _pve_err(out, "proxmox_ct '${nm}' has no host() — the PVE API endpoint (e.g. \"192.168.0.204:8006\") is required")
+            }
+            if get_pve_node(nm) == "" {
+                out = _pve_err(out, "proxmox_ct '${nm}' has no node() — the PVE cluster node to place the CT on (e.g. \"pve\") is required")
+            }
+            if get_pve_token(nm) == "" {
+                out = _pve_err(out, "proxmox_ct '${nm}' has no auth_token() — set it to getenv(\"PVE_TOKEN\"); an empty value usually means PVE_TOKEN is unset (see examples/checks/proxmox_token_setup.md)")
+            }
+            if get_pve_ostemplate(nm) == "" {
+                out = _pve_err(out, "proxmox_ct '${nm}' has no ostemplate() — the OS template tarball (a vztmpl volid, e.g. \"local:vztmpl/debian-12-standard_12.12-1_amd64.tar.zst\") is required")
             }
         }
         i = i + 1

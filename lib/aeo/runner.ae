@@ -643,6 +643,11 @@ driver_up(nm: string, k: string) -> string {
         // compose model; the driver is a pure API client (std.http.client).
         return driver_proxmox.up(nm)
     }
+    if k == "proxmox_ct" {
+        // REMOTE LXC container on PVE (driver_proxmox, /lxc path): create from an
+        // ostemplate tarball -> start. Same driver, kind-branched internally.
+        return driver_proxmox.up(nm)
+    }
     if k == "bwrap" {
         // UNPRIVILEGED bubblewrap sandbox (driver_bwrap): the lightest tier, no
         // host setup. image() is an optional rootfs dir ("" = sandbox the host
@@ -732,6 +737,10 @@ driver_down(nm: string, k: string) -> string {
         // VM that isn't there is already down).
         return driver_proxmox.down(nm)
     }
+    if k == "proxmox_ct" {
+        // Remote PVE LXC: stop -> destroy(--purge) over the /lxc API (idempotent).
+        return driver_proxmox.down(nm)
+    }
     if k == "lxc" {
         return driver_lxc.down(nm)
     }
@@ -799,6 +808,10 @@ driver_probe(nm: string, k: string, health: string) -> int {
         // "the hypervisor reports it running" is the readiness signal.
         return driver_proxmox.probe(nm)
     }
+    if k == "proxmox_ct" {
+        // Remote PVE LXC liveness == status/current is "running".
+        return driver_proxmox.probe(nm)
+    }
     if k == "lxc" {
         return driver_lxc.probe(nm, health, "")
     }
@@ -833,7 +846,8 @@ _proxmox_preflight() -> int {
     i = 0
     while i < n {
         nm = compose.name_at(i)
-        if compose.get_kind(nm) == "proxmox" {
+        kk = compose.get_kind(nm)
+        if kk == "proxmox" || kk == "proxmox_ct" {
             if driver_proxmox.reachable(nm) == 0 {
                 // box down / offline / away — NOT a model error; warn and continue.
                 println("aeo: [${nm}] NOTE — PVE host ${compose.get_pve_host(nm)} unreachable; skipping remote preflight (the data model is validated; run `aeo check` where the box is reachable to verify host readiness)")
@@ -1335,6 +1349,9 @@ _kind_has_driver(k: string) -> int {
         return 1
     }
     if k == "proxmox" {
+        return 1
+    }
+    if k == "proxmox_ct" {
         return 1
     }
     if k == "lxc" {
@@ -2999,6 +3016,9 @@ _kind_runnable(k: string, fam: string) -> int {
         // of host()/auth_token(), checked by proxmox_model_errors() and (at up)
         // by the driver_proxmox arm (the documented frontier).
         return 1
+    }
+    if k == "proxmox_ct" {
+        return 1                        // remote LXC — same host-family-agnostic remote substrate
     }
     if k == "bwrap" {
         return _eq(fam, "linux")

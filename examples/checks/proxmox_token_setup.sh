@@ -54,7 +54,8 @@ ROLE="aeo-deployer"
 POOL="${PVE_POOL:-aeo-prod}"
 TOKEN_NAME="deploy"
 TOKENID="${SVC_USER}!${TOKEN_NAME}"
-STORAGE="${PVE_STORAGE:-local-lvm}"                    # the ONE datastore aeo may use
+STORAGE="${PVE_STORAGE:-local-lvm}"                    # the ONE datastore aeo may use (VM/CT disks)
+TEMPLATE_STORE="${PVE_TEMPLATE_STORE:-local}"          # where CT ostemplate tarballs (vztmpl) live
 TTL_DAYS="${PVE_TOKEN_TTL_DAYS:-30}"                   # short-lived by default
 API="https://${PVE_HOST}/api2/json"
 
@@ -138,6 +139,17 @@ api PUT "/access/acl" --data-urlencode "path=/pool/${POOL}" \
 api PUT "/access/acl" --data-urlencode "path=/storage/${STORAGE}" \
     --data-urlencode "roles=${ROLE}" --data-urlencode "users=${SVC_USER}" \
     --data-urlencode "propagate=1" >/dev/null
+# CT template storage — an LXC (proxmox_ct) is CREATED from an ostemplate tarball
+# (vztmpl) which usually lives on a DIFFERENT storage than the VM disks (e.g.
+# 'local' for the tarball, 'local-lvm' for rootfs). The token needs Datastore read
+# there too, else `proxmox_ct` create -> 403 (Datastore.AllocateSpace|Audit on
+# /storage/local). VMs don't need this (they clone a VM template in the pool).
+# Grant the same role on TEMPLATE_STORE (default 'local'); skip if it == STORAGE.
+if [ "$TEMPLATE_STORE" != "$STORAGE" ]; then
+    api PUT "/access/acl" --data-urlencode "path=/storage/${TEMPLATE_STORE}" \
+        --data-urlencode "roles=${ROLE}" --data-urlencode "users=${SVC_USER}" \
+        --data-urlencode "propagate=1" >/dev/null 2>&1 || true
+fi
 # SDN zone grant (bridge attach). Best-effort: on a box with no SDN zones the
 # path may not resolve; the vmbr bridge attach still works via the storage/pool
 # grant on many setups. Left explicit so the intent is auditable.
@@ -166,6 +178,13 @@ api PUT "/access/acl" --data-urlencode "path=/pool/${POOL}" \
 api PUT "/access/acl" --data-urlencode "path=/storage/${STORAGE}" \
     --data-urlencode "roles=${ROLE}" --data-urlencode "tokens=${TOKENID}" \
     --data-urlencode "propagate=1" >/dev/null
+# CT template storage on the TOKEN too (privsep: effective perms = user ∩ token, so
+# both must carry it — a real live finding). See the user grant above.
+if [ "$TEMPLATE_STORE" != "$STORAGE" ]; then
+    api PUT "/access/acl" --data-urlencode "path=/storage/${TEMPLATE_STORE}" \
+        --data-urlencode "roles=${ROLE}" --data-urlencode "tokens=${TOKENID}" \
+        --data-urlencode "propagate=1" >/dev/null 2>&1 || true
+fi
 api PUT "/access/acl" --data-urlencode "path=/sdn/zones" \
     --data-urlencode "roles=${ROLE}" --data-urlencode "tokens=${TOKENID}" \
     --data-urlencode "propagate=1" >/dev/null 2>&1 || true

@@ -12,10 +12,10 @@
 // by name — when host()/node()/auth_token()/template() is missing.
 
 import aeocha
-import compose (system, proxmox_vm)
-import compose (host, node, auth_token, storage, bridge, template, cloud_init, agent, cpus, memory, depends)
+import compose (system, proxmox_vm, proxmox_ct)
+import compose (host, node, auth_token, storage, bridge, template, cloud_init, agent, ostemplate, rootfs, cpus, memory, depends)
 import compose (get_pve_host, get_pve_node, get_pve_token, get_pve_storage, get_pve_bridge, get_pve_template)
-import compose (get_pve_cloud_init, get_pve_agent)
+import compose (get_pve_cloud_init, get_pve_agent, get_pve_ostemplate, get_pve_rootfs)
 import compose (get_depends, proxmox_model_errors, reset_nodes)
 import std.os
 import std.string (string_length, string_from_int)
@@ -90,6 +90,29 @@ main() {
                 }
                 aeocha.expect_str(get_pve_cloud_init("v")).to_equal_str("")
                 aeocha.expect_int(get_pve_agent("v")).to_equal(0)
+            }
+        }
+
+        aeocha.describe("proxmox_ct (LXC) grammar + gate") {
+            aeocha.it("records the CT's ostemplate + rootfs (its create source)") callback {
+                reset_nodes()
+                system("cttest") {
+                    proxmox_ct("web_ct") {
+                        host("h:8006"); node("pve"); auth_token("x")
+                        ostemplate("local:vztmpl/debian-12-standard_12.12-1_amd64.tar.zst")
+                        rootfs("local-lvm:2")
+                    }
+                }
+                aeocha.expect_str(get_pve_ostemplate("web_ct")).to_equal_str("local:vztmpl/debian-12-standard_12.12-1_amd64.tar.zst")
+                aeocha.expect_str(get_pve_rootfs("web_ct")).to_equal_str("local-lvm:2")
+                aeocha.expect_str(proxmox_model_errors()).to_equal_str("")   // well-formed CT is clean
+            }
+            aeocha.it("gate FIRES when a CT has no ostemplate()") callback {
+                reset_nodes()
+                system("cttest") {
+                    proxmox_ct("web_ct") { host("h:8006"); node("pve"); auth_token("x") }  // NO ostemplate
+                }
+                aeocha.expect_int(_has(proxmox_model_errors(), "proxmox_ct 'web_ct' has no ostemplate()")).to_be_truthy()
             }
         }
 

@@ -285,9 +285,17 @@ _eq(a: string, b: string) -> int {
     return 1
 }
 
+// The PVE API endpoint segment for this node's kind: "lxc" for a proxmox_ct
+// (CTs live under /nodes/<node>/lxc), else "qemu" (VMs). All the shared lifecycle
+// helpers (status/start/stop/destroy) key off this so one driver serves both.
+_ep(nm: string) -> string {
+    if compose.get_kind(nm) == "proxmox_ct" { return "lxc" }
+    return "qemu"
+}
+
 // status/current -> status string ("running"/"stopped"/"") for a known VMID.
 _status_of(nm: string, vmid: int) -> string {
-    r = _pve(nm, "GET", "/nodes/${compose.get_pve_node(nm)}/qemu/${string_from_int(vmid)}/status/current", list_new())
+    r = _pve(nm, "GET", "/nodes/${compose.get_pve_node(nm)}/${_ep(nm)}/${string_from_int(vmid)}/status/current", list_new())
     if _res_code(r) != "200" { return "" }
     d = _data(_res_body(r))
     if d == null { return "" }
@@ -396,11 +404,21 @@ preflight(nm: string) -> string {
     if string_length(av) > 0 { return av }
 
     out = ""
-    // template must be VISIBLE to the token, which (for a privsep token scoped to
-    // /pool) means it is a MEMBER of aeo's pool. resolve_vmid returns <0 if unseen.
-    tmpl = compose.get_pve_template(nm)
-    if resolve_vmid(nm, tmpl) < 0 {
-        out = _pf_err(out, "template '${tmpl}' is not visible to the token — it must be a MEMBER of aeo's pool so a least-priv token can clone it: `pvesh set /pools/aeo-prod --vms <templateid>` (see examples/checks/proxmox_token_setup.md)")
+    if compose.get_kind(nm) == "proxmox_ct" {
+        // A CT is created from an ostemplate TARBALL (a vztmpl volid). Verify it
+        // exists on its storage (the token needs Datastore read there — the setup
+        // grants /storage/local). NOT a pool-member VM template.
+        ost = compose.get_pve_ostemplate(nm)
+        if _vztmpl_exists(nm, ost) == 0 {
+            out = _pf_err(out, "ostemplate '${ost}' not found — download it on the host (`pveam download <store> <tmpl>`) and grant the token Datastore read on its storage (proxmox_token_setup.sh does this for 'local')")
+        }
+    } else {
+        // VM: template must be VISIBLE to the token, which (for a privsep token
+        // scoped to /pool) means it is a MEMBER of aeo's pool.
+        tmpl = compose.get_pve_template(nm)
+        if resolve_vmid(nm, tmpl) < 0 {
+            out = _pf_err(out, "template '${tmpl}' is not visible to the token — it must be a MEMBER of aeo's pool so a least-priv token can clone it: `pvesh set /pools/aeo-prod --vms <templateid>` (see examples/checks/proxmox_token_setup.md)")
+        }
     }
     // storage() must exist on the node.
     st = compose.get_pve_storage(nm)
@@ -423,6 +441,27 @@ preflight(nm: string) -> string {
 _pf_err(acc: string, msg: string) -> string {
     if string_length(acc) == 0 { return "  - ${msg}" }
     return "${acc}\n  - ${msg}"
+}
+
+// 1 iff the ostemplate volid `ost` (e.g. "local:vztmpl/debian-12-...tar.zst")
+// exists as vztmpl content on its storage. We split off the storage (before ':'),
+// query /nodes/<node>/storage/<store>/content?content=vztmpl, and match the volid.
+_vztmpl_exists(nm: string, ost: string) -> int {
+    if string_length(ost) == 0 { return 0 }
+    colon = string_index_of(ost, ":")
+    if colon < 0 { return 0 }
+    store = string_substring(ost, 0, colon)
+    r = _pve(nm, "GET", "/nodes/${compose.get_pve_node(nm)}/storage/${store}/content?content=vztmpl", list_new())
+    if _res_code(r) != "200" { return 0 }
+    d = _data(_res_body(r))
+    if d == null { return 0 }
+    cnt = json_array_size(d)
+    i = 0
+    while i < cnt {
+        if _eq(_gs(json_array_get_raw(d, i), "volid"), ost) == 1 { return 1 }
+        i = i + 1
+    }
+    return 0
 }
 
 // 1 iff storage `want` is listed under /nodes/<node>/storage (token-visible).
@@ -458,10 +497,11 @@ _bridge_exists(nm: string, want: string) -> int {
     return 0
 }
 
-// ---- up(nm) — clone -> config -> start ----------------------------------------
+// ---- up(nm) — VM: clone->config->start ; CT: create->start --------------------
 up(nm: string) -> string {
     av = available(nm)
     if string_length(av) > 0 { return av }
+    if compose.get_kind(nm) == "proxmox_ct" { return _up_ct(nm) }
 
     node = compose.get_pve_node(nm)
     tmpl = compose.get_pve_template(nm)
@@ -537,9 +577,64 @@ up(nm: string) -> string {
     return _start(nm, newid)
 }
 
+// ---- _up_ct(nm) — LXC CONTAINER: create from an OS template -> start -----------
+// A CT is CREATED from an ostemplate tarball (not cloned from a VM template). The
+// create is one POST /nodes/<node>/lxc with the tarball + rootfs + net; then start.
+// LIVE-PROVEN create->start->stop->destroy with the least-priv token (create needs
+// Datastore read on the vztmpl storage — the token setup grants it).
+_up_ct(nm: string) -> string {
+    node = compose.get_pve_node(nm)
+    ost = compose.get_pve_ostemplate(nm)
+
+    // idempotent re-up: if a CT with this name exists, just ensure it's running.
+    existing = resolve_vmid(nm, _pve_name(nm))
+    if existing >= 0 {
+        if _eq(_status_of(nm, existing), "running") == 1 { return "" }
+        return _start(nm, existing)
+    }
+
+    newid = _nextid(nm)
+    if newid < 0 { return "aeo: proxmox_ct '${nm}' — could not get a free VMID from ${node}" }
+    sid = string_from_int(newid)
+
+    // rootfs default: "<storage>:4" (4 GiB) if unset.
+    rootfs = compose.get_pve_rootfs(nm)
+    st = compose.get_pve_storage(nm)
+    if string_length(rootfs) == 0 {
+        if string_length(st) > 0 { rootfs = "${st}:4" }
+        else { rootfs = "local-lvm:4" }
+    }
+    br = compose.get_pve_bridge(nm)
+    if string_length(br) == 0 { br = "vmbr0" }
+
+    // CREATE the CT (POST /lxc). hostname = the sanitized node name (DNS-safe, and
+    // it's what down/probe resolve by). unprivileged by default (safer). dhcp NIC.
+    f = list_new()
+    list_add(f, "vmid=${sid}")
+    list_add(f, "ostemplate=${ost}")
+    list_add(f, "hostname=${_pve_name(nm)}")
+    list_add(f, "pool=aeo-prod")
+    list_add(f, "cores=${string_from_int(compose.get_cpus(nm))}")
+    list_add(f, "memory=${_mem_mb(nm)}")
+    list_add(f, "rootfs=${rootfs}")
+    if string_length(st) > 0 { list_add(f, "storage=${st}") }
+    list_add(f, "net0=name=eth0,bridge=${br},ip=dhcp")
+    list_add(f, "unprivileged=1")
+    r = _pve(nm, "POST", "/nodes/${node}/lxc", f)
+    list_free(f)
+    if _eq(_res_code(r), "200") == 0 {
+        return "aeo: proxmox_ct '${nm}' create failed (HTTP ${_res_code(r)}): ${_res_body(r)}"
+    }
+    // create is async — wait for the CT to settle to stopped, then start.
+    if _poll_status(nm, newid, "stopped", 60) == 0 {
+        return "aeo: proxmox_ct '${nm}' create did not finish (VMID ${sid} never reached 'stopped')"
+    }
+    return _start(nm, newid)
+}
+
 // POST status/start + poll running.
 _start(nm: string, vmid: int) -> string {
-    r = _pve(nm, "POST", "/nodes/${compose.get_pve_node(nm)}/qemu/${string_from_int(vmid)}/status/start", list_new())
+    r = _pve(nm, "POST", "/nodes/${compose.get_pve_node(nm)}/${_ep(nm)}/${string_from_int(vmid)}/status/start", list_new())
     if _eq(_res_code(r), "200") == 0 {
         return "aeo: proxmox_vm '${nm}' start failed (HTTP ${_res_code(r)}): ${_res_body(r)}"
     }
@@ -594,16 +689,16 @@ down(nm: string) -> string {
 
     s = _status_of(nm, vmid)
     if _eq(s, "running") == 1 {
-        r = _pve(nm, "POST", "/nodes/${node}/qemu/${sid}/status/stop", list_new())
+        r = _pve(nm, "POST", "/nodes/${node}/${_ep(nm)}/${sid}/status/stop", list_new())
         if _eq(_res_code(r), "200") == 0 {
-            return "aeo: proxmox_vm '${nm}' stop failed (HTTP ${_res_code(r)}): ${_res_body(r)}"
+            return "aeo: proxmox '${nm}' stop failed (HTTP ${_res_code(r)}): ${_res_body(r)}"
         }
         _poll_status(nm, vmid, "stopped", 30)    // best-effort settle before destroy
     }
 
-    r = _pve(nm, "DELETE", "/nodes/${node}/qemu/${sid}?purge=1", list_new())
+    r = _pve(nm, "DELETE", "/nodes/${node}/${_ep(nm)}/${sid}?purge=1", list_new())
     if _eq(_res_code(r), "200") == 0 {
-        return "aeo: proxmox_vm '${nm}' destroy failed (HTTP ${_res_code(r)}): ${_res_body(r)}"
+        return "aeo: proxmox '${nm}' destroy failed (HTTP ${_res_code(r)}): ${_res_body(r)}"
     }
     if _poll_gone(nm, vmid, 30) == 0 {
         return "aeo: proxmox_vm '${nm}' destroy issued but VMID ${sid} still present"
