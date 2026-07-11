@@ -7,11 +7,11 @@
 import aeocha
 import compose (
     system, container, load_balancer, listens, publish, balance_to, lb_health, balancer_weight,
-    breaker, cache,
+    breaker, cache, l4,
     health_retry, every, up_within, down_within,
     reset_nodes
 )
-import driver_loadbalancer (backend_specs, lb_env, lb_net, lb_image, lb_health_timing)
+import driver_loadbalancer (backend_specs, backend_specs_l4, lb_env, lb_net, lb_image, lb_health_timing)
 import std.string
 
 _declare() {
@@ -84,8 +84,10 @@ main() {
             }
             aeocha.expect_str(lb_net("web")).to_equal_str("aeo-mysys")
         }
-        aeocha.it("lb_image defaults to the aeo-lb tag") callback {
-            aeocha.expect_int(_has(lb_image(), "aeo-lb")).to_be_truthy()
+        aeocha.it("lb_image defaults to the aeo-lb tag (L7)") callback {
+            reset_nodes()
+            system("si") { lb = load_balancer("web", "container") { publish(80); balance_to(8080) } }
+            aeocha.expect_int(_has(lb_image("web"), "aeo-lb")).to_be_truthy()
         }
         // §6 "one clock, two enforcers": the system health_retry timing lowers
         // onto the pool checker. every=500ms, down_within=10s => interval 500,
@@ -126,6 +128,24 @@ main() {
             e = lb_env("web")
             aeocha.expect_int(_has(e, "AEO_LB_BREAKER=5;30000;1")).to_be_truthy()
             aeocha.expect_int(_has(e, "AEO_LB_CACHE=1000;65536;60;method_url_vary")).to_be_truthy()
+        }
+        // L4 (raw TCP): l4() -> the aeo-l4lb image + AEO_L4_* env + host:port
+        // backends (no http:// scheme). §8 L4 balancer.
+        aeocha.it("l4() selects the aeo-l4lb image + AEO_L4_* env + host:port backends") callback {
+            reset_nodes()
+            system("s8") {
+                lb = load_balancer("tcp", "container") {
+                    publish(6379)
+                    balance_to(6379) { l4() }
+                    a1 = container("redis-1") { listens(6379); balancer_weight(3) }
+                    a2 = container("redis-2") { listens(6379); balancer_weight(1) }
+                }
+            }
+            aeocha.expect_str(backend_specs_l4("tcp")).to_equal_str("redis-1:6379|3;redis-2:6379|1")
+            aeocha.expect_int(_has(lb_image("tcp"), "aeo-l4lb")).to_be_truthy()
+            e = lb_env("tcp")
+            aeocha.expect_int(_has(e, "AEO_L4_PORT=6379")).to_be_truthy()
+            aeocha.expect_int(_has(e, "AEO_L4_BACKENDS=redis-1:6379|3;redis-2:6379|1")).to_be_truthy()
         }
         // Defaults when no health_retry window is declared: interval falls to
         // get_interval's 1000 default; down_within unset => unhealthy 3.

@@ -447,9 +447,22 @@ are later thickening.
      a route is shadowed. Live-proven: draining a backend shifts ALL traffic off it
      (zero-downtime), undrain restores the split. (Wiring it into an automated
      rolling-cutover in the runner is the remaining reconcile step.)
-   - **Still ahead:** `:vm` substrate; the `:host`/multi-host epics (§7); and the
-     L4 TCP balancer (§8). (The aeo-lb image build is already folded in — the
-     driver bakes it on demand; see the step-3 finding above.)
+   - **L4 TCP balancer — DONE.** `bin/aeo-l4lb.ae` balances OPAQUE TCP streams for
+     non-HTTP tiers (redis, postgres, …): it `listen`s on `publish()`, and per
+     accepted connection picks a weighted-RR backend and full-duplex splices bytes
+     both ways via `egress_relay.splice` (poll2, aether#1092). Grammar: `l4()`
+     inside `balance_to{}` marks the balancer L4; the driver then bakes/runs the
+     aeo-l4lb image with `AEO_L4_*` env and `host:port|weight` backends (no
+     `http://`). **The feared fan-out gate does NOT exist:** an actor per
+     connection gives thread-per-connection concurrency (fire-and-forget `!`
+     returns immediately; the splice runs on the actor's own OS thread), so no
+     N-fd poll / `std.tcp` enhancement is needed — verified: 5 parallel
+     connections greeted within 0.02s. Live-proven via `aeo up`: two redis
+     backends behind an L4 balancer, real RESP relayed (PING→PONG, SET→OK), and
+     the 1:1 spread routes independent connections to different backends.
+   - **Still ahead:** `:vm` substrate; the `:host`/multi-host epics (§7); and
+     wiring drain/undrain into an automated rolling-cutover in the runner. (The
+     balancer image build is already folded in — the driver bakes it on demand.)
 
 ---
 

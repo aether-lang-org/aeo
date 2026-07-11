@@ -31,25 +31,33 @@ import std.list
 
 exports (
     up, down, probe, available, ensure_image, drain, undrain,
-    backend_specs, lb_env, lb_image, lb_net, lb_binary, lb_health_timing
+    backend_specs, backend_specs_l4, lb_env, lb_image, lb_net, lb_binary, lb_health_timing
 )
 
-// The aeo-lb front-door binary, under AEO_HOME/bin (built by the toolchain
-// alongside bin/aeo). ensure_image() COPYs it into the image build context.
-lb_binary() -> string {
+// The front-door binary for `lb`, under AEO_HOME/bin (built by the toolchain
+// alongside bin/aeo). aeo-l4lb for an l4() balancer, else aeo-lb. ensure_image()
+// COPYs it into the image build context.
+lb_binary(lb: string) -> string {
     h = getenv("AEO_HOME")
     if string_length(h) == 0 {
         home = getenv("HOME")
         h = "${home}/aeo"
     }
+    if compose.is_lb_l4(lb) == 1 {
+        return "${h}/bin/aeo-l4lb"
+    }
     return "${h}/bin/aeo-lb"
 }
 
-// The aeo-lb container image. Overridable via AEO_LB_IMAGE for a custom build/tag.
-lb_image() -> string {
+// The container image for `lb`. Overridable via AEO_LB_IMAGE. L4 and L7 use
+// distinct images (different binary baked in).
+lb_image(lb: string) -> string {
     v = getenv("AEO_LB_IMAGE")
     if string_length(v) > 0 {
         return v
+    }
+    if compose.is_lb_l4(lb) == 1 {
+        return "localhost/aeo/aeo-l4lb:latest"
     }
     return "localhost/aeo/aeo-lb:latest"
 }
@@ -71,60 +79,64 @@ available() -> int {
     return 1
 }
 
-_image_present() -> int {
+_image_present(lb: string) -> int {
     eng = driver_linux.engine_resolve("")
     if string_length(eng) == 0 {
         return 0
     }
     av = list_new()
     list_add(av, "-c")
-    list_add(av, "${eng} image inspect ${lb_image()} >/dev/null 2>&1")
+    list_add(av, "${eng} image inspect ${lb_image(lb)} >/dev/null 2>&1")
     _o, status, _e = run_capture("/bin/sh", av, null)
     list_free(av)
     if status == 0 { return 1 }
     return 0
 }
 
-// ensure_image() — build the aeo-lb container image if absent (idempotent). The
-// LB runs as a container (docs §9 step 3: it must share the backends' net), so
-// aeo bakes the image itself — no manual pre-build. Context: the toolchain-built
-// aeo-lb binary + a Dockerfile that installs its runtime libs (libssl/libnghttp2)
-// and COPYs the binary. Returns "" on success (or if already present) else error.
-// Overridable via AEO_LB_IMAGE (a pre-built image) — then this is a no-op.
-ensure_image() -> string {
+// ensure_image(lb) — build the balancer's container image if absent (idempotent).
+// The balancer runs as a container (docs §9 step 3: it must share the backends'
+// net), so aeo bakes the image itself — no manual pre-build. Context: the
+// toolchain-built binary (aeo-lb or aeo-l4lb) + a Dockerfile that installs its
+// runtime libs and COPYs it. Returns "" on success (or if already present) else
+// error. Overridable via AEO_LB_IMAGE (a pre-built image) — then this is a no-op.
+ensure_image(lb: string) -> string {
     pinned = getenv("AEO_LB_IMAGE")
     if pinned != null {
         if string_length(pinned) > 0 {
             return ""   // caller pinned a custom image; trust it
         }
     }
-    if _image_present() == 1 {
+    if _image_present(lb) == 1 {
         return ""
     }
     eng = driver_linux.engine_resolve("")
     if string_length(eng) == 0 {
-        return "aeo: no container engine to build the aeo-lb image (need podman/docker)"
+        return "aeo: no container engine to build the balancer image (need podman/docker)"
     }
-    bin = lb_binary()
+    bin = lb_binary(lb)
     if _binary_present(bin) == 0 {
-        return "aeo: aeo-lb binary not found at ${bin} — the toolchain builds it beside bin/aeo (ae build bin/aeo-lb.ae -o ${bin} --lib lib)"
+        return "aeo: balancer binary not found at ${bin} — the toolchain builds it beside bin/aeo (ae build <src> -o ${bin} --lib lib)"
     }
-    ctx = "/tmp/aeo-lb-image"
+    binname = "aeo-lb"
+    if compose.is_lb_l4(lb) == 1 {
+        binname = "aeo-l4lb"
+    }
+    ctx = "/tmp/${binname}-image"
     _ = _mkdir(ctx)
     // stage the binary into the context (COPY needs it inside the build dir).
-    cperr = _cp(bin, "${ctx}/aeo-lb")
+    cperr = _cp(bin, "${ctx}/${binname}")
     if string_length(cperr) > 0 {
-        return "aeo: staging aeo-lb binary failed: ${cperr}"
+        return "aeo: staging ${binname} binary failed: ${cperr}"
     }
-    df = _dockerfile()
+    df = _dockerfile(binname)
     werr = write_atomic("${ctx}/Dockerfile", df, string_length(df))
     if string_length(werr) > 0 {
-        return "aeo: cannot write aeo-lb Dockerfile: ${werr}"
+        return "aeo: cannot write ${binname} Dockerfile: ${werr}"
     }
     av = list_new()
     list_add(av, "build")
     list_add(av, "-t")
-    list_add(av, lb_image())
+    list_add(av, lb_image(lb))
     list_add(av, "-f")
     list_add(av, "${ctx}/Dockerfile")
     list_add(av, ctx)
@@ -142,11 +154,11 @@ ensure_image() -> string {
 // The aeo-lb image Dockerfile: a slim base + the binary's runtime libs. Kept in
 // sync with aeo-lb's `ldd` (libssl3, libnghttp2 via libcurl). ca-certificates
 // for TLS to https upstreams.
-_dockerfile() -> string {
+_dockerfile(binname: string) -> string {
     d = "FROM docker.io/library/debian:stable-slim\n"
     d = string_concat(d, "RUN apt-get update -qq && apt-get install -y -qq libssl3 libnghttp2-14 ca-certificates && rm -rf /var/lib/apt/lists/*\n")
-    d = string_concat(d, "COPY aeo-lb /usr/local/bin/aeo-lb\n")
-    d = string_concat(d, "ENTRYPOINT [\"/usr/local/bin/aeo-lb\"]\n")
+    d = string_concat(d, "COPY ${binname} /usr/local/bin/${binname}\n")
+    d = string_concat(d, "ENTRYPOINT [\"/usr/local/bin/${binname}\"]\n")
     return d
 }
 
@@ -206,10 +218,38 @@ backend_specs(lb: string) -> string {
     return out
 }
 
+// backend_specs_l4(lb) — the L4 form: "host:port|weight;…" (no http:// scheme;
+// aeo-l4lb dials raw TCP). host == the backend NAME (resolved on the aeo net).
+backend_specs_l4(lb: string) -> string {
+    out = ""
+    n = compose.count()
+    i = 0
+    while i < n {
+        nm = compose.name_at(i)
+        if compose.get_host(nm) == lb {
+            if compose.is_load_balancer(nm) == 0 {
+                port = compose.get_listens(nm)
+                if string_length(port) > 0 {
+                    w = compose.get_weight(nm)
+                    if string_length(w) == 0 { w = "1" }
+                    spec = "${nm}:${port}|${w}"
+                    if string_length(out) == 0 { out = spec } else { out = "${out};${spec}" }
+                }
+            }
+        }
+        i = i + 1
+    }
+    return out
+}
+
 // lb_env(lb) — the "K=V,K=V" env string driver_linux passes as `-e` to the LB
 // container. Renders the whole pool: port, algorithm, backends, health contract.
-// Pure model→string; unit-testable.
+// Pure model→string; unit-testable. L4 balancers get the compact AEO_L4_* form.
 lb_env(lb: string) -> string {
+    if compose.is_lb_l4(lb) == 1 {
+        port = compose.get_publish(lb)
+        return "AEO_L4_PORT=${port},AEO_L4_BACKENDS=${backend_specs_l4(lb)}"
+    }
     port = compose.get_publish(lb)
     algo = compose.lb_algorithm(lb)
     backends = backend_specs(lb)
@@ -310,12 +350,16 @@ up(res_name: string) -> string {
     if available() == 0 {
         return "aeo: no container engine found (need podman or docker on PATH)"
     }
-    // Build the aeo-lb image on demand (idempotent) — aeo bakes it, no manual step.
-    ierr = ensure_image()
+    // Build the balancer image on demand (idempotent) — aeo bakes it, no manual step.
+    ierr = ensure_image(res_name)
     if string_length(ierr) > 0 {
         return ierr
     }
+    // L4 balancers render "host:port" backends; L7 render "http://host:port".
     backends = backend_specs(res_name)
+    if compose.is_lb_l4(res_name) == 1 {
+        backends = backend_specs_l4(res_name)
+    }
     if string_length(backends) == 0 {
         return "aeo: load_balancer '${res_name}' has no routable backends (children need listens())"
     }
@@ -327,8 +371,8 @@ up(res_name: string) -> string {
     net = lb_net(res_name)
     _ = driver_linux.network_ensure(net, "")
     env = lb_env(res_name)
-    // No cmd (the image ENTRYPOINT is aeo-lb); publish `port` to the host.
-    return driver_linux.up_net(res_name, lb_image(), "", port, net, env, "")
+    // No cmd (the image ENTRYPOINT is the balancer binary); publish `port`.
+    return driver_linux.up_net(res_name, lb_image(res_name), "", port, net, env, "")
 }
 
 down(res_name: string) -> string {

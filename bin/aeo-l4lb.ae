@@ -1,0 +1,216 @@
+// aeo-l4lb — the L4 (raw TCP) load balancer front-door. Unlike aeo-lb (L7 HTTP,
+// std.http.proxy), this balances OPAQUE TCP streams for non-HTTP tiers (redis,
+// postgres, …). It listens on publish(), and for each accepted connection picks
+// a backend (weighted round-robin over the pool) and full-duplex splices bytes
+// both ways via egress_relay.splice (poll2, aether#1092).
+//
+// Concurrency: each connection is dispatched to its own Conn actor (fire-and-
+// forget `!`, which returns immediately), so the accept loop keeps accepting
+// while splices run on their own OS threads. No N-fd poll needed — one poll2 per
+// connection pair, one thread per connection.
+//
+// Env:
+//   AEO_L4_PORT       listen (publish) port
+//   AEO_L4_BACKENDS   "host:port|weight;host:port|weight;…" (';'-separated,
+//                     comma-free for driver_linux's -e env splitter)
+//
+import std.tcp (listen, accept, connect, close)
+import std.os (os_getenv)
+import std.string (string_length, string_get_int, string_index_of, string_substring)
+import egress_relay (splice)
+
+const CHUNK = 16384
+const POLL_MS = 30000
+
+// Up to this many backends parsed from the env (a fixed table keeps the picker
+// allocation-free; a real pool rarely exceeds this).
+const MAX_BACKENDS = 64
+
+message Handle { client: ptr, host: string, port: int }
+
+// One actor per accepted connection: dial the chosen backend, splice, clean up.
+actor Conn {
+    receive {
+        Handle(client, host, port) -> {
+            upstream, cerr = connect(host, port)
+            if cerr != "" {
+                close(client)
+            } else {
+                _ = splice(client, upstream, CHUNK, POLL_MS)
+                close(upstream)
+                close(client)
+            }
+        }
+    }
+}
+
+main() {
+    port = _env_int("AEO_L4_PORT", 6379)
+    spec = _env("AEO_L4_BACKENDS", "")
+    if string_length(spec) == 0 {
+        println("aeo-l4lb: no backends (AEO_L4_BACKENDS empty)")
+        return
+    }
+
+    // Parse the weighted backend table into a flat weighted PICK list: a backend
+    // with weight w appears w times, so a simple round-robin index yields the
+    // weighted distribution. Bounded by MAX_BACKENDS*maxweight; we cap the
+    // expansion to keep it simple.
+    n = _count_entries(spec)
+    if n == 0 {
+        println("aeo-l4lb: no valid backends parsed")
+        return
+    }
+
+    srv, lerr = listen(port)
+    if lerr != "" {
+        println("aeo-l4lb: listen ${port} failed: ${lerr}")
+        return
+    }
+    println("aeo-l4lb: listening on 0.0.0.0:${port} — ${_i(n)} backend(s), weighted-rr")
+
+    // Weighted round-robin: a monotonically increasing counter mod total-weight,
+    // mapped to a backend by walking the cumulative weights. Recomputed per accept
+    // (cheap; the pool is small and static for the process lifetime).
+    tw = _total_weight(spec)
+    idx = 0
+    while 1 == 1 {
+        client, aerr = accept(srv)
+        if aerr != "" {
+            // transient accept failure — keep serving.
+            idx = idx
+        } else {
+            slot = idx
+            if tw > 0 {
+                slot = idx - (idx / tw) * tw    // idx mod tw
+            }
+            hp = _pick(spec, slot)
+            h = _hp_host(hp)
+            p = _hp_port(hp)
+            a = spawn(Conn())
+            a ! Handle { client: client, host: h, port: p }
+            idx = idx + 1
+        }
+    }
+}
+
+// ---- weighted backend table (";"-separated "host:port|weight") --------------
+_count_entries(spec: string) -> int {
+    n = 0
+    rest = spec
+    more = 1
+    while more == 1 {
+        idx = string_index_of(rest, ";")
+        entry = rest
+        if idx >= 0 {
+            entry = string_substring(rest, 0, idx)
+            rest = string_substring(rest, idx + 1, string_length(rest))
+        } else {
+            more = 0
+        }
+        if string_length(entry) > 0 {
+            n = n + 1
+        }
+    }
+    return n
+}
+_total_weight(spec: string) -> int {
+    tw = 0
+    rest = spec
+    more = 1
+    while more == 1 {
+        idx = string_index_of(rest, ";")
+        entry = rest
+        if idx >= 0 {
+            entry = string_substring(rest, 0, idx)
+            rest = string_substring(rest, idx + 1, string_length(rest))
+        } else {
+            more = 0
+        }
+        if string_length(entry) > 0 {
+            tw = tw + _entry_weight(entry)
+        }
+    }
+    if tw == 0 {
+        return 1
+    }
+    return tw
+}
+// Map a weighted slot (0..total_weight-1) to a backend "host:port" by walking
+// cumulative weights.
+_pick(spec: string, slot: int) -> string {
+    acc = 0
+    rest = spec
+    more = 1
+    last = ""
+    while more == 1 {
+        idx = string_index_of(rest, ";")
+        entry = rest
+        if idx >= 0 {
+            entry = string_substring(rest, 0, idx)
+            rest = string_substring(rest, idx + 1, string_length(rest))
+        } else {
+            more = 0
+        }
+        if string_length(entry) > 0 {
+            last = _entry_hostport(entry)
+            acc = acc + _entry_weight(entry)
+            if slot < acc {
+                return last
+            }
+        }
+    }
+    return last
+}
+_entry_hostport(entry: string) -> string {
+    bar = string_index_of(entry, "|")
+    if bar < 0 {
+        return entry
+    }
+    return string_substring(entry, 0, bar)
+}
+_entry_weight(entry: string) -> int {
+    bar = string_index_of(entry, "|")
+    if bar < 0 {
+        return 1
+    }
+    ws = string_substring(entry, bar + 1, string_length(entry))
+    w = string_get_int(ws)
+    if w < 1 {
+        return 1
+    }
+    return w
+}
+_hp_host(hp: string) -> string {
+    colon = string_index_of(hp, ":")
+    if colon < 0 {
+        return hp
+    }
+    return string_substring(hp, 0, colon)
+}
+_hp_port(hp: string) -> int {
+    colon = string_index_of(hp, ":")
+    if colon < 0 {
+        return 0
+    }
+    ps = string_substring(hp, colon + 1, string_length(hp))
+    return string_get_int(ps)
+}
+
+_env(name: string, fallback: string) -> string {
+    v = os_getenv(name)
+    if v == null { return fallback }
+    if string_length(v) == 0 { return fallback }
+    return v
+}
+_env_int(name: string, fallback: int) -> int {
+    v = os_getenv(name)
+    if v == null { return fallback }
+    if string_length(v) == 0 { return fallback }
+    n = string_get_int(v)
+    if n <= 0 { return fallback }
+    return n
+}
+_i(n: int) -> string {
+    return "${n}"
+}

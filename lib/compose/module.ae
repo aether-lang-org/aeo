@@ -58,10 +58,10 @@ exports (
     get_suspended, get_started, get_constraints, get_netpolicy, has_egress_fqdn, egress_fqdn_csv, pf_rules_for,
     limit, limit_mem, limit_vmem, limit_cpu, limit_maxproc, limit_openfiles, get_rctl,
     load_balancer, listens, publish, publish_map, balance_to, algorithm, lb_health, balancer_weight,
-    breaker, cache,
+    breaker, cache, l4,
     is_load_balancer, get_lb_substrate, get_listens, get_publish, get_publish_inner,
     get_balance_to, get_weight, get_lb_health_path, get_lb_health_expect,
-    get_lb_breaker, get_lb_cache,
+    get_lb_breaker, get_lb_cache, is_lb_l4,
     lb_backends, lb_algorithm, lb_weight_ignored, lb_model_errors,
     describe_tree, dns_hosts
 )
@@ -500,6 +500,13 @@ balance_to(_ctx: ptr, port: int) -> ptr {
 }
 algorithm(_ctx: ptr, a: string) {
     config.put("aeo.cmp.lbalgo.${_ctx}", a)
+}
+// l4() — mark this balancer as LAYER 4 (raw TCP), for non-HTTP tiers (redis,
+// postgres, …). It splices opaque TCP streams (aeo-l4lb) instead of proxying HTTP
+// (aeo-lb). Health is TCP-connect (no lb_health path); cache/breaker are L7-only
+// and ignored. Written inside balance_to{} — `_ctx` is the LB name.
+l4(_ctx: ptr) {
+    config.put("aeo.cmp.lbl4.${_ctx}", "1")
 }
 lb_health(_ctx: ptr, path: string, expect: int) {
     config.put("aeo.cmp.lbhealthpath.${_ctx}", path)
@@ -1040,6 +1047,7 @@ reset_nodes() {
         config.put("aeo.cmp.weight.${nm}", "")
         config.put("aeo.cmp.lbbreaker.${nm}", "")
         config.put("aeo.cmp.lbcache.${nm}", "")
+        config.put("aeo.cmp.lbl4.${nm}", "")
         i = i + 1
     }
     config.put("aeo.cmp.count", "0")
@@ -1085,6 +1093,10 @@ get_lb_health_path(nm: string) -> string   { return config.get("aeo.cmp.lbhealth
 get_lb_health_expect(nm: string) -> string { return config.get("aeo.cmp.lbhealthexpect.${nm}") }
 get_lb_breaker(nm: string) -> string        { return config.get("aeo.cmp.lbbreaker.${nm}") }
 get_lb_cache(nm: string) -> string          { return config.get("aeo.cmp.lbcache.${nm}") }
+is_lb_l4(nm: string) -> int {
+    if config.get("aeo.cmp.lbl4.${nm}") == "1" { return 1 }
+    return 0
+}
 
 // The backends of an LB, in declaration order, comma-joined. Membership IS the
 // set of children (get_host(child) == lb), so the pool can never drift.

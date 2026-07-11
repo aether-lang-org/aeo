@@ -29,12 +29,16 @@ ONE="${2:-}"
     exit 1
 }
 
-# The load_balancer example deploys an aeo-lb CONTAINER; the driver bakes the
-# image on demand (ensure_image) from AEO_HOME/bin/aeo-lb. Build that binary
-# beside bin/aeo so a `up`-phase run of the LB example works out of the box.
+# A load_balancer node deploys a CONTAINER; the driver bakes the image on demand
+# (ensure_image) from AEO_HOME/bin/aeo-lb (L7) or aeo-l4lb (L4). Build both
+# binaries beside bin/aeo so a `up`-phase run of the LB examples works out of box.
 if [ ! -x "$ROOT/bin/aeo-lb" ]; then
     ( cd "$ROOT" && ae build bin/aeo-lb.ae -o bin/aeo-lb --lib lib ) >/dev/null 2>&1 \
-        || echo "  NOTE: could not build bin/aeo-lb (the load_balancer example's up phase needs it)"
+        || echo "  NOTE: could not build bin/aeo-lb (the L7 load_balancer example's up phase needs it)"
+fi
+if [ ! -x "$ROOT/bin/aeo-l4lb" ]; then
+    ( cd "$ROOT" && ae build bin/aeo-l4lb.ae -o bin/aeo-l4lb --lib lib ) >/dev/null 2>&1 \
+        || echo "  NOTE: could not build bin/aeo-l4lb (an L4 load_balancer example's up phase needs it)"
 fi
 
 run_one() {
