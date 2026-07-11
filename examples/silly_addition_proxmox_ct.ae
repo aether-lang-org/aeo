@@ -1,0 +1,122 @@
+// examples/silly_addition_proxmox_ct.ae — the LXC-CONTAINER sibling of
+// silly_addition_proxmox.ae. Same remote, API-driven Proxmox substrate, but the two
+// nodes are native Proxmox LXC CONTAINERS (proxmox_ct), not QEMU VMs.
+//
+//   system("silly_addition_proxmox_ct")  (aeo runs anywhere; the CTs live on PVE)
+//     ├─ db_ct   (proxmox CT) — created from an OS template tarball; the store tier
+//     └─ app_ct  (proxmox CT) — the /add service ──depends──► db_ct
+//
+// vs the VM sibling (silly_addition_proxmox.ae): that CLONES a cloud-init VM template
+// (/qemu). THIS one CREATES a CT from an OS TEMPLATE TARBALL (ostemplate, a vztmpl —
+// e.g. "local:vztmpl/debian-12-standard_...tar.zst") via the /lxc API. A CT is
+// lighter than a VM (shared kernel), boots in ~seconds, and has no cloud-init/guest-
+// agent — so there is no doer/agent path here; the node IS the container.
+//
+// This file is a PURE COMPOSITION — nodes + where/how to reach the remote host +
+// what to create from + the spec files that verify it. NO application source inline.
+//
+//   aeo up    examples/silly_addition_proxmox_ct.ae   deploy (dependency-ordered)
+//   aeo check examples/silly_addition_proxmox_ct.ae   run check() specs, no deploy
+//   aeo suite examples/silly_addition_proxmox_ct.ae   deploy + suite() specs, tear down
+//   aeo down  examples/silly_addition_proxmox_ct.ae   teardown (reverse)
+//
+// WHAT'S REAL (the whole lifecycle is LIVE-PROVEN against a real PVE box):
+//   - `aeo up`   creates each CT from the ostemplate tarball -> starts it.
+//   - `aeo down` stops -> destroys(--purge) each CT.
+//   - `aeo check` runs the model gate (host/node/auth_token/ostemplate required) AND
+//                the remote-host preflight (the ostemplate exists as vztmpl on its
+//                storage; storage + bridge present). Every 8006 call is verified
+//                against PVE's own CA (couriered over ssh — set AEO_PVE_CACERT).
+//
+// OPERATOR PREREQUISITES (a bare PVE box ships neither):
+//   1. The OS template tarball named by ostemplate(). Download it once:
+//        pveam download local debian-12-standard_12.12-1_amd64.tar.zst
+//      (proxmox_bootstrap.sh handles the VM template; a CT run needs this vztmpl.)
+//   2. The least-priv token needs Datastore READ on the vztmpl storage (default
+//      'local') — proxmox_token_setup.sh grants it (TEMPLATE_STORE). A CT create
+//      without it fails 403 (Datastore.AllocateSpace|Audit on /storage/local).
+//
+// The API TOKEN is read from the environment via getenv("PVE_TOKEN") — never in-file.
+
+import compose (system, proxmox_ct)
+import compose (host, node, auth_token, storage, bridge, ostemplate, rootfs)
+import compose (cpus, memory, depends)
+import compose (check, suite)
+import std.os (getenv)
+import std.string (string_length)
+
+exports ( aeo_orchestration )
+
+// ---- the composition — two PVE CTs, db_ct <- app_ct ----
+// Each is CREATED from the OS template tarball (the CT arm creates, it doesn't
+// clone). Endpoint/node/storage/bridge/ostemplate are env-swappable so the same
+// demo runs against any PVE box. The function `aeo up` calls.
+aeo_orchestration() {
+    system("silly_addition_proxmox_ct") {
+        // db tier — the store CT (created from the OS tarball on the remote node).
+        db_ct = proxmox_ct("db_ct") {
+            host(_pve_host())              // PVE API endpoint, "host:8006"
+            node(_pve_node())              // the cluster node to place it on
+            auth_token(getenv("PVE_TOKEN"))  // least-priv token — never in-file
+            storage(_pve_storage())        // where the CT rootfs lands
+            bridge(_pve_bridge())          // the CT NIC's bridge
+            ostemplate(_pve_ostemplate())  // the OS template TARBALL (vztmpl volid)
+            rootfs(_pve_rootfs())          // root disk spec ("<storage>:<GiB>")
+            cpus(1)
+            memory("512")
+        }
+
+        // app tier — the /add service CT, depends on db_ct (ordered bring-up).
+        app_ct = proxmox_ct("app_ct") {
+            host(_pve_host())
+            node(_pve_node())
+            auth_token(getenv("PVE_TOKEN"))
+            storage(_pve_storage())
+            bridge(_pve_bridge())
+            ostemplate(_pve_ostemplate())
+            rootfs(_pve_rootfs())
+            cpus(1)
+            memory("512")
+            depends("db_ct")               // dependency-ordered bring-up
+        }
+
+        // ---- declared verification (external specs; aeo runs them per phase) ----
+        check("examples/checks/proxmox_model.spec.ae")
+        suite("examples/checks/proxmox_suite.spec.ae")
+    }
+}
+
+// ---- helpers the declaration calls (all env-swappable) ----
+// Defaults point at the box this example was proven against; override via env so a
+// colleague's PVE runs the same demo unedited. (string_length-guarded getenv, not
+// ${} interpolation — getenv inside ${} mis-parses.)
+_pve_host() -> string {
+    v = getenv("PVE_HOST")
+    if string_length(v) == 0 { return "192.168.0.204:8006" }
+    return v
+}
+_pve_node() -> string {
+    v = getenv("PVE_NODE")
+    if string_length(v) == 0 { return "pve" }
+    return v
+}
+_pve_storage() -> string {
+    v = getenv("PVE_STORAGE")
+    if string_length(v) == 0 { return "local-lvm" }
+    return v
+}
+_pve_bridge() -> string {
+    v = getenv("PVE_BRIDGE")
+    if string_length(v) == 0 { return "vmbr0" }
+    return v
+}
+_pve_ostemplate() -> string {
+    v = getenv("PVE_OSTEMPLATE")
+    if string_length(v) == 0 { return "local:vztmpl/debian-12-standard_12.12-1_amd64.tar.zst" }
+    return v
+}
+_pve_rootfs() -> string {
+    v = getenv("PVE_ROOTFS")
+    if string_length(v) == 0 { return "local-lvm:2" }
+    return v
+}

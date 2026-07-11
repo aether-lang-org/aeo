@@ -36,6 +36,7 @@ what changes is the substrate, never the app.
 | [`silly_addition_windows.ae`](silly_addition_windows.ae)     | Windows | WSL2     | podman (in WSL) | Linux container on Windows (bring-your-own engine) |
 | [`silly_addition_wslc.ae`](silly_addition_wslc.ae)         | Windows | WSL2     | wslc (native)   | Linux container on Windows (MSFT's native engine) |
 | [`silly_addition_proxmox.ae`](silly_addition_proxmox.ae)     | _any_ (remote) | PVE VM | — | **remote host, API-driven** (up/down LIVE-PROVEN over the PVE API) |
+| [`silly_addition_proxmox_ct.ae`](silly_addition_proxmox_ct.ae)  | _any_ (remote) | — | PVE LXC (native) | **remote host, API-driven** (up/down LIVE-PROVEN; created from an OS tarball) |
 
 `−VMM −podman` is **not** a cell — a compute node has to run *somewhere*, so "no
 VM, no container" is degenerate.

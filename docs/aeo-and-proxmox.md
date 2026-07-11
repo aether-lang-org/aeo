@@ -112,6 +112,34 @@ it reaches the box with the token and verifies deploy-readiness (template is a p
 member, storage + bridge exist). A reachable-but-misconfigured host fails; an
 unreachable one (checking offline) warns and still validates the model.
 
+### LXC containers — `proxmox_ct`
+
+The sibling kind for native Proxmox **LXC containers**. A CT is fundamentally
+different from a VM: it is **created from an OS template TARBALL** (`ostemplate`, a
+`vztmpl` volid) via the `/lxc` API, NOT cloned from a VM template. Lighter (shared
+kernel, boots in seconds), no cloud-init/guest-agent.
+
+```javascript
+proxmox_ct("db_ct") {
+    host("192.168.0.204:8006"); node("pve"); auth_token(getenv("PVE_TOKEN"))
+    storage("local-lvm"); bridge("vmbr0")
+    ostemplate("local:vztmpl/debian-12-standard_12.12-1_amd64.tar.zst")  // the tarball
+    rootfs("local-lvm:2")                                                // <storage>:<GiB>
+    cpus(1); memory("512")
+}
+```
+
+Demo: [`silly_addition_proxmox_ct.ae`](../examples/silly_addition_proxmox_ct.ae)
+(two CTs, `db_ct` ← `app_ct`; `up`/`down` live-proven). Two operator prereqs beyond
+the VM path: **download the OS tarball** once (`pveam download local
+debian-12-standard...tar.zst`), and the token needs **Datastore read on the vztmpl
+storage** (`proxmox_token_setup.sh` grants `TEMPLATE_STORE`, default `local`) — a CT
+create without it 403s. One driver serves both kinds (`_ep()` routes `/lxc` vs
+`/qemu`); `check`/`up`/`down` and the CA-pin are identical.
+
+Note on privsep tokens: a token's effective perms are the **intersection** of the
+user's and the token's ACLs, so a grant must go to BOTH (the setup script does this).
+
 ---
 
 ## Security model
@@ -192,7 +220,8 @@ What's built is real; these are the documented follow-ups (see `TODO.md`):
 |---|---|
 | `lib/driver_proxmox/module.ae` | the API client (clone/config/start/stop/destroy/probe/preflight), CA-pinned |
 | `lib/compose/module.ae` | the `proxmox_vm` grammar + model gate |
-| `examples/silly_addition_proxmox.ae` | the demo composition + runbook comments |
+| `examples/silly_addition_proxmox.ae` | the VM demo composition + runbook comments |
+| `examples/silly_addition_proxmox_ct.ae` | the LXC-CT demo composition |
 | `examples/checks/proxmox_bootstrap.sh` | **(1)** one-time host setup: template + pool + snippet |
 | `examples/checks/proxmox_token_setup.sh` / `.md` | **(2)** least-priv token + the security proof |
 | `examples/checks/proxmox_pin_ca.sh` | **(3)** courier PVE's CA for TLS pinning |
