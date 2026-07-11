@@ -1,0 +1,146 @@
+// spec_pve_host_live.ae — LIVE proof that a PVE HOST is correctly set up for aeo:
+// (A) DEPLOY-READY — the driver's preflight passes (token authenticates, template
+//     is a pool member, storage + bridge exist); and
+// (B) LEAST-PRIVILEGE — the token is scoped as the CISO setup declares: it CAN do
+//     aeo's job (audit its pool) but is DENIED every dangerous mutation (create a
+//     user, self-escalate via ACL, reboot the node). This is the executable
+//     partner to examples/checks/proxmox_token_setup.md's hand-run evidence.
+//
+// This is the PVE-host analog of the aeo-node specs: aeo already checks+verifies
+// its own nodes; this verifies the REMOTE HOST those nodes deploy onto.
+//
+//   PVE_TOKEN="aeo@pve!deploy=<secret>" sh test/run-spec.sh test/spec_pve_host_live.ae
+//
+// Requires a live PVE box + PVE_TOKEN (and the template in aeo's pool). SELF-SKIPS
+// as PASS when PVE_TOKEN is unset or the host is unreachable, so the plain suite
+// stays green anywhere (like spec_driver_loadbalancer_live). Overrides via env:
+// PVE_HOST / PVE_NODE / PVE_STORAGE / PVE_BRIDGE / PVE_TEMPLATE (same as the example).
+
+import aeocha
+import compose (system, proxmox_vm, host, node, auth_token, storage, bridge, template, cpus, memory, reset_nodes)
+import driver_proxmox (reachable, preflight)
+import std.config
+import std.os (getenv, run_capture)
+import std.string (string_length, string_from_int, string_substring, string_equals)
+import std.list
+
+_env(k: string, dflt: string) -> string {
+    v = getenv(k)
+    if string_length(v) == 0 { return dflt }
+    return v
+}
+
+_declare() {
+    reset_nodes()
+    system("pvehostlive") {
+        proxmox_vm("probe_vm") {
+            host(_env("PVE_HOST", "192.168.0.204:8006"))
+            node(_env("PVE_NODE", "pve"))
+            auth_token(getenv("PVE_TOKEN"))
+            storage(_env("PVE_STORAGE", "local-lvm"))
+            bridge(_env("PVE_BRIDGE", "vmbr0"))
+            template(_env("PVE_TEMPLATE", "debian-12-cloudinit"))
+            cpus(2); memory("2G")
+        }
+    }
+}
+
+main() {
+    fw = aeocha.init()
+    _declare()
+
+    tok = getenv("PVE_TOKEN")
+    have_tok = 0
+    if string_length(tok) > 0 { have_tok = 1 }
+
+    // gather results BEFORE describe() (aeocha callbacks can't do the I/O).
+    config.put("pve.skip", "1")
+    config.put("pve.preflight", "unrun")
+    config.put("pve.denied_user", "0")
+    config.put("pve.denied_acl", "0")
+    config.put("pve.denied_reboot", "0")
+
+    if have_tok == 1 {
+        if reachable("probe_vm") == 1 {
+            config.put("pve.skip", "0")
+            // (A) readiness
+            config.put("pve.preflight", preflight("probe_vm"))
+            // (B) least-privilege: each dangerous mutation must be DENIED (403).
+            hostv = _env("PVE_HOST", "192.168.0.204:8006")
+            nodev = _env("PVE_NODE", "pve")
+            du = _denied(hostv, tok, "POST", "/access/users", "userid=evil@pve")
+            config.put("pve.denied_user", string_from_int(du))
+            acl_body = "path=/&roles=Administrator&tokens=${tok}"
+            da = _denied(hostv, tok, "PUT", "/access/acl", acl_body)
+            config.put("pve.denied_acl", string_from_int(da))
+            reboot_path = "/nodes/${nodev}/status"
+            dr = _denied(hostv, tok, "POST", reboot_path, "command=reboot")
+            config.put("pve.denied_reboot", string_from_int(dr))
+        }
+    }
+
+    aeocha.describe(fw, "PVE host live — deploy-ready + least-privilege") {
+
+        aeocha.describe("(A) deploy readiness (driver preflight)") {
+            aeocha.it("the host is deploy-ready: token OK, template in pool, storage+bridge present") callback {
+                if _skip() == 1 {
+                    aeocha.expect_int(1).to_equal(1)   // skipped: no token / unreachable
+                } else {
+                    aeocha.expect_str(config.get("pve.preflight")).to_equal_str("")
+                }
+            }
+        }
+
+        aeocha.describe("(B) least-privilege: dangerous mutations are DENIED (403)") {
+            aeocha.it("cannot create a user (no User.Modify)") callback {
+                if _skip() == 1 { aeocha.expect_int(1).to_equal(1) }
+                else { aeocha.expect_str(config.get("pve.denied_user")).to_equal_str("1") }
+            }
+            aeocha.it("cannot self-escalate via ACL (the token-escape)") callback {
+                if _skip() == 1 { aeocha.expect_int(1).to_equal(1) }
+                else { aeocha.expect_str(config.get("pve.denied_acl")).to_equal_str("1") }
+            }
+            aeocha.it("cannot reboot the node (no Sys.PowerMgmt)") callback {
+                if _skip() == 1 { aeocha.expect_int(1).to_equal(1) }
+                else { aeocha.expect_str(config.get("pve.denied_reboot")).to_equal_str("1") }
+            }
+        }
+    }
+
+    aeocha.run_summary(fw)
+}
+
+_skip() -> int {
+    if config.get("pve.skip") == "1" { return 1 }
+    return 0
+}
+
+// _denied(host, token, method, path, body) -> 1 iff the API rejected the mutation
+// with 401/403 (the token is NOT allowed). A 2xx would mean the token is OVER-
+// privileged — a hard fail of the least-priv contract. Uses curl (a throwaway
+// probe against a live box; the driver proper uses std.http.client).
+_denied(hostv: string, token: string, method: string, path: string, body: string) -> int {
+    av = list_new()
+    list_add(av, "-s"); list_add(av, "-k")
+    list_add(av, "-o"); list_add(av, "/dev/null")
+    list_add(av, "-w"); list_add(av, "%{http_code}")
+    list_add(av, "--max-time"); list_add(av, "10")
+    list_add(av, "-H"); list_add(av, "Authorization: PVEAPIToken=${token}")
+    list_add(av, "-X"); list_add(av, method)
+    list_add(av, "--data"); list_add(av, body)
+    list_add(av, "https://${hostv}/api2/json${path}")
+    out, status, _e = run_capture("/usr/bin/curl", av, null)
+    list_free(av)
+    if _code_is(out, "403") == 1 { return 1 }
+    if _code_is(out, "401") == 1 { return 1 }
+    return 0
+}
+
+_code_is(out: string, want: string) -> int {
+    // out is the bare 3-char status (curl -w). Compare the trailing 3 chars.
+    n = string_length(out)
+    if n < 3 { return 0 }
+    tail = string_substring(out, n - 3, n)
+    if string_equals(tail, want) == 1 { return 1 }
+    return 0
+}

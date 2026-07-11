@@ -823,6 +823,33 @@ driver_probe(nm: string, k: string, health: string) -> int {
 // the host to `up` on", not "the composition is wrong" — so CI on a GPU-less runner
 // still validates shape. VM/exclusive claims skip (their device model is checked at
 // deploy). BSD hosts skip (no /dev/dri). Prints one warning per absent device.
+// _proxmox_preflight — reach each proxmox_vm's PVE host and verify deploy-readiness.
+// Returns 1 to continue (all ready, OR only unreachable-hosts which we WARN about),
+// 0 to fail the check (a reachable host is misconfigured — a real blocker). One
+// remote round-trip per distinct proxmox_vm; skipped entirely when there are none.
+_proxmox_preflight() -> int {
+    ok = 1
+    n = compose.count()
+    i = 0
+    while i < n {
+        nm = compose.name_at(i)
+        if compose.get_kind(nm) == "proxmox" {
+            if driver_proxmox.reachable(nm) == 0 {
+                // box down / offline / away — NOT a model error; warn and continue.
+                println("aeo: [${nm}] NOTE — PVE host ${compose.get_pve_host(nm)} unreachable; skipping remote preflight (the data model is validated; run `aeo check` where the box is reachable to verify host readiness)")
+            } else {
+                pf = driver_proxmox.preflight(nm)
+                if string_length(pf) > 0 {
+                    println(pf)
+                    ok = 0
+                }
+            }
+        }
+        i = i + 1
+    }
+    return ok
+}
+
 _gpu_preflight() {
     if host.family() == "bsd" { return }
     n = compose.count()
@@ -3126,6 +3153,15 @@ main() {
         pverr = compose.proxmox_model_errors()
         if pverr != "" {
             println("aeo: proxmox_vm model error(s):\n${pverr}")
+            exit(1)
+        }
+        // Proxmox REMOTE-HOST preflight: for each proxmox_vm, reach the PVE box
+        // with its token and verify it's deploy-ready (template in pool, storage +
+        // bridge present). A reachable-but-misconfigured host is a real deploy
+        // blocker -> FAIL. An UNREACHABLE host (checking offline / away from the
+        // box) is not a model error -> WARN and continue, so `aeo check` still
+        // validates the composition's shape anywhere (the GPU-preflight discipline).
+        if _proxmox_preflight() == 0 {
             exit(1)
         }
         // Host preflight: if any container gpu() claim needs a DRI render node,

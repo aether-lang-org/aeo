@@ -35,10 +35,16 @@
 //                (db_vm, app_vm) came up RUNNING on the box, dependency-ordered.
 //   - `aeo down` stops -> destroys(--purge) each VM -> verifies gone. Clean: both
 //                VMs removed, the template preserved.
-//   - `aeo check` runs the model spec + the gate (host/node/auth_token/template
-//                required; a missing/empty token — usually PVE_TOKEN unset — fails
-//                LOUD). driver_proxmox is a pure API client on std.http.client
+//   - `aeo check` runs the model gate (host/node/auth_token/template required) AND
+//                a live REMOTE-HOST PREFLIGHT: it reaches the PVE box with the token
+//                and verifies deploy-readiness (template is a pool member, storage +
+//                bridge exist) — a reachable-but-misconfigured host fails LOUD; an
+//                unreachable host (checking offline) warns and still validates the
+//                model. driver_proxmox is a pure API client on std.http.client
 //                (native Aether HTTP — no curl dependency).
+//   - test/spec_pve_host_live.ae asserts the host is deploy-ready AND the token is
+//                least-privilege (dangerous mutations DENIED) — the executable
+//                partner to examples/checks/proxmox_token_setup.md.
 //   - the TOKEN is a least-privilege, CISO-grade credential, PROVEN allowed-vs-
 //                denied against the box (see examples/checks/proxmox_token_setup.md).
 //

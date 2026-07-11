@@ -336,9 +336,18 @@ Gaps:
       driver kind must be added to `_kind_has_driver` too. TOKEN: least-priv CISO
       setup (`examples/checks/proxmox_token_setup.sh`+`.md`) — dedicated user,
       custom minimal role, resource-pool blast radius, privsep+expiring token,
-      PROVEN allowed-vs-denied. FRONTIER follow-ups: in-guest health probe
-      (ssh/qemu-agent) so probe() checks the workload not just the hypervisor; TLS
-      CA/fingerprint pin (driver currently set_insecure). See token hardening below.
+      PROVEN allowed-vs-denied. HOST CHECKS (2026-07-11, live-proven): (1) remote
+      PREFLIGHT wired into `aeo check` — driver_proxmox.preflight() reaches the box
+      with the token and verifies deploy-readiness (template is a pool member,
+      storage + bridge exist); reachable-but-misconfigured -> LOUD fail, unreachable
+      -> warn + still validate the model (the gpu-preflight discipline); driver
+      also gained reachable(). (2) test/spec_pve_host_live.ae — executable proof the
+      host is deploy-ready AND the token is least-priv (create-user / self-ACL /
+      node-reboot all DENIED 403); self-skips as PASS with no PVE_TOKEN. FRONTIER
+      follow-ups: (3) in-guest health probe (ssh/qemu-agent) so probe() checks the
+      WORKLOAD not just "hypervisor says running" — needs a workload baked into the
+      template + guest network reachability from the orchestrator (the bigger piece);
+      TLS CA/fingerprint pin (driver currently set_insecure). See token hardening below.
 - [ ] **PVE token hardening (deferred — not now).** The current least-priv token
       is CISO-grade for the demo, but a larger-org prod bar could add: (a) TOKEN
       IP-ALLOWLIST so a leaked secret is useless off-network; (b) prove EXPIRY
@@ -347,6 +356,16 @@ Gaps:
       audit needn't carry VM.Clone/PowerMgmt); (d) an ACL-DRIFT detector (aeo
       re-reads /access/acl at check and flags scope creep vs the declared grant).
       None block the driver; all are defense-in-depth polish.
+- [ ] **PVE DRIFT CHECKER (`proxmox_token_setup.sh --verify`).** A non-destructive
+      ops-side check that the CISO setup is STILL clean: re-run the allowed/denied
+      probes and report drift vs the declared intent — role privs == the declared
+      ~15 (no widening), token still `privsep=1` and scoped to `/pool` (+storage/sdn)
+      only (not `/`), token not expired (and how many days left), template still a
+      pool member, no extra ACL entries crept in. Exit non-zero on any drift so CI/
+      cron can gate on it. This is the STANDING-STATE partner to the check-time
+      preflight (which asks "ready to deploy?"); --verify asks "is the credential
+      still as locked-down as we declared?". Overlaps token-hardening item (d)
+      (ACL-drift) — fold them together.
 - [x] **`lxc` is now REAL** — was a misnomer (routed to podman). driver_lxc built
       + wired (runner up/down/probe/exec) + silly_addition_lxc.ae; LIVE on Bazzite
       2026-06-27 (rootful via the lxc-* NOPASSWD sudoers grant + `systemctl enable

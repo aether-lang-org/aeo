@@ -51,7 +51,7 @@ import std.http.client (
     response_status, response_body, response_free
 )
 
-exports ( up, down, probe, available, api_base, resolve_vmid )
+exports ( up, down, probe, available, preflight, reachable, api_base, resolve_vmid )
 
 // ---- endpoint + auth ----------------------------------------------------------
 
@@ -350,6 +350,95 @@ available(nm: string) -> string {
         return "aeo: proxmox_vm '${nm}' — PVE rejected the token (401). Rotate via examples/checks/proxmox_token_setup.sh (expired?)."
     }
     return "aeo: proxmox_vm '${nm}' — PVE ${compose.get_pve_host(nm)} returned HTTP ${c} for /version"
+}
+
+// reachable(nm) -> 1 if the PVE API answered at all (any HTTP status, incl. 401),
+// 0 if the host was unreachable (transport error / DNS / connection refused). Lets
+// the runner DISTINGUISH "box down / I'm offline" (warn — model is still sound)
+// from "box up but misconfigured" (fail — a real deploy blocker).
+reachable(nm: string) -> int {
+    r = _pve(nm, "GET", "/version", list_new())
+    if _res_err(r) != "" { return 0 }      // transport failure
+    if _eq(_res_code(r), "000") == 1 { return 0 }
+    return 1
+}
+
+// ---- preflight(nm) — is the REMOTE HOST deploy-ready for this node? -------------
+// The aeo-check-time parallel of the model gate, but for the PVE box: it reaches
+// the host with THIS node's token and verifies everything an `up` needs, turning
+// runtime clone failures into a loud check-time error. All checks use the least-
+// priv deploy token itself (no broader privilege): reachability+auth (/version),
+// the template visible AS A POOL MEMBER (finding #1 — invisible == not clonable),
+// storage() present, bridge() present. Returns "" when ready, else a multi-line
+// reason (one "  - ..." per failure). Node status isn't checked directly (the
+// least-priv token lacks Sys.Audit) — a working storage/network query implies the
+// node is up and answering.
+preflight(nm: string) -> string {
+    // reachability + auth first — everything else needs it.
+    av = available(nm)
+    if string_length(av) > 0 { return av }
+
+    out = ""
+    // template must be VISIBLE to the token, which (for a privsep token scoped to
+    // /pool) means it is a MEMBER of aeo's pool. resolve_vmid returns <0 if unseen.
+    tmpl = compose.get_pve_template(nm)
+    if resolve_vmid(nm, tmpl) < 0 {
+        out = _pf_err(out, "template '${tmpl}' is not visible to the token — it must be a MEMBER of aeo's pool so a least-priv token can clone it: `pvesh set /pools/aeo-prod --vms <templateid>` (see examples/checks/proxmox_token_setup.md)")
+    }
+    // storage() must exist on the node.
+    st = compose.get_pve_storage(nm)
+    if string_length(st) > 0 {
+        if _storage_exists(nm, st) == 0 {
+            out = _pf_err(out, "storage '${st}' not found on node '${compose.get_pve_node(nm)}' (the VM disk lands here)")
+        }
+    }
+    // bridge() must exist on the node.
+    br = compose.get_pve_bridge(nm)
+    if string_length(br) > 0 {
+        if _bridge_exists(nm, br) == 0 {
+            out = _pf_err(out, "bridge '${br}' not found on node '${compose.get_pve_node(nm)}' (the guest NIC attaches here)")
+        }
+    }
+    if string_length(out) == 0 { return "" }
+    return "aeo: proxmox_vm '${nm}' — PVE host not deploy-ready:\n${out}"
+}
+
+_pf_err(acc: string, msg: string) -> string {
+    if string_length(acc) == 0 { return "  - ${msg}" }
+    return "${acc}\n  - ${msg}"
+}
+
+// 1 iff storage `want` is listed under /nodes/<node>/storage (token-visible).
+_storage_exists(nm: string, want: string) -> int {
+    r = _pve(nm, "GET", "/nodes/${compose.get_pve_node(nm)}/storage", list_new())
+    if _res_code(r) != "200" { return 0 }
+    d = _data(_res_body(r))
+    if d == null { return 0 }
+    cnt = json_array_size(d)
+    i = 0
+    while i < cnt {
+        if _eq(_gs(json_array_get_raw(d, i), "storage"), want) == 1 { return 1 }
+        i = i + 1
+    }
+    return 0
+}
+
+// 1 iff a bridge named `want` exists under /nodes/<node>/network.
+_bridge_exists(nm: string, want: string) -> int {
+    r = _pve(nm, "GET", "/nodes/${compose.get_pve_node(nm)}/network", list_new())
+    if _res_code(r) != "200" { return 0 }
+    d = _data(_res_body(r))
+    if d == null { return 0 }
+    cnt = json_array_size(d)
+    i = 0
+    while i < cnt {
+        row = json_array_get_raw(d, i)
+        if _eq(_gs(row, "iface"), want) == 1 {
+            if _eq(_gs(row, "type"), "bridge") == 1 { return 1 }
+        }
+        i = i + 1
+    }
+    return 0
 }
 
 // ---- up(nm) — clone -> config -> start ----------------------------------------
