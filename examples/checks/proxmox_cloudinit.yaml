@@ -36,8 +36,11 @@
 #     and seeds it here. Both gaps are the "production seeding" follow-up; neither
 #     changes the doer mechanics this snippet proves.
 #
-# PINNED to the aeo-agent-dev release asset. Re-pin AEO_AGENT_URL + AEO_AGENT_SHA256
-# when a new aeo-agent-v* release is cut (the workflow prints the SHA in its summary).
+# PINNED to an IMMUTABLE versioned release (aeo-agent-v0.1.0). Releases are
+# versioned-only (no rolling asset), so this URL + SHA never change under you — the
+# fail-closed verify below stays valid for the life of this pin. To move to a new
+# agent, cut a new `aeo-agent-v*` tag (CI prints its SHA in the job summary) and
+# bump AEO_AGENT_URL + AEO_AGENT_SHA256 here.
 
 package_update: true
 packages:
@@ -56,13 +59,11 @@ write_files:
       exec >>"$log" 2>&1
       echo "=== aeo-doer boot $(date -u +%s) ==="
 
-      AEO_AGENT_URL="https://github.com/aether-lang-org/aeo/releases/download/aeo-agent-dev/aeo-agent-linux-amd64"
-      # The release ships the binary AND its .sha256 (the CI workflow uploads both).
-      # We pin the EXPECTED sha here (the value CI printed for this asset) AND cross-
-      # check it against the published .sha256 — so a re-pin is a one-line change and
-      # a tampered .sha256 alone can't lower the bar. NB CI builds are NOT bit-
-      # identical to a local build (BuildID/paths differ), so this pin MUST track the
-      # CI-published asset, not a local `ae build`.
+      AEO_AGENT_URL="https://github.com/aether-lang-org/aeo/releases/download/aeo-agent-v0.1.0/aeo-agent-linux-amd64"
+      # Immutable versioned asset. The release ships the binary AND its .sha256 (CI
+      # uploads both). We pin the EXPECTED sha here AND cross-check the published
+      # .sha256 (defense in depth). NB CI builds are NOT bit-identical to a local
+      # `ae build` (BuildID/paths differ), so this pin tracks the CI-PUBLISHED asset.
       AEO_AGENT_SHA256="4ade05227d703bfe3ecd68ee4c19a67618c5c6230a344c5ca25430c771249a24"
 
       # 1. FETCH + VERIFY (fail-closed: a bad SHA aborts before chmod/run).
