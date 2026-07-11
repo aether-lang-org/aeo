@@ -8,10 +8,13 @@
 # VERIFIES a pinned SHA256 before running it (attest()-style, fail-closed). See
 # examples/checks/proxmox_cloudinit.yaml + docs.
 #
-# TRIGGER: a tag matching `aeo-agent-v*` (e.g. aeo-agent-v0.1.0), or manual dispatch.
-# We use a DEDICATED tag prefix so releasing the agent is decoupled from any aeo
-# versioning. The job prints the SHA256 in its summary so you can pin it in the
-# cloud-init snippet (AEO_AGENT_SHA256).
+# TRIGGER: a tag matching `aeo-agent-v*` (e.g. aeo-agent-v0.1.0). A DEDICATED tag
+# prefix decouples releasing the agent from any aeo versioning. VERSIONED-ONLY:
+# each tag is an IMMUTABLE release with its own asset + SHA — no rolling/overwritten
+# asset, so a pinned SHA in the cloud-init snippet never breaks and every shipped
+# agent is retained (rollback/bisect). The job prints the SHA256 in its summary so
+# you can pin it. workflow_dispatch is a BUILD-ONLY dry run (no publish) for testing
+# the build without cutting a tag.
 #
 # TARGET MATCH: builds on ubuntu-latest -> glibc dynamic linux-amd64, which is what
 # a Debian/Ubuntu cloud image runs (verified: the local build is glibc-dynamic,
@@ -73,7 +76,13 @@ jobs:
       - name: Summary (pin this SHA256 in the cloud-init snippet)
         run: |
           {
-            echo "### aeo-agent released"
+            if [ "${{ github.ref_type }}" = "tag" ]; then
+              echo "### aeo-agent ${{ github.ref_name }} released"
+            else
+              echo "### aeo-agent BUILD-ONLY (workflow_dispatch dry run — not published)"
+              echo ""
+              echo "Cut a tag to publish: \`git tag aeo-agent-vX.Y.Z && git push origin aeo-agent-vX.Y.Z\`"
+            fi
             echo ""
             echo "- asset: \`aeo-agent-linux-amd64\`"
             echo "- **SHA256:** \`${{ steps.sum.outputs.sha256 }}\`"
@@ -81,16 +90,17 @@ jobs:
             echo "Pin it in the guest cloud-init: \`AEO_AGENT_SHA256=${{ steps.sum.outputs.sha256 }}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Create/attach the GitHub Release
+      - name: Create the GitHub Release (tags only — immutable, versioned)
+        # Publish ONLY on a real tag. A workflow_dispatch run builds + checksums
+        # (the steps above) but does NOT publish — so there is never a rolling/
+        # overwritten asset; every release is an immutable versioned tag.
+        if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v2
         with:
           files: |
             aeo-agent-linux-amd64
             aeo-agent-linux-amd64.sha256
-          # For a manual dispatch (no tag), fall back to a rolling pre-release tag so
-          # the asset URL is stable for testing.
-          tag_name: ${{ github.ref_type == 'tag' && github.ref_name || 'aeo-agent-dev' }}
-          prerelease: ${{ github.ref_type != 'tag' }}
+          tag_name: ${{ github.ref_name }}
           body: |
             aeo-agent (linux-amd64, glibc) — the in-guest orchestration agent a
             proxmox_vm fetches via cloud-init to complete its node and run its
