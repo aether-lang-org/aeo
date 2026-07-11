@@ -72,7 +72,9 @@ allowed-vs-denied in [`checks/proxmox_token_setup.md`](checks/proxmox_token_setu
 → configures cloud-init → starts the VMs (dependency-ordered); `aeo down` stops →
 destroys each (template preserved). `driver_proxmox` is a pure API client on
 `std.http.client` (native Aether HTTP, no curl), and every 8006 call is **verified
-against PVE's own CA** (couriered over ssh — no blind trust).
+against PVE's own CA** (couriered over ssh — no blind trust). Full narrative,
+security model, and the provision-once/orchestrate-many design:
+[docs/aeo-and-proxmox.md](../docs/aeo-and-proxmox.md).
 
 ### Runbook: a fresh orchestrator (Chromebook or other) → a running deploy
 
