@@ -36,7 +36,8 @@
 #     and seeds it here. Both gaps are the "production seeding" follow-up; neither
 #     changes the doer mechanics this snippet proves.
 #
-# PINNED to an IMMUTABLE versioned release (aeo-agent-v0.1.0). Releases are
+# PINNED to an IMMUTABLE versioned release (aeo-agent-v0.1.1, asset
+# aeo-agent-linux-x86_64-glibc). Releases are
 # versioned-only (no rolling asset), so this URL + SHA never change under you — the
 # fail-closed verify below stays valid for the life of this pin. To move to a new
 # agent, cut a new `aeo-agent-v*` tag (CI prints its SHA in the job summary) and
@@ -59,12 +60,12 @@ write_files:
       exec >>"$log" 2>&1
       echo "=== aeo-doer boot $(date -u +%s) ==="
 
-      AEO_AGENT_URL="https://github.com/aether-lang-org/aeo/releases/download/aeo-agent-v0.1.0/aeo-agent-linux-amd64"
+      AEO_AGENT_URL="https://github.com/aether-lang-org/aeo/releases/download/aeo-agent-v0.1.1/aeo-agent-linux-x86_64-glibc"
       # Immutable versioned asset. The release ships the binary AND its .sha256 (CI
       # uploads both). We pin the EXPECTED sha here AND cross-check the published
       # .sha256 (defense in depth). NB CI builds are NOT bit-identical to a local
       # `ae build` (BuildID/paths differ), so this pin tracks the CI-PUBLISHED asset.
-      AEO_AGENT_SHA256="4ade05227d703bfe3ecd68ee4c19a67618c5c6230a344c5ca25430c771249a24"
+      AEO_AGENT_SHA256="a6713fc030e4826e07d4c768e031e628eb1b24370e56997fab89dddbf4347361"
 
       # 1. FETCH + VERIFY (fail-closed: a bad SHA aborts before chmod/run).
       curl -fsSL "$AEO_AGENT_URL" -o /usr/local/bin/aeo-agent
