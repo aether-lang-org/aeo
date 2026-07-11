@@ -176,7 +176,28 @@ _await_level(booted: ptr, min_secs: int) -> int {
         sleep(tick)
         waited = waited + tick
     }
+    // TIMEOUT/FAIL: surface WHICH nodes weren't UP + their last state, so a stuck
+    // bring-up isn't a silent "bring-up failed". (Diagnostic — cheap, once per level.)
+    _diag_level_not_up(booted, budget)
     return 0
+}
+
+// Print each non-UP node in a timed-out level + its state (diagnostic).
+_diag_level_not_up(booted: ptr, budget: int) {
+    m = list_size(booted)
+    i = 0
+    while i < m {
+        bn = list_get_raw(booted, i)
+        st = get_state(bn)
+        if st != STATE_UP() {
+            sn = "?"
+            if st == STATE_FAILED() { sn = "FAILED" }
+            if st == STATE_BOOTING() { sn = "BOOTING (never became ready in ${string_from_int(budget)}ms)" }
+            if st == STATE_DOWN() { sn = "DOWN" }
+            println("aeo: [${bn}] NOT UP at level timeout — state=${sn}")
+        }
+        i = i + 1
+    }
 }
 
 // 1 if `nm`'s readiness can be batch-checked from a RELIABLE liveness source with
@@ -203,6 +224,15 @@ _batchable(nm: string) -> int {
         }
         if eng == "wsl_podman" {
             return 0
+        }
+        // A container NESTED in a REMOTE proxmox_vm runs inside the guest — a host
+        // `podman ps` can't see it. Its liveness is the guest agent's `status`
+        // (driver_probe -> agent_status_at), so it is NOT batchable.
+        chost = compose.get_host(nm)
+        if string_length(chost) > 0 {
+            if compose.get_kind(chost) == "proxmox_vm" {
+                return 0
+            }
         }
         return 1
     }
@@ -345,6 +375,15 @@ _level_budget_ms(booted: ptr, min_secs: int) -> int {
     return best
 }
 _node_window_ms(nm: string) -> int {
+    // An explicit within()/up_within() is the operator's stated bring-up budget —
+    // honour it directly (it's a duration in ms). This matters for slow bring-ups
+    // like a nested container in a REMOTE proxmox guest (cold podman + image pull +
+    // recursive agent), where the health-retry default (interval×budget = 120s) is
+    // far too short and the node would be spuriously torn down mid-bring-up.
+    wm = compose.get_within_ms(nm)
+    if wm > 0 {
+        return wm
+    }
     iv = compose.get_interval(nm)
     if iv <= 0 {
         iv = 500
@@ -540,6 +579,38 @@ driver_up(nm: string, k: string) -> string {
             }
         }
         if host != "" {
+            // REMOTE PROXMOX guest: a container nested inside a proxmox_vm is run by
+            // the guest's RESIDENT aeo-agent (deployed via cloud_init()+agent()) —
+            // aeo can't ssh/ipam a PVE guest (it's on the remote bridge). Resolve the
+            // guest's LAN IP via the PVE guest-agent and delegate DIRECTLY to
+            // <guest-ip>:9450 (no hostfwd). This is the doer path, in the nested-
+            // container grammar (mirrors kvm_podman/bhyve_podman). See
+            // examples/silly_addition_proxmox_podman.ae.
+            if compose.get_kind(host) == "proxmox_vm" {
+                // WAIT for the guest IP: the container-delegate fires right after the
+                // VM's up() returns, but the guest-agent (and its DHCP IP) only comes
+                // up ~45-90s into cloud-init. Poll guest_ip bounded (~4min) rather
+                // than failing on the first empty result.
+                gip = _wait_guest_ip(host, 80)     // 80 * 3s = 240s
+                if string_length(gip) == 0 {
+                    return "aeo: nested '${nm}' — proxmox_vm '${host}' guest IP never resolved (guest-agent not up after ~4min? check agent(1) + the cloud_init snippet)"
+                }
+                gport = _agent_port(host)          // 9450 by default (the guest agent's bind)
+                // The token MUST match what the doer cloud-init seeded into the guest
+                // agent. _agent_token reads AEO_TOKEN[_<host>] (empty by default ->
+                // agent rejects "unauthorized"). For proxmox default to the doer
+                // snippet's dev token when unset. PROD: seed a per-node sealed token
+                // (the deferred identity/token gap) and set AEO_TOKEN_<host>.
+                gtok = _agent_token(host)
+                if string_length(gtok) == 0 { gtok = "aeo-dev-token" }
+                base = "http://${gip}:${string_from_int(gport)}"
+                // FIRE-AND-RETURN: accept the delegate, then let the engine poll
+                // readiness via probe (agent_status_at — the nested-in-proxmox
+                // container is NON-batchable, so the engine uses the guest agent's
+                // `status`, not a host-local podman ps). A blocking up() would
+                // outlive the level poller and trigger a spurious teardown.
+                return driver_vm.agent_delegate_fire(base, host, nm, gtok)
+            }
             // AGENT PATH (containment-correct): when enabled, aeo does NOT reach
             // into the guest over ssh — it sends a `delegate` to the guest's
             // RESIDENT aeo-agent, which runs the child locally and reports back.
@@ -785,10 +856,20 @@ driver_probe(nm: string, k: string, health: string) -> int {
         if eng == "wsl_podman" {
             return driver_windows.probe(nm, compose.get_wsl_distro(nm), health)
         }
-        if _agent_path_on() == 1 {
-            host = compose.get_host(nm)
-            if string_length(host) > 0 {
-                return driver_vm.agent_status(host, nm, _agent_token(host), _agent_port(host))
+        phost = compose.get_host(nm)
+        if string_length(phost) > 0 {
+            // Nested container in a REMOTE proxmox_vm: probe via the guest agent at
+            // its LAN IP (same doer path as up).
+            if compose.get_kind(phost) == "proxmox_vm" {
+                pgip = driver_proxmox.guest_ip(phost)
+                if string_length(pgip) == 0 { return 0 }
+                pbase = "http://${pgip}:${string_from_int(_agent_port(phost))}"
+                ptok = _agent_token(phost)
+                if string_length(ptok) == 0 { ptok = "aeo-dev-token" }
+                return driver_vm.agent_status_at(pbase, nm, ptok)
+            }
+            if _agent_path_on() == 1 {
+                return driver_vm.agent_status(phost, nm, _agent_token(phost), _agent_port(phost))
             }
         }
         return driver_linux.probe(nm, health, eng)   // "" auto, "docker" pins
@@ -2763,6 +2844,20 @@ _agent_token(host: string) -> string {
     }
     return secrets.resolve(_envc("AEO_TOKEN"))
 }
+// Poll driver_proxmox.guest_ip(host) until it resolves, up to `tries` (3s apart).
+// The container-delegate fires right after the VM up() returns, but the guest's
+// DHCP IP + guest-agent take ~45-90s of cloud-init to appear. Returns the IP or "".
+_wait_guest_ip(host: string, tries: int) -> string {
+    i = 0
+    while i < tries {
+        gip = driver_proxmox.guest_ip(host)
+        if string_length(gip) > 0 { return gip }
+        sleep(3000)
+        i = i + 1
+    }
+    return ""
+}
+
 // Host-side forwarded port to the guest's agent (:9450 in-guest). Per-guest
 // AEO_AGENT_PORT_<host>, else AEO_AGENT_PORT, else the convention default 9450.
 _agent_port(host: string) -> int {

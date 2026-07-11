@@ -1,0 +1,98 @@
+// examples/silly_addition_proxmox_podman.ae — the +VMM+podman cell for PROXMOX:
+// proxmox VMs EACH RUNNING A PODMAN CONTAINER inside, via the recursive aeo-agent
+// chain. The remote-API analog of silly_addition_kvm_podman.ae (KVM) and
+// silly_addition_bhyve_podman.ae (bhyve) — same nested container(){} grammar.
+//
+//   system("silly_addition_proxmox_podman")  (aeo runs anywhere; VMs live on PVE)
+//     ├─ db_vm  (proxmox VM) ─ db  (redis container)
+//     └─ app_vm (proxmox VM) ─ app (python /add container) ──depends──► db
+//
+// HOW IT RUNS — the RECURSIVE AGENT CHAIN (aeo's native "act inside, report
+// outward", one boundary per hop):
+//   aeo (host, depth 0) --delegate--> aeo-agent (proxmox_vm guest, depth 1)
+//                                     --delegate--> aeo-agent (podman container, depth 2)
+//   The VM's agent (deployed by cloud_init()+agent()) doesn't run a pre-baked app
+//   image; it starts a GENERIC base container, MOUNTS its own aeo-agent binary in,
+//   and runs THAT — then the depth-2 agent provisions the app FROM INSIDE. Each
+//   boundary interops via the same delegate/report protocol.
+//
+// WHY not driver_vm's ssh path (like the kvm arm's fallback): a proxmox guest is on
+// the remote PVE bridge — aeo can't ipam/ssh it. Instead aeo resolves the guest's
+// LAN IP via the PVE guest-agent and delegates DIRECTLY to <guest-ip>:9450. So this
+// arm is agent-path ONLY (there is no ssh fallback for a remote guest).
+//
+// This file is a PURE COMPOSITION — nodes + dependencies + the spec files that
+// verify it. NO application source inline.
+//
+//   aeo up    examples/silly_addition_proxmox_podman.ae   deploy (dependency-ordered)
+//   aeo check examples/silly_addition_proxmox_podman.ae   run check() specs, no deploy
+//   aeo down  examples/silly_addition_proxmox_podman.ae   teardown (reverse)
+//
+// PREREQUISITES (beyond the bare proxmox_vm demo): the cloud-init doer snippet must
+// be placed (proxmox_bootstrap.sh) and the VMs declare cloud_init()+agent() so the
+// resident agent exists to delegate to. See docs/aeo-and-proxmox.md.
+
+import compose (system, proxmox_vm, container)
+import compose (host, node, auth_token, storage, bridge, template, cloud_init, agent)
+import compose (cpus, memory, image, expose, env, health, depends, engine, up_within)
+import compose (check, suite)
+import std.os (getenv)
+import std.string (string_length)
+
+exports ( aeo_orchestration )
+
+// ---- the composition — two proxmox VMs, each running a podman container ----
+// Each VM boots with cloud_init()+agent() (the resident aeo-agent); the nested
+// container is delegated to that agent, which runs it (recursively, agent-in-
+// container). db_vm runs redis; app_vm runs the /add service reaching redis.
+aeo_orchestration() {
+    system("silly_addition_proxmox_podman") {
+        // db VM + its redis container (run by the VM's resident agent).
+        db_vm = proxmox_vm("db_vm") {
+            host(_pve_host()); node(_pve_node()); auth_token(getenv("PVE_TOKEN"))
+            storage(_pve_storage()); bridge(_pve_bridge()); template(_pve_template())
+            cloud_init("local:snippets/aeo-agent-init.yaml")   // deploy the resident agent
+            agent(1)                                            // probe waits for guest-agent
+            cpus(2); memory("2G")
+            db = container("db") {
+                engine("podman")
+                image("docker.io/library/redis:alpine")
+                expose(6379)
+                health("redis-cli ping")
+                // cold recursive bring-up (VM boot + cloud-init + agent + podman +
+                // base image + depth-2 agent) — give the engine a generous window.
+                up_within(15m)
+            }
+        }
+
+        // app VM + the /add service container (reaches redis cross-VM via REDIS_HOST).
+        // The /add service is a PREBUILT image (source + build in silly_addition_app/).
+        app_vm = proxmox_vm("app_vm") {
+            host(_pve_host()); node(_pve_node()); auth_token(getenv("PVE_TOKEN"))
+            storage(_pve_storage()); bridge(_pve_bridge()); template(_pve_template())
+            cloud_init("local:snippets/aeo-agent-init.yaml")
+            agent(1)
+            cpus(2); memory("2G")
+            app = container("app") {
+                engine("podman")
+                image("localhost/aeo-examples/silly-add:latest")
+                expose(8080)
+                env("REDIS_HOST", "db")        // reach the db container by name
+                health("curl -fsS http://localhost:8080/add/0/0")
+                depends("db")    // cross-VM edge: 'db' is in db_vm
+                up_within(15m)
+            }
+        }
+
+        // ---- declared verification (external specs; aeo runs them per phase) ----
+        check("examples/checks/proxmox_model.spec.ae")
+        suite("examples/checks/proxmox_suite.spec.ae")
+    }
+}
+
+// ---- helpers (env-swappable, same as the bare proxmox demo) ----
+_pve_host() -> string { v = getenv("PVE_HOST");     if string_length(v) == 0 { return "192.168.0.204:8006" } return v }
+_pve_node() -> string { v = getenv("PVE_NODE");     if string_length(v) == 0 { return "pve" }               return v }
+_pve_storage() -> string { v = getenv("PVE_STORAGE"); if string_length(v) == 0 { return "local-lvm" }       return v }
+_pve_bridge() -> string { v = getenv("PVE_BRIDGE"); if string_length(v) == 0 { return "vmbr0" }             return v }
+_pve_template() -> string { v = getenv("PVE_TEMPLATE"); if string_length(v) == 0 { return "debian-12-cloudinit" } return v }

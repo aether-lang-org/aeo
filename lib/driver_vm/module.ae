@@ -35,7 +35,7 @@ import secrets
 
 exports (
     name,
-    up, bhyve_up, guest_container_up, agent_delegate, agent_status, build_agent_seed, exec_capture, down, probe,
+    up, bhyve_up, guest_container_up, agent_delegate, agent_delegate_at, agent_delegate_fire, agent_status, agent_status_at, build_agent_seed, exec_capture, down, probe,
     bhyve_argv, qemu_argv, bhyvectl_destroy_argv,
     pidfile_for, bootrom_path
 )
@@ -481,15 +481,40 @@ _aeo_home() -> string {
 // Drivers shell out (LLM.md), so this dials via curl rather than the in-process
 // transport_http client.
 agent_delegate(host_vm: string, child: string, token: string, port: int) -> string {
-    base = "http://127.0.0.1:${_itoa(port)}"
+    // Local VM (kvm/bhyve): the agent is reached via a HOSTFWD on 127.0.0.1:<port>.
+    return agent_delegate_at("http://127.0.0.1:${_itoa(port)}", host_vm, child, token)
+}
+
+// agent_delegate_at(base, ...) — same as agent_delegate but the caller supplies the
+// FULL agent base URL. A REMOTE guest (proxmox_vm) is reached DIRECTLY at its LAN
+// IP (http://<guest-ip>:9450 — no hostfwd; the guest is on the PVE bridge), so the
+// proxmox path resolves the guest IP (driver_proxmox.guest_ip) and calls this.
+agent_delegate_at(base: string, host_vm: string, child: string, token: string) -> string {
     // ASYNC: `delegate` returns fast (the agent fires the child bring-up in the
     // background and replies `pending`), so we DON'T block on it. Then we POLL
     // `status <child>` until the child reports up — a cold bring-up (podman
     // install + image pull) can take minutes, which is why it can't be one
     // synchronous request. Bounded overall budget.
-    del = _agent_post(base, "delegate ${token} ${child}")
+    //
+    // TWO-STAGE READINESS (remote guest): the guest can have its IP (guest-agent
+    // reports it) BEFORE aeo-agent's :9450 listener is up — cloud-init is still
+    // fetching/starting it. So the FIRST delegate can hit connection-refused
+    // (_agent_post -> ""). RETRY the delegate until the agent answers, bounded
+    // (~2min), before giving up.
+    del = ""
+    dtries = 0
+    while dtries < 40 {
+        del = _agent_post(base, "delegate ${token} ${child}")
+        if string_contains(del, "report") == 1 {
+            dtries = 999                     // got a real reply — proceed to status poll
+        }
+        if dtries != 999 {
+            _sleep_s(3)                      // agent not listening yet — wait + retry
+            dtries = dtries + 1
+        }
+    }
     if string_contains(del, "report") == 0 {
-        return "aeo: guest '${host_vm}' agent refused/failed delegate '${child}': '${del}'"
+        return "aeo: guest '${host_vm}' agent never accepted delegate '${child}' (agent up on :9450? last reply: '${del}')"
     }
     // poll status (~10min budget: cold apt podman ~2min + image pull + retries)
     tries = 0
@@ -506,11 +531,41 @@ agent_delegate(host_vm: string, child: string, token: string, port: int) -> stri
     }
     return "aeo: nested node '${child}' did not come up in guest '${host_vm}' (timeout)"
 }
+
+// agent_delegate_fire(base, ...) — ENGINE-NATIVE delegate for the remote (proxmox)
+// path: RETRY until the guest agent ACCEPTS the delegate (reply contains "report";
+// the http agent fires the child async + replies "pending"), then RETURN
+// immediately. Readiness is NOT polled here — the runner's engine polls it via
+// driver_probe -> agent_status_at, so a cold depth-2 bring-up (podman + base image)
+// happens WITHIN the node's within() budget instead of blocking up() for ~12min
+// (which would outlive the level poller and trigger a spurious teardown).
+agent_delegate_fire(base: string, host_vm: string, child: string, token: string) -> string {
+    dtries = 0
+    while dtries < 40 {
+        del = _agent_post(base, "delegate ${token} ${child}")
+        if string_contains(del, "report") == 1 {
+            if string_contains(del, "unauthorized") == 1 {
+                return "aeo: guest '${host_vm}' agent rejected delegate '${child}': unauthorized (token mismatch with the guest agent's seed)"
+            }
+            return ""                        // accepted; engine polls readiness
+        }
+        if string_contains(del, "unauthorized") == 1 {
+            return "aeo: guest '${host_vm}' agent rejected delegate '${child}': unauthorized (token mismatch)"
+        }
+        _sleep_s(3)                          // agent not listening yet — wait + retry
+        dtries = dtries + 1
+    }
+    return "aeo: guest '${host_vm}' agent never accepted delegate '${child}' (agent up on :9450?)"
+}
 // One-shot health probe of a nested node via the guest's agent `status` verb.
 // Returns 1 if the child reports up, else 0. Used by the runner's driver_probe
 // for agent-path nested containers (a host podman probe can't see them).
 agent_status(host_vm: string, child: string, token: string, port: int) -> int {
-    base = "http://127.0.0.1:${_itoa(port)}"
+    return agent_status_at("http://127.0.0.1:${_itoa(port)}", child, token)
+}
+// agent_status_at(base, ...) — like agent_status but caller supplies the full agent
+// base URL (a remote proxmox guest is dialed at http://<guest-ip>:9450 directly).
+agent_status_at(base: string, child: string, token: string) -> int {
     st = _agent_post(base, "status ${token} ${child}")
     if string_contains(st, " up") == 1 {
         return 1

@@ -51,7 +51,7 @@ import std.http.client (
     response_status, response_body, response_free
 )
 
-exports ( up, down, probe, available, preflight, reachable, api_base, resolve_vmid )
+exports ( up, down, probe, available, preflight, reachable, guest_ip, api_base, resolve_vmid )
 
 // ---- endpoint + auth ----------------------------------------------------------
 
@@ -300,6 +300,46 @@ _status_of(nm: string, vmid: int) -> string {
     d = _data(_res_body(r))
     if d == null { return "" }
     return _gs(d, "status")
+}
+
+// guest_ip(nm) -> the running VM's first non-loopback IPv4 LAN address (""  if
+// unavailable). Queries the PVE guest-agent (/agent/network-get-interfaces — needs
+// VM.GuestAgent.Audit, which the least-priv token has). This is how aeo reaches a
+// proxmox_vm's RESIDENT aeo-agent to delegate a nested container: the guest is on
+// the PVE bridge (a LAN here), so <guest-ip>:9450 is directly reachable — no hostfwd
+// (unlike local kvm). Proven live: token resolved 192.168.0.15. Walks the nested
+// JSON: data.result[].ip-addresses[] where ip-address-type=="ipv4".
+guest_ip(nm: string) -> string {
+    vmid = resolve_vmid(nm, _pve_name(nm))
+    if vmid < 0 { return "" }
+    r = _pve(nm, "GET", "/nodes/${compose.get_pve_node(nm)}/qemu/${string_from_int(vmid)}/agent/network-get-interfaces", list_new())
+    if _res_code(r) != "200" { return "" }
+    d = _data(_res_body(r))              // the "data" node: {result: [...]}
+    if d == null { return "" }
+    ifaces = json_object_get_raw(d, "result")
+    if ifaces == null { return "" }
+    ni = json_array_size(ifaces)
+    i = 0
+    while i < ni {
+        iface = json_array_get_raw(ifaces, i)
+        addrs = json_object_get_raw(iface, "ip-addresses")
+        if addrs != null {
+            na = json_array_size(addrs)
+            j = 0
+            while j < na {
+                a = json_array_get_raw(addrs, j)
+                if _eq(_gs(a, "ip-address-type"), "ipv4") == 1 {
+                    ip = _gs(a, "ip-address")
+                    if _eq(ip, "127.0.0.1") == 0 {
+                        if string_length(ip) > 0 { return ip }
+                    }
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    return ""
 }
 
 // poll _status_of(vmid) until it equals `want`, up to `tries` (2s apart). 1=ok.
