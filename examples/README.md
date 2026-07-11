@@ -68,15 +68,38 @@ prod**: a dedicated service user, a custom least-privilege role, a resource-pool
 blast radius, and a privilege-separated, expiring API token — provisioned by
 [`checks/proxmox_token_setup.sh`](checks/proxmox_token_setup.sh) and proven
 allowed-vs-denied in [`checks/proxmox_token_setup.md`](checks/proxmox_token_setup.md).
-**RUNNABLE** — the whole lifecycle is **live-proven** (2026-07-11, against a real
-PVE box): `aeo up` clones the template → configures cloud-init → starts the VMs
-(db_vm + app_vm came up *running*, dependency-ordered); `aeo down` stops → destroys
-each and verifies gone (template preserved). `driver_proxmox` is a pure API client
-on `std.http.client` (native Aether HTTP, no curl). Operator prereqs on a bare box:
-a cloud-init template, and it must be a **member of aeo's pool** so the least-priv
-token can clone it (`pvesh set /pools/aeo-prod --vms <id>`). The `aeo check` gate
-still fails LOUD on a missing endpoint/token. Frontier follow-ups: an in-guest
-health probe (ssh/qemu-agent) and a TLS CA/fingerprint pin.
+**RUNNABLE** — the whole lifecycle is **live-proven**: `aeo up` clones the template
+→ configures cloud-init → starts the VMs (dependency-ordered); `aeo down` stops →
+destroys each (template preserved). `driver_proxmox` is a pure API client on
+`std.http.client` (native Aether HTTP, no curl), and every 8006 call is **verified
+against PVE's own CA** (couriered over ssh — no blind trust).
+
+### Runbook: a fresh orchestrator (Chromebook or other) → a running deploy
+
+The PVE 8006 API can't do host-shell (template build, snippet placement, pool ops),
+so those are **one-time host setup over ssh** (root); the deploy itself is then
+pure-API with a least-privilege token. Run in order:
+
+```sh
+# --- one-time host setup (ssh root@<pve>) ---
+PVE_SSH=root@<pve> sh checks/proxmox_bootstrap.sh     # template + pool member + doer snippet
+PVE_SSH=root@<pve> sh checks/proxmox_token_setup.sh   # least-priv CISO token  -> prints PVE_TOKEN
+PVE_SSH=root@<pve> sh checks/proxmox_pin_ca.sh        # courier PVE's CA       -> prints AEO_PVE_CACERT
+
+# --- deploy (pure 8006 API, verified TLS, least-priv token) ---
+export PVE_TOKEN="aeo@pve!deploy=<secret>"            # from proxmox_token_setup.sh
+export AEO_PVE_CACERT="$(pwd)/pve-root-ca.pem"        # from proxmox_pin_ca.sh
+aeo check examples/silly_addition_proxmox.ae          # model + remote-host preflight
+aeo up    examples/silly_addition_proxmox.ae          # clone → cloud-init → start
+aeo down  examples/silly_addition_proxmox.ae          # stop → destroy
+```
+
+Host-agent (optional): `checks/proxmox_host_agent_install.sh` installs aeo-agent ON
+the PVE host as a loopback systemd listener (fetched from GH-releases, ssh-gated).
+The in-guest doer (aeo-agent fetched via cloud-init, runs the workload container)
+is `checks/proxmox_cloudinit.yaml` + `cloud_init()`/`agent()` in the composition.
+Deferred follow-ups (see TODO): per-node identity/token seeding; a host-agent
+health-multiplexer.
 
 The naming is by SUBSTRATE (bhyve_podman / kvm / containers / jails / lxc / bwrap),
 not the workload. (The original demo was `silly_addition_cache.ae`; renamed for
