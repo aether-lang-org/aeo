@@ -636,7 +636,7 @@ driver_up(nm: string, k: string) -> string {
     if k == "kvm" {
         return driver_vm.up("kvm", nm, compose.get_image(nm), compose.get_cpus(nm), compose.get_memory(nm), compose.get_nic(nm))
     }
-    if k == "proxmox" {
+    if k == "proxmox_vm" {
         // REMOTE VM on a Proxmox VE host, over its HTTPS API (driver_proxmox):
         // clone the template -> cloud-init config -> start. All node inputs
         // (host/node/token/storage/bridge/template/cpus/memory) come from the
@@ -732,7 +732,7 @@ driver_down(nm: string, k: string) -> string {
     if k == "kvm" {
         return driver_vm.down("kvm", nm)
     }
-    if k == "proxmox" {
+    if k == "proxmox_vm" {
         // Remote PVE VM: stop -> destroy(--purge) over the API (idempotent — a
         // VM that isn't there is already down).
         return driver_proxmox.down(nm)
@@ -802,7 +802,7 @@ driver_probe(nm: string, k: string, health: string) -> int {
     if k == "kvm" {
         return driver_vm.probe("kvm", nm, health)
     }
-    if k == "proxmox" {
+    if k == "proxmox_vm" {
         // Remote PVE VM liveness == status/current is "running" (API probe). A
         // deeper in-guest health() check (ssh/qemu-agent) is a follow-up; for now
         // "the hypervisor reports it running" is the readiness signal.
@@ -847,7 +847,7 @@ _proxmox_preflight() -> int {
     while i < n {
         nm = compose.name_at(i)
         kk = compose.get_kind(nm)
-        if kk == "proxmox" || kk == "proxmox_ct" {
+        if kk == "proxmox_vm" || kk == "proxmox_ct" {
             if driver_proxmox.reachable(nm) == 0 {
                 // box down / offline / away — NOT a model error; warn and continue.
                 println("aeo: [${nm}] NOTE — PVE host ${compose.get_pve_host(nm)} unreachable; skipping remote preflight (the data model is validated; run `aeo check` where the box is reachable to verify host readiness)")
@@ -1339,35 +1339,21 @@ _engine_downable(nm: string) -> int {
 
 // 1 iff `k` has a dedicated (non-container-engine) driver arm in driver_down.
 _kind_has_driver(k: string) -> int {
-    if k == "jail" {
-        return 1
-    }
-    if k == "bhyve" {
-        return 1
-    }
-    if k == "kvm" {
-        return 1
-    }
-    if k == "proxmox" {
-        return 1
-    }
-    if k == "proxmox_ct" {
-        return 1
-    }
-    if k == "lxc" {
-        return 1
-    }
-    if k == "bwrap" {
-        return 1
-    }
-    if k == "nspawn" {
-        return 1
-    }
-    if k == "firecracker" {
-        return 1
-    }
-    if k == "kata" {
-        return 1
+    // Dedicated (non-container-engine) driver kinds. String dispatch via match
+    // (the Aether idiom for value dispatch — see aether LLM.md). Any new such kind
+    // (e.g. a future proxmox_* variant) adds one arm here.
+    match (k) {
+        "jail" -> { return 1; }
+        "bhyve" -> { return 1; }
+        "kvm" -> { return 1; }
+        "proxmox_vm" -> { return 1; }
+        "proxmox_ct" -> { return 1; }
+        "lxc" -> { return 1; }
+        "bwrap" -> { return 1; }
+        "nspawn" -> { return 1; }
+        "firecracker" -> { return 1; }
+        "kata" -> { return 1; }
+        _ -> { return 0; }
     }
     return 0
 }
@@ -2984,60 +2970,33 @@ _wsl_engined(nm: string, k: string) -> int {
 // linux (a WSL-engined container is exempted in _preflight). Unknown kinds
 // rejected.
 _kind_runnable(k: string, fam: string) -> int {
-    if k == "jail" {
-        return _eq(fam, "bsd")
-    }
-    if k == "bhyve" {
-        return _eq(fam, "bsd")
-    }
-    if k == "lxc" {
-        return _eq(fam, "linux")
-    }
-    if k == "container" {
-        // A `container` realized by a WSL engine (wslc / wsl_podman) runs on a
-        // WINDOWS host, not Linux — the driver's own available() is the real
-        // gate there, so don't linux-block it. podman/docker/"" containers are
-        // ENGINE-gated, not family-gated: the engine runs wherever its binary
-        // resolves (Linux natively; macOS via Docker Desktop / podman machine),
-        // so "can this host execute this kind" == "does the engine resolve".
-        // This also upgrades Linux-without-an-engine from a mid-bring-up
-        // failure to the eval-time fast-fail every other impossible kind gets —
-        // and it makes aeo demoable on a stock Mac.
-        return 1
-    }
-    if k == "kvm" {
-        return _eq(fam, "linux")
-    }
-    if k == "proxmox" {
-        // A proxmox_vm is a REMOTE substrate: aeo drives a Proxmox VE host over
-        // its HTTPS API, so the ORCHESTRATOR's host family is irrelevant (aeo can
-        // run on Linux/BSD/macOS and target PVE all the same). Host-family-
-        // agnostic, like container/load_balancer — the real gate is reachability
-        // of host()/auth_token(), checked by proxmox_model_errors() and (at up)
-        // by the driver_proxmox arm (the documented frontier).
-        return 1
-    }
-    if k == "proxmox_ct" {
-        return 1                        // remote LXC — same host-family-agnostic remote substrate
-    }
-    if k == "bwrap" {
-        return _eq(fam, "linux")
-    }
-    if k == "nspawn" {
-        return _eq(fam, "linux")
-    }
-    if k == "firecracker" {
-        return _eq(fam, "linux")
-    }
-    if k == "kata" {
-        return _eq(fam, "linux")
-    }
-    if k == "load_balancer" {
-        // The L7 balancer node runs the aeo-lb front-door (an std.http.proxy)
-        // locally — host-family-agnostic; the driver's available() (is aeo-lb
-        // built?) is the real gate. Its :container substrate is a separate
-        // concern realized by the backend children, not this node.
-        return 1
+    // Can this ORCHESTRATOR host run kind `k`? Family-gated kinds return
+    // _eq(fam,...); host-family-agnostic kinds (container/engine-gated, the remote
+    // proxmox_* substrates, the local load_balancer front-door) return 1 and defer
+    // to the driver's own available(). String dispatch via match (aether LLM.md).
+    match (k) {
+        "jail" -> { return _eq(fam, "bsd"); }
+        "bhyve" -> { return _eq(fam, "bsd"); }
+        "lxc" -> { return _eq(fam, "linux"); }
+        "kvm" -> { return _eq(fam, "linux"); }
+        "bwrap" -> { return _eq(fam, "linux"); }
+        "nspawn" -> { return _eq(fam, "linux"); }
+        "firecracker" -> { return _eq(fam, "linux"); }
+        "kata" -> { return _eq(fam, "linux"); }
+        // container: ENGINE-gated, not family-gated (podman/docker resolve on Linux
+        // natively, macOS via Docker Desktop / podman machine; wslc/wsl_podman on
+        // Windows). The engine's resolve IS the gate — so runnable everywhere, the
+        // eval-time fast-fail happens at engine_resolve. Demoable on a stock Mac.
+        "container" -> { return 1; }
+        // proxmox_vm / proxmox_ct: REMOTE substrates driven over the PVE HTTPS API,
+        // so the orchestrator's family is irrelevant. The real gate is reachability
+        // of host()/auth_token() (proxmox_model_errors + the driver at up).
+        "proxmox_vm" -> { return 1; }
+        "proxmox_ct" -> { return 1; }
+        // load_balancer: the L7 aeo-lb front-door runs locally, host-family-agnostic;
+        // the driver's available() (is aeo-lb built?) is the real gate.
+        "load_balancer" -> { return 1; }
+        _ -> { return 0; }
     }
     return 0
 }

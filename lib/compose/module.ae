@@ -178,7 +178,7 @@ kvm_vm(nm: string) -> string {
 // examples/silly_addition_proxmox.ae.
 proxmox_vm(nm: string) -> string {
     config.put("aeo.cmp.curhost", "")
-    resource(nm, "proxmox")
+    resource(nm, "proxmox_vm")
     config.put("aeo.cmp.curhost", nm)
     return nm
 }
@@ -1486,7 +1486,7 @@ proxmox_model_errors() -> string {
     i = 0
     while i < n {
         nm = name_at(i)
-        if config.get("aeo.cmp.kind.${nm}") == "proxmox" {
+        if config.get("aeo.cmp.kind.${nm}") == "proxmox_vm" {
             if get_pve_host(nm) == "" {
                 out = _pve_err(out, "proxmox_vm '${nm}' has no host() — the PVE API endpoint (e.g. \"192.168.0.204:8006\") is required")
             }
