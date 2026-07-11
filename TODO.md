@@ -380,13 +380,29 @@ Gaps:
       "agent fetched + verified" + "agent started" -> agent /health=200 reachable
       from the orchestrator over the LAN -> POST /dispatch "boot" -> "report ... up"
       -> busybox workload CONTAINER confirmed `podman ps` Up in the guest -> `aeo
-      down` clean. TWO PRODUCTION-SEEDING GAPS (mechanism proven; these are polish):
-      (1) IDENTITY — a generic image boots hostname "localhost" so AEO_NODE=localhost;
-      the driver must seed the node name (cloud-init hostname / vendor-data).
+      down` clean. RE-PROVEN against the IMMUTABLE versioned release aeo-agent-v0.1.1
+      (asset aeo-agent-linux-x86_64-glibc, SHA a6713fc0) 2026-07-11: fetch+verify ->
+      /health 200 -> dispatch boot -> "report ... up" -> busybox container Up. The
+      GitHub-Releases delivery is CI-published + versioned-only (see the CI item).
+      TWO PRODUCTION-SEEDING GAPS (mechanism proven; these are polish):
+      (1) IDENTITY — a generic image boots hostname "localhost" so AEO_NODE=localhost.
+      LIVE-INVESTIGATED 2026-07-11, BOTH clean paths are BLOCKED for the least-priv
+      token: (a) SMBIOS serial — guest CAN read /sys/class/dmi/id/product_serial (no
+      root), but setting `smbios1` needs VM.Config.HWType -> 403 (token widening); (b)
+      PVE NoCloud meta-data doesn't carry local-hostname, and our cicustom user-data
+      overrides the name-derived default, so the guest never sees the VM name through
+      a token-writable channel. So the real options are: DRIVER GENERATES a per-node
+      cicustom (writes hostname/AEO_NODE) + places it via ssh-to-PVE-host (token stays
+      least-priv; driver gains host ssh — but it's config text, not a 5MB binary), OR
+      widen the role with VM.Config.HWType + set smbios1=serial=<node> (token-only, +1
+      config priv, guest reads product_serial). DECISION DEFERRED (Paul: revisit
+      later) — AEO_NODE=localhost only matters once multi-node identity/recursion is
+      exercised, which the demo doesn't yet.
       (2) TOKEN — dev token in the snippet; prod seals a per-node token via
-      lib/secrets and seeds it. Neither changes the doer mechanics. NEXT: seed
-      identity+token per-node from the driver; then probe() checks the WORKLOAD
-      (agent reports its container healthy), not just guest-agent liveness.
+      lib/secrets and seeds it (same per-node-cicustom seam as identity option (a)).
+      Neither changes the doer mechanics. NEXT (when picked up): seed identity+token
+      per-node from the driver; then probe() checks the WORKLOAD (agent reports its
+      container healthy), not just guest-agent liveness.
       ORIGINAL DECISION (2026-07-11, debated + spiked live): the template
       stays a GENERIC cloud image; the node's identity is completed at runtime from
       inside, by aeo-agent (aeo's native "act inside, report outward" recursion — a
