@@ -47,10 +47,16 @@ jobs:
       - name: Install the Aether toolchain (ae)
         # get.sh builds ae from source (Aether -> C -> make); no chicken-and-egg.
         # AETHER_REF pins the toolchain version (input, else the latest tag).
+        # Install to $HOME/.local (get.sh's default, user-writable — a PREFIX of
+        # /usr/local needs root and 'install' fails "Operation not permitted" on the
+        # runner), then add its bin to PATH for later steps.
         run: |
           curl -sSL https://raw.githubusercontent.com/aether-lang-org/aether/main/get.sh \
-            | AETHER_REF="${{ github.event.inputs.ref }}" PREFIX=/usr/local sh
-          ae --version
+            | AETHER_REF="${{ github.event.inputs.ref }}" PREFIX="$HOME/.local" sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Verify ae is on PATH
+        run: ae --version
 
       - name: Build aeo-agent (linux-amd64, glibc)
         run: |
