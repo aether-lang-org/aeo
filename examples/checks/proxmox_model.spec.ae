@@ -1,0 +1,115 @@
+// examples/checks/proxmox_model.spec.ae — the DATA-MODEL check for the
+// silly_addition_proxmox composition. Declared by `check(...)` in that example; run
+// by `aeo check examples/silly_addition_proxmox.ae` (no deploy, runs anywhere). It
+// re-declares the composition (a spec is its own process, so it can't inherit the
+// runner's in-memory tree) and asserts the resolved model + the proxmox check-gate.
+//
+//   sh test/run-spec.sh examples/checks/proxmox_model.spec.ae
+//
+// Proves: the two nodes resolve as proxmox VMs with the remote-host attributes
+// (host/node/token/storage/bridge/template) recorded; the dependency edge holds;
+// and the gate (proxmox_model_errors) is SILENT on a well-formed tree but FIRES —
+// by name — when host()/node()/auth_token()/template() is missing.
+
+import aeocha
+import compose (system, proxmox_vm)
+import compose (host, node, auth_token, storage, bridge, template, cpus, memory, depends)
+import compose (get_pve_host, get_pve_node, get_pve_token, get_pve_storage, get_pve_bridge, get_pve_template)
+import compose (get_depends, proxmox_model_errors, reset_nodes)
+import std.os
+import std.string (string_length, string_from_int)
+import std.string   // bare: inlined aeocha calls bare exports unqualified
+
+// The SAME declaration the example carries, with env-swappable helpers tracking
+// the same env vars. auth_token uses a FIXED value here (not getenv) so the spec
+// is hermetic — the gate's "token present" assertion mustn't depend on the
+// caller's environment; the example itself reads getenv("PVE_TOKEN").
+_declare() {
+    system("silly_addition_proxmox") {
+        db_vm = proxmox_vm("db_vm") {
+            host(_h()); node(_n()); auth_token("aeo@pve!deploy=SPECFIXTURE")
+            storage(_s()); bridge(_b()); template(_t())
+            cpus(2); memory("2G")
+        }
+        app_vm = proxmox_vm("app_vm") {
+            host(_h()); node(_n()); auth_token("aeo@pve!deploy=SPECFIXTURE")
+            storage(_s()); bridge(_b()); template(_t())
+            cpus(2); memory("2G")
+            depends("db_vm")
+        }
+    }
+}
+
+_h() -> string { v = os.getenv("PVE_HOST");     if string_length(v) == 0 { return "192.168.0.204:8006" } return v }
+_n() -> string { v = os.getenv("PVE_NODE");     if string_length(v) == 0 { return "pve" }               return v }
+_s() -> string { v = os.getenv("PVE_STORAGE");  if string_length(v) == 0 { return "local-lvm" }         return v }
+_b() -> string { v = os.getenv("PVE_BRIDGE");   if string_length(v) == 0 { return "vmbr0" }             return v }
+_t() -> string { v = os.getenv("PVE_TEMPLATE"); if string_length(v) == 0 { return "debian-12-cloudinit" } return v }
+
+main() {
+    fw = aeocha.init()
+    reset_nodes()
+    _declare()
+
+    aeocha.describe(fw, "silly_addition_proxmox — data model + gate") {
+
+        aeocha.it("resolves two proxmox VMs with the remote-host attributes") callback {
+            aeocha.expect_str(get_pve_host("db_vm")).to_equal_str(_h())
+            aeocha.expect_str(get_pve_node("db_vm")).to_equal_str(_n())
+            aeocha.expect_str(get_pve_storage("db_vm")).to_equal_str(_s())
+            aeocha.expect_str(get_pve_bridge("db_vm")).to_equal_str(_b())
+            aeocha.expect_str(get_pve_template("db_vm")).to_equal_str(_t())
+        }
+
+        aeocha.it("records the auth_token on each node (secret round-trips)") callback {
+            aeocha.expect_str(get_pve_token("db_vm")).to_equal_str("aeo@pve!deploy=SPECFIXTURE")
+            aeocha.expect_str(get_pve_token("app_vm")).to_equal_str("aeo@pve!deploy=SPECFIXTURE")
+        }
+
+        aeocha.it("app_vm depends on db_vm (ordering edge)") callback {
+            aeocha.expect_str(get_depends("app_vm")).to_equal_str("db_vm")
+        }
+
+        aeocha.describe("the proxmox check-gate") {
+            aeocha.it("is SILENT on a well-formed tree") callback {
+                reset_nodes(); _declare()
+                aeocha.expect_str(proxmox_model_errors()).to_equal_str("")
+            }
+            aeocha.it("FIRES by name when auth_token() is missing (PVE_TOKEN unset)") callback {
+                reset_nodes()
+                system("silly_addition_proxmox") {
+                    proxmox_vm("db_vm") {
+                        host("h:8006"); node("pve"); template("t")   // NO auth_token
+                    }
+                }
+                errs = proxmox_model_errors()
+                aeocha.expect_int(_has(errs, "proxmox_vm 'db_vm' has no auth_token()")).to_be_truthy()
+            }
+            aeocha.it("FIRES when host() is missing") callback {
+                reset_nodes()
+                system("s") {
+                    proxmox_vm("db_vm") {
+                        node("pve"); auth_token("x"); template("t")   // NO host
+                    }
+                }
+                aeocha.expect_int(_has(proxmox_model_errors(), "proxmox_vm 'db_vm' has no host()")).to_be_truthy()
+            }
+            aeocha.it("FIRES when template() is missing") callback {
+                reset_nodes()
+                system("s") {
+                    proxmox_vm("db_vm") {
+                        host("h:8006"); node("pve"); auth_token("x")  // NO template
+                    }
+                }
+                aeocha.expect_int(_has(proxmox_model_errors(), "proxmox_vm 'db_vm' has no template()")).to_be_truthy()
+            }
+        }
+    }
+
+    aeocha.run_summary(fw)
+}
+
+_has(hay: string, needle: string) -> int {
+    if string.contains(hay, needle) == 1 { return 1 }
+    return 0
+}

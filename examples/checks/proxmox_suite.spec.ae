@@ -1,0 +1,65 @@
+// examples/checks/proxmox_suite.spec.ae — the POST-DEPLOY suite for
+// silly_addition_proxmox. Declared by `suite(...)` in that example; run by
+// `aeo suite examples/silly_addition_proxmox.ae`.
+//
+//   sh test/run-spec.sh examples/checks/proxmox_suite.spec.ae
+//
+// HONEST scope: driver_proxmox — the API client that clones the template, sets
+// cloud-init, and starts the VM on the remote PVE host — is NOT yet realized (the
+// documented FRONTIER; see examples/silly_addition_proxmox.ae and
+// examples/checks/proxmox_token_setup.md). So there is no live in-guest arithmetic
+// probe here, and `aeo up`/`down` around this suite currently model-and-gate rather
+// than provision. This suite therefore RE-ASSERTS the resolved data model — the
+// same tree the model check proves — documenting that the live create/start/teardown
+// lands with driver_proxmox. When that arm exists, this file gains the real probe
+// (clone → cloud-init → /add over the VM's address → teardown).
+//
+// What IS proven live today (outside this spec): the least-privilege API token
+// really authenticates to the PVE API and is scoped to exactly what aeo needs —
+// see the allowed/denied evidence in examples/checks/proxmox_token_setup.md.
+
+import aeocha
+import compose (system, proxmox_vm)
+import compose (host, node, auth_token, storage, bridge, template, cpus, memory, depends)
+import compose (get_pve_host, get_pve_template, get_depends, proxmox_model_errors, reset_nodes)
+import std.os
+import std.string (string_length)
+import std.string   // bare: inlined aeocha calls bare exports unqualified
+
+_declare() {
+    system("silly_addition_proxmox") {
+        db_vm = proxmox_vm("db_vm") {
+            host(_h()); node(_n()); auth_token("aeo@pve!deploy=SPECFIXTURE")
+            storage(_s()); bridge(_b()); template(_t()); cpus(2); memory("2G")
+        }
+        app_vm = proxmox_vm("app_vm") {
+            host(_h()); node(_n()); auth_token("aeo@pve!deploy=SPECFIXTURE")
+            storage(_s()); bridge(_b()); template(_t()); cpus(2); memory("2G")
+            depends("db_vm")
+        }
+    }
+}
+
+_h() -> string { v = os.getenv("PVE_HOST");     if string_length(v) == 0 { return "192.168.0.204:8006" } return v }
+_n() -> string { v = os.getenv("PVE_NODE");     if string_length(v) == 0 { return "pve" }               return v }
+_s() -> string { v = os.getenv("PVE_STORAGE");  if string_length(v) == 0 { return "local-lvm" }         return v }
+_b() -> string { v = os.getenv("PVE_BRIDGE");   if string_length(v) == 0 { return "vmbr0" }             return v }
+_t() -> string { v = os.getenv("PVE_TEMPLATE"); if string_length(v) == 0 { return "debian-12-cloudinit" } return v }
+
+main() {
+    fw = aeocha.init()
+    reset_nodes()
+    _declare()
+
+    aeocha.describe(fw, "silly_addition_proxmox — suite (model re-assert; live arm is frontier)") {
+        aeocha.it("the tree is well-formed (gate silent) — ready for driver_proxmox") callback {
+            aeocha.expect_str(proxmox_model_errors()).to_equal_str("")
+        }
+        aeocha.it("db_vm clones the operator template; app_vm depends on it") callback {
+            aeocha.expect_str(get_pve_template("db_vm")).to_equal_str(_t())
+            aeocha.expect_str(get_depends("app_vm")).to_equal_str("db_vm")
+        }
+    }
+
+    aeocha.run_summary(fw)
+}

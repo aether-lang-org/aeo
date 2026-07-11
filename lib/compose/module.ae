@@ -31,7 +31,10 @@ import std.string (string_length, string_char_at, string_from_int, string_substr
 
 exports (
     system,
-    bhyve_vm, freebsd_vm, get_flavor, kvm_vm,
+    bhyve_vm, freebsd_vm, get_flavor, kvm_vm, proxmox_vm,
+    host, node, auth_token, storage, bridge, template,
+    get_pve_host, get_pve_node, get_pve_token, get_pve_storage, get_pve_bridge, get_pve_template,
+    proxmox_model_errors,
     resource,
     container, lxc, kvm, jail, bhyve, bwrap, nspawn, firecracker, kata,
     engine, get_engine,
@@ -152,6 +155,28 @@ get_flavor(nm: string) -> string {
 kvm_vm(nm: string) -> string {
     config.put("aeo.cmp.curhost", "")
     resource(nm, "kvm")
+    config.put("aeo.cmp.curhost", nm)
+    return nm
+}
+
+// proxmox_vm(nm) — a VM realized on a REMOTE Proxmox VE host, driven over its
+// HTTPS API (port 8006), NOT by local shell-out. This is aeo's first substrate
+// where the target is a remote host addressed by an endpoint + token rather than
+// the box aeo runs on. The node carries host()/node()/auth_token() (WHERE + HOW
+// to reach the PVE API) and storage()/bridge()/template() (WHAT to clone). Like
+// kvm_vm it is a flat leaf VM (it boots a clone of an operator-provisioned
+// template — aeo doesn't build the template).
+//
+// REAL today: the data model + check-gate; the token really authenticates to the
+// PVE API (proven against 192.168.0.204 — see examples/checks/proxmox_token_setup.md).
+// FRONTIER: driver_proxmox — the client that POSTs /nodes/<node>/qemu to clone,
+// set cloud-init, and start the VM — is not yet realized, so `aeo up` models-and-
+// gates. Wiring the live create/start/teardown is the follow-up (model-surface
+// first, exactly as load_balancer and egress_fqdn landed). See
+// examples/silly_addition_proxmox.ae.
+proxmox_vm(nm: string) -> string {
+    config.put("aeo.cmp.curhost", "")
+    resource(nm, "proxmox")
     config.put("aeo.cmp.curhost", nm)
     return nm
 }
@@ -601,6 +626,18 @@ cpus(_ctx: ptr, n: int)       { config.put("aeo.cmp.cpus.${_ctx}", string_from_i
 memory(_ctx: ptr, v: string)  { config.put("aeo.cmp.memory.${_ctx}", v) }
 nic(_ctx: ptr, v: string)     { config.put("aeo.cmp.nic.${_ctx}", v) }
 
+// proxmox_vm attributes — WHERE + HOW to reach the PVE API, and WHAT to clone.
+// host()/node()/auth_token() locate the remote host; storage()/bridge()/template()
+// name the clone target. auth_token() carries the SECRET only via getenv() at the
+// call site (never a literal) — the model records the resolved value, which is why
+// the example writes auth_token(getenv("PVE_TOKEN")). See proxmox_vm() above.
+host(_ctx: ptr, v: string)       { config.put("aeo.cmp.pvehost.${_ctx}", v) }
+node(_ctx: ptr, v: string)       { config.put("aeo.cmp.pvenode.${_ctx}", v) }
+auth_token(_ctx: ptr, v: string) { config.put("aeo.cmp.pvetoken.${_ctx}", v) }
+storage(_ctx: ptr, v: string)    { config.put("aeo.cmp.pvestorage.${_ctx}", v) }
+bridge(_ctx: ptr, v: string)     { config.put("aeo.cmp.pvebridge.${_ctx}", v) }
+template(_ctx: ptr, v: string)   { config.put("aeo.cmp.pvetemplate.${_ctx}", v) }
+
 // wsl_distro — for a `windows` node, which WSL2 distro hosts its podman
 // ("" = WSL's default distro). The driver_windows seam: the Linux under Windows.
 wsl_distro(_ctx: ptr, v: string) { config.put("aeo.cmp.wsldistro.${_ctx}", v) }
@@ -1048,6 +1085,12 @@ reset_nodes() {
         config.put("aeo.cmp.lbbreaker.${nm}", "")
         config.put("aeo.cmp.lbcache.${nm}", "")
         config.put("aeo.cmp.lbl4.${nm}", "")
+        config.put("aeo.cmp.pvehost.${nm}", "")
+        config.put("aeo.cmp.pvenode.${nm}", "")
+        config.put("aeo.cmp.pvetoken.${nm}", "")
+        config.put("aeo.cmp.pvestorage.${nm}", "")
+        config.put("aeo.cmp.pvebridge.${nm}", "")
+        config.put("aeo.cmp.pvetemplate.${nm}", "")
         i = i + 1
     }
     config.put("aeo.cmp.count", "0")
@@ -1367,6 +1410,52 @@ _pf_rule_of(vm: string, entry: string) -> string {
 }
 
 get_nic(nm: string) -> string     { return config.get("aeo.cmp.nic.${nm}") }
+
+// proxmox_vm attribute getters (the runner + model-check read these).
+get_pve_host(nm: string) -> string     { return config.get("aeo.cmp.pvehost.${nm}") }
+get_pve_node(nm: string) -> string     { return config.get("aeo.cmp.pvenode.${nm}") }
+get_pve_token(nm: string) -> string    { return config.get("aeo.cmp.pvetoken.${nm}") }
+get_pve_storage(nm: string) -> string  { return config.get("aeo.cmp.pvestorage.${nm}") }
+get_pve_bridge(nm: string) -> string   { return config.get("aeo.cmp.pvebridge.${nm}") }
+get_pve_template(nm: string) -> string { return config.get("aeo.cmp.pvetemplate.${nm}") }
+
+// proxmox_model_errors() — the honest check-gate for proxmox_vm nodes. A remote
+// substrate can silently do nothing if its endpoint/credential is missing, so we
+// fail LOUD at check rather than at a half-built `aeo up`. Each proxmox_vm MUST
+// carry host() + node() + auth_token() + template(); an empty auth_token most
+// often means the PVE_TOKEN env var is unset (the example reads it via getenv).
+// AND: because driver_proxmox (live create/start) is not yet realized, the gate
+// states plainly that `up` is model-only today — so the file never claims a
+// deploy it won't perform. Returns "" when every proxmox_vm is well-formed.
+proxmox_model_errors() -> string {
+    out = ""
+    n = _count()
+    i = 0
+    while i < n {
+        nm = name_at(i)
+        if config.get("aeo.cmp.kind.${nm}") == "proxmox" {
+            if get_pve_host(nm) == "" {
+                out = _pve_err(out, "proxmox_vm '${nm}' has no host() — the PVE API endpoint (e.g. \"192.168.0.204:8006\") is required")
+            }
+            if get_pve_node(nm) == "" {
+                out = _pve_err(out, "proxmox_vm '${nm}' has no node() — the PVE cluster node to place the VM on (e.g. \"pve\") is required")
+            }
+            if get_pve_token(nm) == "" {
+                out = _pve_err(out, "proxmox_vm '${nm}' has no auth_token() — set it to getenv(\"PVE_TOKEN\"); an empty value usually means PVE_TOKEN is unset (see examples/checks/proxmox_token_setup.md)")
+            }
+            if get_pve_template(nm) == "" {
+                out = _pve_err(out, "proxmox_vm '${nm}' has no template() — the clone source (an operator-provisioned template, e.g. \"debian-12-cloudinit\") is required")
+            }
+        }
+        i = i + 1
+    }
+    return out
+}
+
+_pve_err(acc: string, msg: string) -> string {
+    if acc == "" { return "  - ${msg}" }
+    return "${acc}\n  - ${msg}"
+}
 get_wsl_distro(nm: string) -> string { return config.get("aeo.cmp.wsldistro.${nm}") }
 
 // Guest provisioning getters (defaults make a bhyve_vm work with no

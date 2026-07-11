@@ -2775,6 +2775,15 @@ _preflight() -> string {
     if string_length(lberr) > 0 {
         return "aeo: load_balancer model error(s):\n${lberr}"
     }
+    // Proxmox model checks: each proxmox_vm needs host()/node()/auth_token()/
+    // template(). An empty auth_token most often means PVE_TOKEN is unset — fail
+    // LOUD here (a remote substrate can otherwise silently do nothing). NOTE:
+    // driver_proxmox (live create/start) is the documented frontier; this gate
+    // validates the model so the file never claims a deploy it can't perform.
+    pverr = compose.proxmox_model_errors()
+    if string_length(pverr) > 0 {
+        return "aeo: proxmox_vm model error(s):\n${pverr}"
+    }
     fam = family()
     n = compose.count()
     i = 0
@@ -2933,6 +2942,15 @@ _kind_runnable(k: string, fam: string) -> int {
     if k == "kvm" {
         return _eq(fam, "linux")
     }
+    if k == "proxmox" {
+        // A proxmox_vm is a REMOTE substrate: aeo drives a Proxmox VE host over
+        // its HTTPS API, so the ORCHESTRATOR's host family is irrelevant (aeo can
+        // run on Linux/BSD/macOS and target PVE all the same). Host-family-
+        // agnostic, like container/load_balancer — the real gate is reachability
+        // of host()/auth_token(), checked by proxmox_model_errors() and (at up)
+        // by the driver_proxmox arm (the documented frontier).
+        return 1
+    }
     if k == "bwrap" {
         return _eq(fam, "linux")
     }
@@ -3078,6 +3096,14 @@ main() {
         lberr = compose.lb_model_errors()
         if lberr != "" {
             println("aeo: load_balancer model error(s):\n${lberr}")
+            exit(1)
+        }
+        // Proxmox model gate: each proxmox_vm must carry host/node/auth_token/
+        // template. Fires at `check` too (like the LB gate) so a missing PVE_TOKEN
+        // or endpoint fails BEFORE any attempt to reach the remote host.
+        pverr = compose.proxmox_model_errors()
+        if pverr != "" {
+            println("aeo: proxmox_vm model error(s):\n${pverr}")
             exit(1)
         }
         // Host preflight: if any container gpu() claim needs a DRI render node,

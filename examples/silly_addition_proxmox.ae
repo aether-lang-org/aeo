@@ -1,0 +1,125 @@
+// examples/silly_addition_proxmox.ae — the PROXMOX sibling of silly_addition_kvm.ae,
+// and aeo's FIRST substrate driven REMOTELY over an API rather than by local
+// shell-out. The two nodes are VMs on a Proxmox VE host reached over its HTTPS
+// API (port 8006); aeo does NOT run on that host — it addresses it by endpoint +
+// token. That "remote host" axis is the whole point of this example.
+//
+//   system("silly_addition_proxmox")  (aeo runs anywhere; the VMs live on PVE)
+//     ├─ db_vm   (proxmox VM) — cloned from a cloud-init template; the store tier
+//     └─ app_vm  (proxmox VM) — the /add service ──depends──► db_vm
+//
+// vs the kvm sibling (silly_addition_kvm.ae): that one boots a local qcow2 via
+// `qemu-system-x86_64` on the box aeo runs on. THIS one clones a template on a
+// REMOTE PVE node via `POST /nodes/<node>/qemu`, authenticating with a
+// least-privilege API token — the credential a CISO signs off on for prod (a
+// dedicated user, a custom minimal role, a resource-pool blast radius, a
+// privsep+expiring token; see examples/checks/proxmox_token_setup.sh / .md).
+//
+// This file is a PURE COMPOSITION — orchestration only. Config IS code; the code
+// here is the DECLARATION: nodes, where/how to reach the remote host, what to
+// clone, dependencies, and the spec files that verify it. It carries NO
+// application source and NO test bodies inline — each VM clones a template the
+// operator prepared, and the checks are external aeocha specs named by
+// check()/suite().
+//
+// `aeo` is the executor, exactly as `aeb x/.build.ae` runs a build declaration:
+//   aeo up    examples/silly_addition_proxmox.ae   deploy (dependency-ordered)
+//   aeo check examples/silly_addition_proxmox.ae   run check() specs, no deploy
+//   aeo suite examples/silly_addition_proxmox.ae   deploy + suite() specs, tear down
+//   aeo down  examples/silly_addition_proxmox.ae   teardown (reverse)
+//
+// WHAT'S REAL vs the FRONTIER (honest — the proxmox arm is remote-API, model-first):
+//   - REAL: the data model + the check-gate (host/node/auth_token/template are
+//     required; a missing/empty token — usually PVE_TOKEN unset — fails LOUD at
+//     `aeo check`). The token itself really authenticates to the PVE API and is
+//     scoped to exactly what aeo needs — PROVEN against 192.168.0.204 (see
+//     examples/checks/proxmox_token_setup.md for the allowed/denied evidence).
+//   - FRONTIER: driver_proxmox — the API client that POSTs the clone, sets
+//     cloud-init, and starts the VM — is NOT yet realized. So `aeo up` currently
+//     models-and-gates; wiring the live create/start/teardown calls is the
+//     follow-up (model-surface first, exactly as load_balancer and egress_fqdn
+//     landed). This file does not claim a deploy it will not perform.
+//
+// The API TOKEN is read from the environment via getenv("PVE_TOKEN") — it NEVER
+// lives in this file. Provision it once with examples/checks/proxmox_token_setup.sh,
+// then `export PVE_TOKEN="aeo@pve!deploy=<secret>"`.
+
+import compose (system, proxmox_vm)
+import compose (host, node, auth_token, storage, bridge, template)
+import compose (cpus, memory, depends)
+import compose (check, suite)
+import std.os (getenv)
+import std.string (string_length)
+
+exports ( aeo_orchestration )
+
+// ---- the composition — two PVE VMs, db_vm <- app_vm ----
+// Each clones a cloud-init template the operator prepared (the proxmox arm clones,
+// it doesn't build the template). The PVE endpoint, node, storage, bridge and
+// template are SWAPPABLE via env (see the helpers) so the same demo runs against
+// any PVE box. The function `aeo up` calls.
+aeo_orchestration() {
+    system("silly_addition_proxmox") {
+        // db tier — the store VM (clones the template on the remote PVE node).
+        db_vm = proxmox_vm("db_vm") {
+            host(_pve_host())              // PVE API endpoint, "host:8006"
+            node(_pve_node())              // the cluster node to place it on
+            auth_token(getenv("PVE_TOKEN"))  // least-priv token — never in-file
+            storage(_pve_storage())        // where the VM disk lands
+            bridge(_pve_bridge())          // the guest NIC's bridge
+            template(_pve_template())      // clone source (operator-provisioned)
+            cpus(2)
+            memory("2G")
+        }
+
+        // app tier — the /add service VM, depends on db_vm (ordered bring-up).
+        app_vm = proxmox_vm("app_vm") {
+            host(_pve_host())
+            node(_pve_node())
+            auth_token(getenv("PVE_TOKEN"))
+            storage(_pve_storage())
+            bridge(_pve_bridge())
+            template(_pve_template())
+            cpus(2)
+            memory("2G")
+            depends("db_vm")               // dependency-ordered bring-up
+        }
+
+        // ---- declared verification (external specs; aeo runs them per phase) ----
+        // check: data-model assertions + the proxmox gate, no deploy, runs anywhere.
+        check("examples/checks/proxmox_model.spec.ae")
+        // suite: post-deploy checks, then teardown (the CI shape) — needs the
+        // driver_proxmox arm (frontier), so it is a no-op until that lands.
+        suite("examples/checks/proxmox_suite.spec.ae")
+    }
+}
+
+// ---- helpers the declaration calls (all env-swappable) ----
+// Defaults point at the box this example was proven against; override via env so
+// a colleague's PVE runs the same demo unedited. (string_length-guarded getenv,
+// not ${} interpolation — getenv inside ${} mis-parses.)
+_pve_host() -> string {
+    v = getenv("PVE_HOST")
+    if string_length(v) == 0 { return "192.168.0.204:8006" }
+    return v
+}
+_pve_node() -> string {
+    v = getenv("PVE_NODE")
+    if string_length(v) == 0 { return "pve" }
+    return v
+}
+_pve_storage() -> string {
+    v = getenv("PVE_STORAGE")
+    if string_length(v) == 0 { return "local-lvm" }
+    return v
+}
+_pve_bridge() -> string {
+    v = getenv("PVE_BRIDGE")
+    if string_length(v) == 0 { return "vmbr0" }
+    return v
+}
+_pve_template() -> string {
+    v = getenv("PVE_TEMPLATE")
+    if string_length(v) == 0 { return "debian-12-cloudinit" }
+    return v
+}

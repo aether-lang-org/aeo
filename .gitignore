@@ -4,6 +4,10 @@
 # built binaries (emitted at repo root by `ae build bin/<name>.ae`)
 /aeo
 /aeo-agent
+# load-balancer front-door binaries baked beside their .ae source by the
+# examples-suite (test/examples-suite.sh) — compiled artifacts, not source.
+/bin/aeo-lb
+/bin/aeo-l4lb
 *.o
 *.d
 *.gcda

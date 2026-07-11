@@ -35,6 +35,7 @@ what changes is the substrate, never the app.
 | [`silly_addition_firecracker.ae`](silly_addition_firecracker.ae) | Linux   | microVM  | —               | minimal "smaller VM" (Firecracker) |
 | [`silly_addition_windows.ae`](silly_addition_windows.ae)     | Windows | WSL2     | podman (in WSL) | Linux container on Windows (bring-your-own engine) |
 | [`silly_addition_wslc.ae`](silly_addition_wslc.ae)         | Windows | WSL2     | wslc (native)   | Linux container on Windows (MSFT's native engine) |
+| [`silly_addition_proxmox.ae`](silly_addition_proxmox.ae)     | _any_ (remote) | PVE VM | — | **remote host, API-driven** (model + gate real; live `up` is frontier) |
 
 `−VMM −podman` is **not** a cell — a compute node has to run *somewhere*, so "no
 VM, no container" is degenerate.
@@ -56,6 +57,22 @@ the backends' net and aeo **bakes the aeo-lb image on demand** (no manual step);
 it needs a container engine + the toolchain-built `bin/aeo-lb`. The grammar + model
 checks are green (`test/spec_load_balancer.ae`, `test/spec_driver_loadbalancer.ae`)
 and `aeo check` runs the model spec.
+
+The **[`silly_addition_proxmox.ae`](silly_addition_proxmox.ae)** demo is a new
+axis, not just a new backend: it is aeo's **first REMOTE substrate**. Every other
+cell runs aeo *on* the box the workload lands on and shells out; here aeo addresses
+a **Proxmox VE host over its HTTPS API** (`proxmox_vm("db_vm"){ host / node /
+auth_token / storage / bridge / template }`) — the "remote host" the composition
+names by endpoint + token. The credential is the part a **CISO signs off on for
+prod**: a dedicated service user, a custom least-privilege role, a resource-pool
+blast radius, and a privilege-separated, expiring API token — provisioned by
+[`checks/proxmox_token_setup.sh`](checks/proxmox_token_setup.sh) and proven
+allowed-vs-denied in [`checks/proxmox_token_setup.md`](checks/proxmox_token_setup.md).
+**PARTIAL** — the data model + the `aeo check` gate are real (a missing/empty
+`auth_token()`, usually an unset `PVE_TOKEN`, fails LOUD; the token itself really
+authenticates to the PVE API), but `driver_proxmox` — the client that clones the
+template and starts the VM — is the documented **frontier**, so `aeo up` currently
+models-and-gates. The file states this plainly and claims no deploy it won't perform.
 
 The naming is by SUBSTRATE (bhyve_podman / kvm / containers / jails / lxc / bwrap),
 not the workload. (The original demo was `silly_addition_cache.ae`; renamed for
