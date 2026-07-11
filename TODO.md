@@ -366,6 +366,27 @@ Gaps:
       (token via lib/secrets), so the agent completes the node + runs its workload
       CONTAINER (driver_linux) and reports outward; probe() then checks the workload,
       not just guest liveness. The design/layering below stands as the plan for it.
+- [~] **aeo-agent DOER layer — LIVE-PROVEN end-to-end 2026-07-11.** The recursion
+      closes: proxmox VM (driver_proxmox) -> guest aeo-agent -> workload CONTAINER
+      (driver_linux) -> report outward. DELIVERY (Paul's call): aeo-agent is fetched
+      from GITHUB RELEASES + SHA256-verified in-guest (NOT baked / NOT ssh'd — PVE
+      snippets are text-only w/ no write API, so the guest fetches; Releases is the
+      durable checksummed host). BUILT: `.github/workflows/release-aeo-agent.yml`
+      (builds ae via aether get.sh -> glibc linux-amd64 -> sha256 -> Release asset;
+      triggers on `aeo-agent-v*` tags; dev asset `aeo-agent-dev` published now).
+      `examples/checks/proxmox_cloudinit.yaml` rewritten: installs qemu-guest-agent,
+      curls the agent + `sha256sum -c` (fail-closed, attest()-style), starts it
+      (http :9450, 0.0.0.0), backgrounds podman. LIVE PROOF: `aeo up` -> cloud-init
+      "agent fetched + verified" + "agent started" -> agent /health=200 reachable
+      from the orchestrator over the LAN -> POST /dispatch "boot" -> "report ... up"
+      -> busybox workload CONTAINER confirmed `podman ps` Up in the guest -> `aeo
+      down` clean. TWO PRODUCTION-SEEDING GAPS (mechanism proven; these are polish):
+      (1) IDENTITY — a generic image boots hostname "localhost" so AEO_NODE=localhost;
+      the driver must seed the node name (cloud-init hostname / vendor-data).
+      (2) TOKEN — dev token in the snippet; prod seals a per-node token via
+      lib/secrets and seeds it. Neither changes the doer mechanics. NEXT: seed
+      identity+token per-node from the driver; then probe() checks the WORKLOAD
+      (agent reports its container healthy), not just guest-agent liveness.
       ORIGINAL DECISION (2026-07-11, debated + spiked live): the template
       stays a GENERIC cloud image; the node's identity is completed at runtime from
       inside, by aeo-agent (aeo's native "act inside, report outward" recursion — a

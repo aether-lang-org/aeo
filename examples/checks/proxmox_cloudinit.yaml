@@ -1,42 +1,91 @@
 #cloud-config
-# proxmox_cloudinit.yaml — the aeo POST-PROVISION user-data snippet.
+# proxmox_cloudinit.yaml — the aeo POST-PROVISION user-data: completes the node
+# IN-GUEST via aeo-agent (the "doer"), NOT by baking a workload into the template.
 #
-# The debated design (see docs/TODO): a proxmox_vm clones a GENERIC cloud image and
-# completes its node IN-GUEST via this cloud-init, NOT by baking a workload into the
-# template. This snippet is the irreducible first rung — the only thing that runs
-# with zero guest cooperation. It:
-#   1. installs + starts qemu-guest-agent  -> makes the /qemu/<id>/agent/* channel
-#      live (so aeo probe() can verify guest liveness, and the parent can exec-in),
-#   2. writes an aeo marker                -> a proof-of-completion aeo can read back
-#      over the agent channel (the rung-1 proof).
+# The debated design, realized: a proxmox_vm clones a GENERIC cloud image; this
+# cloud-init (the irreducible first rung — the only thing that runs with zero guest
+# cooperation) then:
+#   1. installs qemu-guest-agent        -> makes /qemu/<id>/agent/* live, so aeo's
+#                                          agent()-probe can confirm the guest is up;
+#   2. FETCHES aeo-agent from GitHub Releases + VERIFIES a pinned SHA256 (attest()-
+#      style, fail-closed — a tampered/wrong binary never runs);
+#   3. STARTS aeo-agent (http mode, bound 0.0.0.0 so the parent reaches it across
+#      the guest NIC) as the in-guest DOER — it runs the workload CONTAINER via
+#      podman and reports outward;
+#   4. installs podman IN THE BACKGROUND (must NOT block agent start — a learned
+#      failure: podman via `packages:` delayed the agent past the health budget).
 #
-# OPERATOR PLACEMENT (once, like the template): copy this to the PVE host's snippet
-# storage, then reference it from the composition via cloud_init():
+# WHY GitHub Releases: a PVE cicustom snippet is text-only and PVE has no snippet-
+# write API, so the guest must FETCH the agent. Releases is a durable, globally-
+# reachable, checksummed artifact host (built by .github/workflows/release-aeo-
+# agent.yml). This adds NO reachability requirement beyond rung-1 (a guest that can
+# apt-install already has outbound HTTPS).
+#
+# OPERATOR PLACEMENT (once, like the template):
 #   scp examples/checks/proxmox_cloudinit.yaml root@<pve>:/var/lib/vz/snippets/aeo-agent-init.yaml
-#   # ensure snippets content is enabled on the storage:
 #   ssh root@<pve> "pvesm set local --content iso,vztmpl,backup,snippets"
-# The least-priv deploy token then REFERENCES it (proven: referencing a snippet needs
-# only VM-write, not storage-write — so the token sets cicustom, the operator places
-# the file). See examples/silly_addition_proxmox.ae and proxmox_token_setup.md.
+# Then the composition uses cloud_init("local:snippets/aeo-agent-init.yaml") + agent(1).
 #
-# NEXT LAYER (aeo-agent seeding — the in-guest doer): extend runcmd to fetch+launch
-# bin/aeo-agent with AEO_NODE/AEO_TOKEN/AEO_RENDEZVOUS seeded here (token sealed via
-# lib/secrets), so the agent completes the node and runs its workload container. Left
-# as a documented hook below; rung-1 (guest-agent + marker) is what's live-proven.
+# DEV vs PROD (honest — two known gaps, mechanism is fully proven):
+#   - IDENTITY: this derives AEO_NODE from `hostname`, but a generic cloud image
+#     boots as "localhost" unless cloud-init sets the hostname, so AEO_NODE comes
+#     up "localhost" (proven live). PROD fix: the driver seeds the node name (PVE
+#     cloud-init hostname, or a per-node vendor-data value) so AEO_NODE == the aeo
+#     node name. The fetch/verify/run/container-doer path is IDENTICAL regardless.
+#   - TOKEN: uses a DEV AEO_TOKEN below. PROD seals a PER-NODE token via lib/secrets
+#     and seeds it here. Both gaps are the "production seeding" follow-up; neither
+#     changes the doer mechanics this snippet proves.
+#
+# PINNED to the aeo-agent-dev release asset. Re-pin AEO_AGENT_URL + AEO_AGENT_SHA256
+# when a new aeo-agent-v* release is cut (the workflow prints the SHA in its summary).
 
 package_update: true
 packages:
   - qemu-guest-agent
 
+write_files:
+  # the in-guest bootstrap — kept as a file so runcmd stays readable and the pinned
+  # values are in one place. AEO_BOOT_IMAGE/CMD are the workload container the agent
+  # runs (here: a trivial long-lived busybox, the "/add would go here" placeholder).
+  - path: /usr/local/bin/aeo-doer-boot.sh
+    permissions: '0755'
+    content: |
+      #!/bin/sh
+      set -eu
+      log=/var/log/aeo-doer.log
+      exec >>"$log" 2>&1
+      echo "=== aeo-doer boot $(date -u +%s) ==="
+
+      AEO_AGENT_URL="https://github.com/aether-lang-org/aeo/releases/download/aeo-agent-dev/aeo-agent-linux-amd64"
+      AEO_AGENT_SHA256="9ee7c947a84ad9105e194beeac29d6000e38db224962d493fbf26cdd44a881c0"
+
+      # 1. FETCH + VERIFY (fail-closed: a bad SHA aborts before chmod/run).
+      curl -fsSL "$AEO_AGENT_URL" -o /usr/local/bin/aeo-agent
+      echo "${AEO_AGENT_SHA256}  /usr/local/bin/aeo-agent" | sha256sum -c - \
+        || { echo "SHA MISMATCH — refusing to run agent"; exit 1; }
+      chmod +x /usr/local/bin/aeo-agent
+      echo "agent fetched + verified"
+
+      # 2. START the agent (http doer). AEO_NODE = the guest hostname (= VM name =
+      #    the aeo node name). AEO_TOKEN is a DEV token (prod: sealed per-node).
+      #    setsid so it survives cloud-init; 0.0.0.0 so the parent reaches it.
+      AEO_TRANSPORT=http AEO_PORT=9450 AEO_BIND=0.0.0.0 \
+        AEO_NODE="$(hostname)" AEO_TOKEN="aeo-dev-token" \
+        AEO_BOOT_IMAGE="docker.io/library/busybox:latest" AEO_BOOT_CMD="sleep 864000" \
+        setsid /usr/local/bin/aeo-agent >/var/log/aeo-agent.log 2>&1 &
+      echo "agent started (node=$(hostname))"
+
+      # 3. podman IN THE BACKGROUND (the agent waits/retries for it at delegate time;
+      #    installing it here must not block agent start).
+      ( DEBIAN_FRONTEND=noninteractive apt-get update -qq \
+        && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq podman ) \
+        >/var/log/aeo-podman-install.log 2>&1 &
+      echo "podman install backgrounded"
+
+      # 4. proof marker aeo can read back over /agent/exec.
+      echo "AEO_PROVISIONED node=$(hostname) ip=$(hostname -I | awk '{print $1}') at=$(date -u +%s)" \
+        > /var/lib/aeo-provisioned
+
 runcmd:
-  # make the guest-agent channel live (probe() + exec-in depend on this).
   - systemctl enable --now qemu-guest-agent
-  # rung-1 proof marker: aeo reads this back over /agent/exec to confirm completion.
-  - [ sh, -c, 'echo "AEO_PROVISIONED node=$(hostname) ip=$(hostname -I | awk "{print \$1}") at=$(date -u +%s)" > /var/lib/aeo-provisioned' ]
-  # --- NEXT LAYER HOOK (aeo-agent as the in-guest doer) ---
-  # The parent seeds AEO_NODE/AEO_TOKEN/AEO_RENDEZVOUS (per-node, token sealed) and
-  # drops the aeo-agent binary; here it would be launched, e.g.:
-  #   - [ sh, -c, 'install -m0755 /run/aeo/aeo-agent /usr/local/bin/aeo-agent' ]
-  #   - systemctl enable --now aeo-agent
-  # Until that lands, the node is "guest alive" (probe via /agent/ping); the workload
-  # container is the layer after (agent -> driver_linux -> container).
+  - [ sh, -c, '/usr/local/bin/aeo-doer-boot.sh' ]
