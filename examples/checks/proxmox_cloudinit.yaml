@@ -57,10 +57,21 @@ write_files:
       echo "=== aeo-doer boot $(date -u +%s) ==="
 
       AEO_AGENT_URL="https://github.com/aether-lang-org/aeo/releases/download/aeo-agent-dev/aeo-agent-linux-amd64"
-      AEO_AGENT_SHA256="9ee7c947a84ad9105e194beeac29d6000e38db224962d493fbf26cdd44a881c0"
+      # The release ships the binary AND its .sha256 (the CI workflow uploads both).
+      # We pin the EXPECTED sha here (the value CI printed for this asset) AND cross-
+      # check it against the published .sha256 — so a re-pin is a one-line change and
+      # a tampered .sha256 alone can't lower the bar. NB CI builds are NOT bit-
+      # identical to a local build (BuildID/paths differ), so this pin MUST track the
+      # CI-published asset, not a local `ae build`.
+      AEO_AGENT_SHA256="4ade05227d703bfe3ecd68ee4c19a67618c5c6230a344c5ca25430c771249a24"
 
       # 1. FETCH + VERIFY (fail-closed: a bad SHA aborts before chmod/run).
       curl -fsSL "$AEO_AGENT_URL" -o /usr/local/bin/aeo-agent
+      # cross-check the pinned sha against the release's published .sha256 (defense
+      # in depth; best-effort — the pinned `sha256sum -c` below is the hard gate).
+      pub=$(curl -fsSL "${AEO_AGENT_URL}.sha256" 2>/dev/null | awk '{print $1}' || true)
+      if [ -n "$pub" ] && [ "$pub" != "$AEO_AGENT_SHA256" ]; then
+        echo "WARN: published .sha256 ($pub) != pinned ($AEO_AGENT_SHA256)"; fi
       echo "${AEO_AGENT_SHA256}  /usr/local/bin/aeo-agent" | sha256sum -c - \
         || { echo "SHA MISMATCH — refusing to run agent"; exit 1; }
       chmod +x /usr/local/bin/aeo-agent
