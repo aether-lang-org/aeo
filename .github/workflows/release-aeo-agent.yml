@@ -16,10 +16,13 @@
 # you can pin it. workflow_dispatch is a BUILD-ONLY dry run (no publish) for testing
 # the build without cutting a tag.
 #
-# TARGET MATCH: builds on ubuntu-latest -> glibc dynamic linux-amd64, which is what
-# a Debian/Ubuntu cloud image runs (verified: the local build is glibc-dynamic,
-# interpreter /lib64/ld-linux-x86-64.so.2). A guest on a different libc/arch would
-# need a matching asset — a matrix follow-up.
+# TARGET (in the asset name — linux/x86_64/glibc): builds on ubuntu-latest -> a
+# dynamically-linked x86_64 glibc ELF (interpreter /lib64/ld-linux-x86-64.so.2),
+# which is what a Debian/Ubuntu cloud image runs. libc is IN THE NAME on purpose:
+# it's the axis that silently breaks — a glibc binary won't run on a musl guest
+# (Alpine). The build step ASSERTS arch+libc so the name can't lie. A musl or arm64
+# guest needs its own matching asset (aeo-agent-linux-x86_64-musl / -aarch64-glibc)
+# — a build-matrix follow-up.
 
 name: release-aeo-agent
 
@@ -61,17 +64,25 @@ jobs:
       - name: Verify ae is on PATH
         run: ae --version
 
-      - name: Build aeo-agent (linux-amd64, glibc)
+      - name: Build aeo-agent (linux, x86_64, glibc)
         run: |
-          ae build bin/aeo-agent.ae -o aeo-agent-linux-amd64 --lib lib
-          file aeo-agent-linux-amd64
-          chmod +x aeo-agent-linux-amd64
+          ae build bin/aeo-agent.ae -o aeo-agent-linux-x86_64-glibc --lib lib
+          file aeo-agent-linux-x86_64-glibc
+          # ASSERT the name is honest: the asset says linux-x86_64-glibc, so fail
+          # the build if it isn't. glibc == the /lib64/ld-linux-x86-64.so.2 loader
+          # (musl would be ld-musl-x86_64.so.1 and would silently not run on a glibc
+          # guest — the exact trap the libc-in-the-name is meant to prevent).
+          file aeo-agent-linux-x86_64-glibc | grep -q 'ELF 64-bit.*x86-64' \
+            || { echo "not an x86_64 ELF — asset name would be a lie"; exit 1; }
+          file aeo-agent-linux-x86_64-glibc | grep -q 'ld-linux-x86-64' \
+            || { echo "not glibc-linked (musl?) — asset name would be a lie"; exit 1; }
+          chmod +x aeo-agent-linux-x86_64-glibc
 
       - name: Checksum
         id: sum
         run: |
-          sha256sum aeo-agent-linux-amd64 | tee aeo-agent-linux-amd64.sha256
-          echo "sha256=$(cut -d' ' -f1 aeo-agent-linux-amd64.sha256)" >> "$GITHUB_OUTPUT"
+          sha256sum aeo-agent-linux-x86_64-glibc | tee aeo-agent-linux-x86_64-glibc.sha256
+          echo "sha256=$(cut -d' ' -f1 aeo-agent-linux-x86_64-glibc.sha256)" >> "$GITHUB_OUTPUT"
 
       - name: Summary (pin this SHA256 in the cloud-init snippet)
         run: |
@@ -84,7 +95,7 @@ jobs:
               echo "Cut a tag to publish: \`git tag aeo-agent-vX.Y.Z && git push origin aeo-agent-vX.Y.Z\`"
             fi
             echo ""
-            echo "- asset: \`aeo-agent-linux-amd64\`"
+            echo "- asset: \`aeo-agent-linux-x86_64-glibc\`"
             echo "- **SHA256:** \`${{ steps.sum.outputs.sha256 }}\`"
             echo ""
             echo "Pin it in the guest cloud-init: \`AEO_AGENT_SHA256=${{ steps.sum.outputs.sha256 }}\`"
@@ -98,8 +109,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            aeo-agent-linux-amd64
-            aeo-agent-linux-amd64.sha256
+            aeo-agent-linux-x86_64-glibc
+            aeo-agent-linux-x86_64-glibc.sha256
           tag_name: ${{ github.ref_name }}
           body: |
             aeo-agent (linux-amd64, glibc) — the in-guest orchestration agent a
