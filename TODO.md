@@ -1607,11 +1607,12 @@ VERB DISCIPLINE that transfers), and the Rust-rewrite instinct.
       the universal waitpid); jail rctl denies are EVENT-shaped (the
       denials-ledger mechanism, not post-mortem state); guest-OS-level death
       via the in-guest agent (kvm panic; proxmox distinguishing crash vs
-      in-guest poweroff — the task correlation can't); cut the
-      `aeo-agent-v0.1.2` STATIC release + bump the snippet template's
-      URL+SHA pin (workflow ready + chain re-proven; needs this work
-      committed/pushed and the tag — the staged kill-137 re-proof is DONE,
-      see the fix note above); EARLY-EXIT the level poller when every
+      in-guest poweroff — the task correlation can't); RELEASED 2026-07-18:
+      aeo-agent-v0.1.2 (asset aeo-agent-linux-x86_64-static, SHA 35c87fb2…)
+      cut + published by CI, snippet template pinned to it, and the FULL
+      recursive chain re-proven on .204 via the REAL release delivery
+      (GitHub fetch -> CI-SHA verify -> [db_vm] up -> [dead] up -> stack up
+      -> clean down); EARLY-EXIT the level poller when every
       not-up node already has
       a death verdict; swallow the cosmetic engine stderr from
       probing/inspecting an exited or absent container (podman "exec
