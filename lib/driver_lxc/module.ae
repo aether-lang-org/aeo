@@ -19,15 +19,16 @@
 //           lxc-attach), else 0.
 //   exec  — `lxc-attach -n NAME -- /bin/sh -c CMD`, capturing stdout.
 
-import std.os (run_capture)
+import std.os (run_capture, run_full, getenv)
 import std.list
-import std.string (string_length, string_index_of, string_substring, string_contains)
+import std.string (string_length, string_index_of, string_substring, string_contains, string_char_at, string_from_int)
 
 exports (
     name,
     up, down, probe, exec_capture,
     create_argv, start_argv, stop_argv, destroy_argv, info_argv, attach_argv,
-    image_dist, image_release
+    image_dist, image_release,
+    death_log_path, death_from_log, death_state
 )
 
 name() -> string { return "lxc" }
@@ -74,7 +75,30 @@ start_argv(res_name: string) -> ptr {
     av = list_new()
     list_add(av, "-n")
     list_add(av, res_name)
+    // INFO-level log to an aeo-owned file: LXC records the init post-mortem
+    // there ("Child <pid> ended on signal Killed(9)" / "ended on error (N)" —
+    // wording proven against real LXC 6.x on .160, 2026-07-18) and NOWHERE
+    // else once the container stops (the payload cgroup vanishes). Without
+    // this, a dead lxc node has no readable cause.
+    list_add(av, "-o")
+    list_add(av, death_log_path(res_name))
+    list_add(av, "-l")
+    list_add(av, "INFO")
     return av
+}
+
+// The per-container post-mortem log. Default /tmp (always writable, exists on
+// every host); AEO_LXC_LOG_DIR overrides. NB on a ROOTFUL setup the file is
+// root-owned 0640, so the unprivileged post-mortem read degrades to "no
+// verdict" unless the operator points AEO_LXC_LOG_DIR at a directory with a
+// default read ACL (setfacl -d -m u:<aeouser>:r <dir>) — the same
+// operator-grant convention as the sudoers drop-in.
+death_log_path(res_name: string) -> string {
+    d = getenv("AEO_LXC_LOG_DIR")
+    if string_length(d) == 0 {
+        d = "/tmp"
+    }
+    return "${d}/aeo-lxc-${res_name}.log"
 }
 
 stop_argv(res_name: string) -> ptr {
@@ -194,6 +218,239 @@ exec_capture(res_name: string, cmd: string) -> string {
         return ""
     }
     return out
+}
+
+// --- death forensics (the lxc arm) -------------------------------------------
+//
+// Two sources, both spiked live on real LXC 6.x (.160, 2026-07-18):
+//   RUNNING but sick — the payload cgroup's memory.events oom_kill counter
+//     (unprivileged read): the kernel OOM-killed a WORKLOAD inside while init
+//     survives. Verdict class "OOM kills inside, container still running".
+//   STOPPED — the cgroup is GONE (no post-stop counter), but the -o INFO log
+//     (start_argv) records init's end: "ended on signal <Name>(<N>)" -> exit
+//     128+N; "ended on error (<N>)" -> exit N; a clean exit logs NO ended-line.
+// lxc-info exposes state + init pid but NO exit code — the log is the only
+// post-mortem carrier.
+
+// death_state(res_name) — the canonical status|oom|exit line ("" = healthy /
+// unknown / unreadable). Queries fall back from the sudo grant to a PLAIN
+// invocation (an unprivileged-lxc host answers for user-owned containers).
+death_state(res_name: string) -> string {
+    iav = info_argv(res_name)
+    out, status, err = _lxc_query("lxc-info", iav)
+    list_free(iav)
+    if err != "" {
+        return ""
+    }
+    if status != 0 {
+        return ""                       // container unknown — no verdict
+    }
+    if string_contains(out, "RUNNING") == 1 {
+        // alive: check for OOM kills inside via the payload cgroup (resolved
+        // through init's /proc/<pid>/cgroup — covers rootful AND unprivileged
+        // placements). All unprivileged reads.
+        pid = _info_pid(out)
+        if pid <= 0 {
+            return ""
+        }
+        if _cgroup_oom_kills(pid) > 0 {
+            return "status=running|oom=true|exit=0"
+        }
+        return ""
+    }
+    // STOPPED: parse the post-mortem log (readable when unprivileged lxc or an
+    // operator ACL'd log dir; else honest "").
+    lav = list_new()
+    list_add(lav, "-c")
+    list_add(lav, "cat ${death_log_path(res_name)} 2>/dev/null")
+    lout, lstatus, lerr = run_capture("/bin/sh", lav, null)
+    list_free(lav)
+    if lerr != "" {
+        return ""
+    }
+    if string_length(lout) == 0 {
+        return ""
+    }
+    return death_from_log(lout)
+}
+
+// death_from_log(text) — the LAST "Child <pid> ended ..." line wins (the log
+// appends across boots). Non-empty log with NO ended-line = a clean exit
+// (LXC only logs error ends).
+death_from_log(text: string) -> string {
+    sig = _last_paren_int(text, "ended on signal ")
+    ec = _last_paren_int(text, "ended on error ")
+    if sig >= 0 {
+        if ec >= 0 {
+            // both present across boots — whichever appears LATER is current.
+            if _last_index_of(text, "ended on signal ") > _last_index_of(text, "ended on error ") {
+                return "status=exited|oom=false|exit=${string_from_int(128 + sig)}"
+            }
+            return "status=exited|oom=false|exit=${string_from_int(ec)}"
+        }
+        return "status=exited|oom=false|exit=${string_from_int(128 + sig)}"
+    }
+    if ec >= 0 {
+        return "status=exited|oom=false|exit=${string_from_int(ec)}"
+    }
+    return "status=exited|oom=false|exit=0"
+}
+
+// PID from lxc-info output ("PID:            278937"); -1 if absent.
+_info_pid(out: string) -> int {
+    i = string_index_of(out, "PID:")
+    if i < 0 {
+        return 0 - 1
+    }
+    i = i + 4
+    n = string_length(out)
+    while i < n {
+        c = string_char_at(out, i)
+        if c != 32 {
+            break
+        }
+        i = i + 1
+    }
+    v = 0
+    seen = 0
+    while i < n {
+        c = string_char_at(out, i)
+        if c < 48 {
+            break
+        }
+        if c > 57 {
+            break
+        }
+        v = v * 10 + (c - 48)
+        seen = 1
+        i = i + 1
+    }
+    if seen == 0 {
+        return 0 - 1
+    }
+    return v
+}
+
+// oom_kill count of the cgroup holding `pid` (0 on any read failure).
+_cgroup_oom_kills(pid: int) -> int {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "CG=$(cut -d: -f3 /proc/${string_from_int(pid)}/cgroup 2>/dev/null | head -1); [ -n \"$CG\" ] && grep oom_kill /sys/fs/cgroup$CG/memory.events 2>/dev/null | head -1 | cut -d\" \" -f2")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    if err != "" {
+        return 0
+    }
+    if status != 0 {
+        return 0
+    }
+    v = 0
+    i = 0
+    n = string_length(out)
+    while i < n {
+        c = string_char_at(out, i)
+        if c < 48 {
+            break
+        }
+        if c > 57 {
+            break
+        }
+        v = v * 10 + (c - 48)
+        i = i + 1
+    }
+    return v
+}
+
+// int inside the first "(N)" after the LAST occurrence of `needle`; -1 if absent.
+_last_paren_int(text: string, needle: string) -> int {
+    i = _last_index_of(text, needle)
+    if i < 0 {
+        return 0 - 1
+    }
+    i = i + string_length(needle)
+    n = string_length(text)
+    while i < n {
+        if string_char_at(text, i) == 40 {
+            break
+        }
+        // the signal form is "<Name>(N)" — skip the name; stop at line end.
+        if string_char_at(text, i) == 10 {
+            return 0 - 1
+        }
+        i = i + 1
+    }
+    if i >= n {
+        return 0 - 1
+    }
+    i = i + 1
+    v = 0
+    seen = 0
+    while i < n {
+        c = string_char_at(text, i)
+        if c < 48 {
+            break
+        }
+        if c > 57 {
+            break
+        }
+        v = v * 10 + (c - 48)
+        seen = 1
+        i = i + 1
+    }
+    if seen == 0 {
+        return 0 - 1
+    }
+    return v
+}
+
+_last_index_of(text: string, needle: string) -> int {
+    best = 0 - 1
+    from = 0
+    n = string_length(text)
+    while from < n {
+        rest = string_substring(text, from, n)
+        i = string_index_of(rest, needle)
+        if i < 0 {
+            return best
+        }
+        best = from + i
+        from = from + i + 1
+    }
+    return best
+}
+
+// query seam: the sudo grant first (rootful hosts), PLAIN on denial
+// (unprivileged-lxc hosts own their containers directly). Both attempts run
+// with stderr SWALLOWED (run_full) — this is a diagnostic read; a denied
+// sudo -n must not spray "a password is required" onto aeo's own stderr.
+_lxc_query(tool: string, argv: ptr) -> {
+    full = list_new()
+    list_add(full, "-n")
+    list_add(full, "/usr/bin/${tool}")
+    n = list_size(argv)
+    i = 0
+    while i < n {
+        a = list_get_raw(argv, i)
+        _ = list_add_raw(full, a)
+        i = i + 1
+    }
+    out, _eout, status, err = run_full("sudo", full, null, "")
+    list_free(full)
+    if err == "" {
+        if status == 0 {
+            return out, status, err
+        }
+    }
+    plain = list_new()
+    i = 0
+    while i < n {
+        a = list_get_raw(argv, i)
+        _ = list_add_raw(plain, a)
+        i = i + 1
+    }
+    pout, _peout, pstatus, perr = run_full("/usr/bin/${tool}", plain, null, "")
+    list_free(plain)
+    return pout, pstatus, perr
 }
 
 // --- privilege: self-sudo ----------------------------------------------------

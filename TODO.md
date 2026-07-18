@@ -1237,3 +1237,471 @@ wired yet; mapped here as candidate kinds. Ordered by how cleanly they'd land:
       OWN DSL is block-setter (container("db"){within(30s)}), not method-chain, so
       not directly blocked — but the readability win on the specs is real.
       (Compiler bump to 0.327: full aeo suite + demos re-checked, no regression.)
+
+## Re-create from clawk (survey 2026-07-17)
+
+clawk (~/scm/clawk, github.com/clawkwork/clawk) is a per-project disposable-
+microVM sandbox for coding agents (Go, macOS Virtualization.framework +
+firecracker-on-Linux). Different problem than aeo (one VM, no graph — no
+dependencies, health gating, attestation, audit, or reconcile), but it
+independently validates the containment thesis (isolation as STRUCTURE — a
+separate machine, an owned network layer — not policy on a shared host) and
+several of its mechanisms are worth re-creating in aeo's shape. Ranked by
+payoff; consciously NOT copying: the ticket/worktree/PR workflow and
+Claude-attach UX (their product, not an orchestrator's), the snapshot-at-create
+config-template semantics (aeo's reconcile model is deliberately the opposite —
+the composition stays authoritative), and macOS Virtualization.framework
+support (no consumer).
+
+- [ ] **1. Owned-userspace-stack egress enforcement — the `egress_fqdn` tier
+      without a CONNECT proxy.** clawk's gvproxy insight: the guest's ENTIRE L3
+      (gateway, DHCP, DNS, NAT) is a userspace TCP/IP stack inside their daemon,
+      so every outbound SYN and every DNS ANSWER consults the allow-list at a
+      point root-in-the-guest cannot reconfigure — hostname allow-listing falls
+      out for free (allow `example.com`, keeps working as its IPs rotate,
+      because the filter sees the name the guest just resolved). No host
+      iptables, no sudo, rootless by construction. aeo already ships pasta
+      (same userspace-stack family as gvproxy/slirp) for source-IP fidelity —
+      extending that ownership from FORWARDING to FILTERING lands
+      `asks/linux-per-flow-netpolicy-for-ci.md` priority 2 (and plausibly
+      priority 1's per-flow tuples) without the netavark/nftables rootless-
+      reachability spike. Should be weighed AGAINST the CONNECT-gateway embryo
+      (§5 egress_fqdn item, lib/egress_gateway) before more gateway work: the
+      gateway remains right for the hierarchical parent-owned story, but the
+      DNS-aware-stack tier may be the better first enforcement for the
+      registry/warmer case. Lands in: confine_linux / the pasta path.
+- [ ] **2. A DENIALS LEDGER — record attempted-and-blocked flows.** clawk logs
+      every denial keyed by the HOSTNAME the guest resolved (`clawk network
+      denials` reads as "what did the agent try to reach"). aeo blocks silently
+      today — and a silent block is indistinguishable from a broken app.
+      Record per-node denied flows (resolved name where known, else addr:port),
+      surface via `aeo status`/a `denials` verb, and append to the hash-chained
+      audit trail (§4's "per-node connection logging on the deny-default"
+      follow-up — this is that, with a design to copy). Also subsumes the ask's
+      priority 3 (dry-run prints the rendered tier + flow whitelist). Lands in:
+      runner + lib/audit.
+- [ ] **3. Daemonless OCI-image-as-VM-rootfs.** clawk pulls any OCI image (no
+      Docker daemon), flattens layers resolving whiteouts, writes ext4 with NO
+      root/loop-devices/e2fsprogs (vendored hcsshim-derived writer), caches the
+      master, then CoW-clones per sandbox (APFS clonefile / FICLONE) — so
+      per-node disk cost is what the guest writes. For aeo this would free
+      kvm/proxmox_vm from the "operator pre-places a cloud-image template"
+      prerequisite: `image("golang:1.25")` on a VM kind, same vocabulary as
+      containers, one image namespace across substrates. Biggest build of the
+      list; strategic. Lands in: driver_vm first (local qcow2/raw), then
+      driver_proxmox (upload/import path). Also answers driver_firecracker
+      gap #3 (prebuilt vmlinux+rootfs bundles).
+- [ ] **4. vsock as an aeo-agent transport.** clawk's only control path into
+      the guest is a vsock agent (no sshd, no cloud-init network dependency) —
+      each attach is container-exec-style (fresh process, torn down on
+      disconnect). For aeo: `AEO_TRANSPORT=vsock` as the LOCAL-hypervisor
+      transport (kvm/firecracker/bhyve) — works before DHCP (would have erased
+      the `_wait_guest_ip` + retry-delegate dance from the proxmox_podman
+      debugging), unreachable from anything but the host, no 0.0.0.0-bind
+      exposure. HTTP stays for REMOTE guests (proxmox — vsock doesn't cross the
+      wire). Small, immediate boot-path-robustness payoff. Lands in: aeo-agent
+      + driver_vm.
+- [ ] **5. Suspend-to-disk as a lifecycle verb.** clawk's `snapshot`/`resume`
+      is RAM+device-state hibernation: dev servers survive, next boot restores
+      the guest exactly where it was, an idle sandbox costs only storage. aeo's
+      snapshot/rollback verbs are DISK-state (zfs/qemu-img/podman-commit); the
+      missing sibling is `aeo suspend|resume <compose> [node]` for VM kinds.
+      PVE has native suspend (nearly free for proxmox_vm); qemu has
+      savevm/migrate-to-file for kvm. Pairs with item 6. Lands in: driver_vm /
+      driver_proxmox verbs + runner dispatch.
+- [ ] **6. Idle management under the supervisor.** clawk balloons idle VMs
+      down (~1 GiB), auto-stops after 30 idle minutes, and (roadmap) suspends
+      the least-recently-used sandbox instead of refusing a new one when RAM is
+      over-committed (admission control). This is exactly a resident-supervisor
+      job — slots into `docs/aeo-supervisor.md` as its resource-steward role
+      (see also memory `aeo-supervisor-design`); don't build it standalone.
+      Depends on item 5 for the suspend primitive.
+- [ ] **7. Credential FORWARDING instead of credential injection.** clawk
+      forwards the host's ssh-agent over a dedicated vsock port — signing
+      happens ON THE HOST, keys never enter the guest, yet in-guest `git push`
+      works. aeo's secrets story (lib/secrets) is ciphertext-at-rest,
+      decrypt-at-use; the stronger tier for KEY-shaped secrets is
+      never-materialize-at-all: broker the OPERATION at the boundary. A
+      `forward_agent()`-style grammar item, agent-brokered (the aeo-agent
+      relays the agent protocol hop-by-hop down the recursion, same
+      parent-owns-the-boundary shape as the egress gateway). Lands in: compose
+      + aeo-agent.
+
+Sequencing: 1+2 are the same work area as the aeci ask
+(`asks/linux-per-flow-netpolicy-for-ci.md`) and should ride it; 4 is small and
+pays for itself in boot-path robustness; 3 is the strategic one; 5–7 queue
+behind the supervisor decision.
+
+## Re-create from aurae (survey 2026-07-17)
+
+aurae (~/scm/aurae, github.com/aurae-runtime/aurae, Kris Nóva's project) is a
+"distributed systems runtime": ONE memory-safe Rust daemon (`auraed`) that is
+simultaneously PID-1 init, process manager, and gRPC API server on a node —
+managing executables, cells (cgroups + namespace unsharing), CRI pods, VMs,
+and SPAWNED NESTED aurae instances, with SPIFFE/mTLS identity down to the
+socket and eBPF observability. It's a NODE runtime, not an orchestrator — it
+sits below aeo the way auraed sits below Kubernetes. It independently
+validates two aeo design calls: recursion as first-class (aurae `Spawn` writes
+its OWN binary into a child rootfs and runs a nested instance — exactly
+aeo-agent's mount-own-binary-into-container trick) and config-is-code
+(auraescript/Deno exists because they refuse YAML — Aether already covers
+that). Ranked by payoff; consciously NOT copying: the CRI/pods/Kubernetes-
+complement layer (aeo is not a kubelet), auraescript (Aether IS aeo's answer),
+gRPC/protobuf as the API substance (aeo's HTTP+Aether seam is fine — it's the
+VERB DISCIPLINE that transfers), and the Rust-rewrite instinct.
+
+- [ ] **1. aeo-agent as PID-1 guest init (context-aware single binary).**
+      auraed detects PID==1 and runs as the init system — four context-aware
+      "system runtimes" in one binary (pid1 / cell / container / daemon,
+      auraed/src/init/system_runtimes). clawk converged on the same call
+      (clawk-init: "no systemd, no cloud-init"). For aeo this collapses the
+      proxmox/kvm bring-up ladder — today's cloud-init -> install
+      qemu-guest-agent -> fetch agent from GitHub Releases -> sha256-verify ->
+      start chain becomes "the guest image boots straight into aeo-agent" —
+      and makes the agent un-killable-by-accident (it IS init). Copy the
+      context-aware pattern wholesale: ONE agent binary auto-detecting "am I
+      init in a VM / inside a container / a daemon on a host?" and selecting
+      transport+behavior accordingly. Depends on owning the guest image
+      (clawk item 3, OCI-as-rootfs, is the natural delivery vehicle).
+      Cloud-init stays as the fallback rung for operator-supplied images.
+- [ ] **2. Allocate/Free split from Start/Stop — an `aeo stage` phase.**
+      aurae's verb discipline separates RESERVE (allocate resources +
+      prerequisites) from RUN (start). aeo's `up` conflates them: image
+      pulls, attest resolution, network creation, cgroup setup all happen
+      inside the node's health window. `aeo stage <compose>` = pull + attest
+      images, create networks, allocate — touch nothing that serves traffic;
+      `up` after a stage shrinks to actual boot time. Exactly what `aeo
+      cutover` wants (stage green FULLY before the swap — the confinement
+      invariant gets cheaper to hold). Also the honest fix for cold-chain
+      up_within(15m) windows (the proxmox_podman example): most of that
+      window is fetch/pull work a stage phase would front-load.
+- [ ] **3. Full cgroup-v2 controller vocabulary in `limit{}`.** aurae types
+      the whole controller surface: `cpu.weight`/`cpu.max`,
+      `cpuset.cpus`/`cpuset.mems` (core PINNING), `memory.min/low/high/max`
+      (soft-guarantee tiers vs the kill-line). aeo's limit{} today is
+      memory/pids/cpus — it can't express "guarantee this node 1G
+      (memory.low)" vs "kill it at 2G (memory.max)", nor pin a node to cores.
+      Proven consumer: the LB benchmark hand-pinned cores with taskset
+      (aether#1123 perf note). Render onto podman's --cpuset-cpus /
+      --memory-reservation etc.; FreeBSD peer = rctl where an analog exists,
+      loud NOT-enforced where not (the §5 discipline).
+- [x] **4. Kernel-level "why did it die" forensics — BUILT + LIVE-PROVEN
+      2026-07-18 (both arms).** aurae's observe API streams POSIX signals via
+      eBPF; aeo's first cut needed no eBPF: driver_linux gained
+      `death_argv`/`death_state` (engine post-mortem inspect:
+      status|OOMKilled|ExitCode — podman AND docker expose all three) +
+      `death_cause` (pure classifier: OOM beats exit code; >128 -> named
+      signal; else exit code; clean-exit-before-ready is still a verdict;
+      running/absent -> ""). `_diag_level_not_up` now appends the verdict to
+      the timeout line AND audit-records it (`event: death` — forensics,
+      like attest-refuse). spec_death.ae (10) locks the pure core; full
+      suite green. LIVE: (a) SIGNAL arm on the Chromebook — a segfaulting
+      entrypoint under a never-passing health -> "kernel verdict: killed by
+      SIGSEGV (exit 139)", death event hash-chained; (b) OOM arm on CachyOS
+      .160 (podman 6, cgroups v2) — a 32m-capped memory hog ->
+      "kernel verdict: OOM-killed (cgroup memory limit)", chained.
+      TWO findings en route: (1) the LEVEL-BUDGET FLOOR swallowed explicit
+      windows — `_await_level`'s min_secs=120 was a floor, so within(10s)
+      waited 2 MINUTES to report a dead-on-arrival node. Fixed:
+      `_level_budget_ms` honours the declared max as-is when EVERY node in
+      the level states its own within()/up_within(); the 120s floor now
+      protects only default-window nodes. (2) PID-1 SIGNAL TRAP for tests: a
+      container entrypoint CANNOT kill itself with os.kill (the kernel
+      ignores kill()-sent signals to a namespace's init — it exits 0 and can
+      even get promoted UP off the ps sweep) — a HARDWARE FAULT (segfault)
+      IS delivered; and Crostini is cgroups-v1 rootless, where podman
+      IGNORES --memory (the OOM arm needs a v2 box; also re-motivates the
+      podman-6 cgroups-v2 preflight item).
+      SUBSTRATE EXPANSION 2026-07-18 (the "cheap wins" round): classifier
+      PROMOTED to lib/death (one death_cause for every substrate) + a shared
+      `unit_death_line` systemd mapper (Result/ExecMainCode/ExecMainStatus ->
+      canonical status|oom|exit; killed/dumped -> 128+signal). New arms:
+      - **nspawn**: driver_nspawn.death_state via UNPRIVILEGED `systemctl
+        show` (reads need no sudo — proven as plain user on .160; mutations
+        keep self-sudo). Mapper live-proven via the fc arm (identical code).
+      - **firecracker**: driver_firecracker.death_state (--user scope).
+        LIVE-PROVEN on .160 through the REAL driver path, all three ways a
+        unit dies: MemoryMax OOM -> "OOM-killed (cgroup memory limit)";
+        external kill -9 of MainPID -> "killed by SIGKILL (exit 137)";
+        exit 3 -> "exited with code 3".
+      - **wsl_podman**: driver_windows.death_state (driver_linux.death_argv
+        through the proven wsl_argv wrapper). LIVE-PROVEN 2026-07-18 on the
+        winbaz guest (WSL2 Ubuntu, podman 5.7.0) at the driver_windows house
+        bar — the driver's EXACT `wsl -d Ubuntu -- podman inspect <n>
+        --format <death-format>` against real containers, all THREE modes:
+        /bin/false -> status=exited|oom=false|exit=1; podman kill ->
+        exit=137; a --memory 16m tail-/dev/zero hog -> **oom=true|exit=137**
+        (WSL2 here is cgroups v2 WITH the memory controller — a real cgroup
+        OOM, and unlike wslc the OOMKilled flag survives). The earlier
+        "needs the pipeline resumed" deferral was WRONG — death_state needs
+        none of the agent-.exe recursion work, just the wsl exec seam, which
+        was already live.
+      KEY MECHANICAL CHANGE: dropped `--collect` from the nspawn +
+      firecracker systemd-run launches — systemd's default keeps a FAILED
+      transient unit loaded until reset-failed, which IS the post-mortem
+      window; --collect was garbage-collecting the corpse before the diag
+      could ask why it died. down() (and fc relaunch) now reset-fail the
+      corpse away. FOUND EN ROUTE: a process that SIGKILLs *itself* via the
+      shell lands Result=success and the unit unloads (observed on systemd
+      258/.160; no corpse, no verdict) — the external-kill case (host OOM
+      killer, stray pkill: the real threats) is the one that fails-and-
+      lingers, and it's captured. spec_death now 20 (classifier + mapper +
+      the pure argvs); spec_nspawn updated for the --collect removal.
+      KVM + NESTED-IN-VM ARMS 2026-07-18 (second round, on .160):
+      - **kvm (process half)**: driver_vm.death_state reads the VM's
+        Type=forking --user unit (aeo-<nm>) — EMPIRICALLY confirmed first
+        that forking+PIDFile units populate Result/ExecMainCode/Status on an
+        external SIGKILL of the daemonized pid (systemd 258, user manager
+        reaps the orphan). LIVE-PROVEN via `aeo up`: a REAL qemu VM (blank
+        qcow2, real /dev/kvm boot) killed mid-window -> "kernel verdict:
+        killed by SIGKILL (exit 137)" at the declared within(25s), death
+        event hash-chained. down() + relaunch now reset-fail the unit corpse
+        (aeo's own teardown kill must not read as a death / block --unit
+        reuse). Guest-OS-level death (panic inside a live qemu) stays the
+        agent's future layer.
+      - **nested container in a local VM**: driver_vm.guest_death_state —
+        the engine inspect through the SAME ssh exec seam as `aeo exec`
+        (resolved guest IP + guest key), classified by lib/death. MECHANISM
+        LIVE-PROVEN on .160 with the box standing in as the guest
+        (AEO_GUEST_USER/AEO_SSH_KEY -> 127.0.0.1): exit-3 container ->
+        "exited with code 3", REAL cgroup-OOM'd container -> "OOM-killed
+        (cgroup memory limit)", absent -> no verdict; the sh->ssh->sh
+        quoting of the piped format is the production path. Full in-cell
+        proof (real VM guest) when the kvm_podman cell next runs — .160 has
+        no sudo for tap networking.
+      TWO driver fixes en route: (1) `ubuntu@` was HARDCODED in all three
+      ssh-seam sites — now `_guest_user()` (AEO_GUEST_USER, default ubuntu,
+      mirroring AEO_SSH_KEY; debian/fedora cloud images need it); (2)
+      `_guest_ip`'s `nc -z` pre-check: a box WITHOUT nc (minimal Arch) took
+      the exit-127 else-branch into the bhyve MAC-lookup and silently
+      BLANKED the whole exec seam (aeo exec on VM nodes included) — now a
+      missing nc trusts the resolved IP and lets ssh's ConnectTimeout
+      surface unreachability.
+      WSLC ARM 2026-07-18 (third round, spiked LIVE on winbaz): `wslc
+      inspect NAME` returns Docker-shaped JSON with State.Status +
+      State.ExitCode — proven against real wslc 2.9.3.0 on the guest:
+      /bin/false -> ExitCode 1; `wslc kill` -> ExitCode 137 (the >128 signal
+      convention HOLDS); a stopped container LINGERS in `list --all` until
+      removed (corpse readable at diag time). State has NO OOMKilled field —
+      oom reports false, so a wslc OOM kill classifies as "killed by SIGKILL
+      (exit 137)" (a verdict, just less specific). BUILT:
+      driver_wslc.inspect_death_argv / death_line (needle parse LOCKED
+      against the real captured fixture — ExitCode BEFORE Status inside
+      State, Config.Cmd present so a false match would be caught) /
+      death_state; runner diag dispatches engine wslc to it. Proof bar = the
+      driver_wslc house discipline (exact argv run live against real
+      wslc.exe + parser fixture-locked to real output); in-driver execution
+      on a Windows host rides the aeo-agent.exe pipeline when that thread
+      resumes. spec_death 26.
+      LXC ARM 2026-07-18 (fourth round, spiked + LIVE-PROVEN on .160 via
+      UNPRIVILEGED lxc — the box has subuid maps + user-slice memory/pids
+      delegation; ~/.config/lxc idmap config + a setfacl u:100000:x on
+      /home/paul were the only setup, no sudo). TWO verdict sources, both
+      empirically mapped on real LXC 6.x:
+      - **RUNNING but sick**: the payload cgroup's memory.events oom_kill
+        counter (resolved via lxc-info PID -> /proc/<pid>/cgroup, so rootful
+        AND unprivileged placements both work; unprivileged read). NEW
+        verdict class in lib/death: status=running|oom=true -> "OOM kills
+        inside (cgroup memory limit; container still running)" — the kernel
+        killed WORKLOAD processes while init survives. GOTCHAS proven live:
+        swap absorbs the pressure (memory.swap.max=0 needed alongside
+        memory.max for a deterministic OOM — CachyOS zswap soaked 64MB);
+        busybox tail gets a failed malloc, not an OOM kill (fill /dev/shm
+        tmpfs instead — unreclaimable pages force the killer).
+      - **STOPPED**: the cgroup VANISHES on stop; the ONLY post-mortem
+        carrier is the lxc log — so start_argv now passes `-o
+        <AEO_LXC_LOG_DIR|/tmp>/aeo-lxc-<n>.log -l INFO`, where LXC records
+        "Child <pid> ended on signal <Name>(<N>)" (-> 128+N) or "ended on
+        error (<N>)" (-> N); a CLEAN exit logs no ended-line (LXC only logs
+        error ends). lxc-info exposes state+pid but NO exit code. Rootful
+        caveat recorded in the driver: the root-written 0640 log needs an
+        operator default-ACL'd log dir for the unprivileged read, else the
+        stopped verdict degrades to honest "".
+      BUILT: driver_lxc.death_log_path/death_from_log/death_state +
+      `_lxc_query` (sudo-grant first, PLAIN fallback for unprivileged-lxc
+      hosts, both stderr-swallowed); runner diag dispatches kind lxc.
+      LIVE-PROVEN through the real driver on .160: running+capped+shm-fill
+      -> "OOM kills inside (cgroup memory limit; container still running)";
+      lxc-stop -k -> "killed by SIGKILL (exit 137)" parsed from the driver's
+      own log. spec_death 32 (log wordings locked from real captures).
+      PROXMOX ARMS 2026-07-18 (fifth round, LIVE-PROVEN on the FRESH .204 —
+      reformatted PVE 9.2.2, already bootstrapped: template 9000 + pool +
+      snippet + aeo@pve; root key auth survived the reformat; token minted
+      fresh via the idempotent token_setup): driver_proxmox.death_state —
+      TASK-HISTORY CORRELATION over the token seam. PVE exposes no exit code
+      for a dead guest, but every operator/API stop is a task
+      (qmstop/qmshutdown/vzstop/...), so STOPPED with no stop-shaped task
+      newer than the last start-shaped task = DIED (qemu crashed, host
+      OOM-killed it, or in-guest poweroff). One death_state serves BOTH
+      kinds (_ep-shared, like the rest of the driver); the pre-classified
+      verdict rides a new `cause=` pass-through field in lib/death's
+      canonical line (no lossy exit-code encoding). LIVE PROOFS:
+      - proxmox_vm, FULL aeo-up diag: cloned VM w/ cloud_init+agent(1)
+        (running-but-not-UP window), kvm process kill -9'd ON THE PVE HOST ->
+        "kernel verdict: stopped with no stop task (hypervisor process died,
+        host-killed, or powered off from inside the guest)" at the declared
+        within(3m); death event hash-chained (kind=proxmox_vm); teardown
+        destroyed the corpse.
+      - proxmox_ct, driver-level probe: host-side kill of the CT's init (no
+        task) -> the died verdict; CONTROL: a deliberate `pct stop` -> NO
+        verdict.
+      THE CONTROL CAUGHT A REAL HOLE: PVE shows a non-root user only its OWN
+      tasks — root@pam's pct stop was INVISIBLE to the token, so an operator
+      stop read as a death. Fix: `Sys.Audit` (read-only, same class as the
+      VM.Audit/Pool.Audit already granted) in a separate `aeo-taskviewer`
+      role on /nodes, granted to BOTH user and token (the privsep
+      intersection rule) — baked into proxmox_token_setup.sh (§4b) and
+      re-proven from a clean re-run with a rotated token. spec_death 33
+      (cause= pass-through locked).
+      NESTED-IN-REMOTE-PROXMOX ARM 2026-07-18 (sixth round — the AGENT-VERB
+      arm, LIVE-PROVEN on .204 through the full recursive chain): the
+      aeo-agent protocol gained a `death` verb — the guest's RESIDENT agent
+      runs the engine inspect INSIDE the boundary (tries the delegate path's
+      `aeo-<node>` name, then bare) and replies the canonical
+      status|oom|exit line as the report state (spaceless by construction,
+      rides the space-separated wire intact; "none" when nothing to report).
+      The PARENT classifies — the agent only reads. driver_vm gained
+      agent_death_at (mirrors agent_status_at: dial <guest-ip>:9450 direct)
+      + the pure agent_death_line reply parser (spec-locked, incl. not
+      mistaking a `status`-verb "up" reply for a death line); the runner
+      diag routes container-nested-in-proxmox_vm through it via
+      driver_proxmox.guest_ip. LIVE (dev delivery: locally-built agent
+      served from the PVE host + a dev snippet with the local SHA — the
+      versioned-release path needs a new aeo-agent-v* tag when this merges):
+      full chain up (clone -> cloud-init -> agent fetch+verify+start ->
+      delegate -> child container) and the diag surfaced "kernel verdict:
+      exited with code 127" for the child inside the remote guest — a REAL,
+      UNSTAGED failure the new arm diagnosed on its first flight (see next
+      item), hash-chained (node=dead kind=container event=death). The
+      verdict can ONLY have come through the agent verb — no host engine or
+      ssh can see that container.
+      **RELEASE-BLOCKING CHAIN FINDING — FIXED 2026-07-18 (static link):**
+      the agent binary had grown a libnghttp2.so.14 dep (std.http's LB-era
+      growth) + libssl3/libcrypto3 — `debian:stable-slim` (the
+      agent-in-container base, _fire_child_async default) does NOT ship
+      nghttp2, so a fresh DYNAMIC agent build exited 127 in the child
+      container (the exact verdict the forensics returned; the v0.1.1 asset
+      predates the dep, which is why the 2026-07-11 chain worked). FIX:
+      STATIC LINK — `AE_CC="gcc -static" ae build bin/aeo-agent.ae` (after
+      `ae cache clear`; AE_CC alone doesn't invalidate ae's content cache —
+      a toolchain gotcha). Removes the ENTIRE runtime-deps axis: the same
+      binary serves /health in debian-slim, musl Alpine AND bare busybox
+      (all proven in local podman) — the glibc-vs-musl asset axis is
+      designed out, not labeled. The static-glibc NSS/getaddrinfo caveat
+      doesn't apply (the agent binds IP literals + shells to curl).
+      `.github/workflows/release-aeo-agent.yml` REWRITTEN: asset renamed
+      `aeo-agent-linux-x86_64-static`, AE_CC static build, libssl-dev +
+      libnghttp2-dev runner prereqs, asserts now require "statically
+      linked" (the name can't lie). Next `aeo-agent-v*` tag ships it; the
+      snippet template bumps URL+SHA then. LIVE RE-PROOF on .204 with the
+      static agent (dev-served): the recursive chain came up HEALTHY
+      ([db_vm] up -> [dead] up -> stack up — the chain is UNBROKEN again),
+      and the staged-kill re-proof completed against the standing tree via
+      the agent death verb: alive -> "status=running|oom=false|exit=0" (no
+      verdict — correct), `podman kill` in-guest ->
+      "status=exited|oom=false|exit=137" -> "killed by SIGKILL (exit 137)".
+      Clean aeo down.
+      Remaining follow-ups: memory.events oom_kill as ground truth where the
+      engine under-reports rootless OOMs (podman arm; the lxc arm now reads
+      it directly); bwrap/bhyve exit status (needs the supervisor as parent —
+      the universal waitpid); jail rctl denies are EVENT-shaped (the
+      denials-ledger mechanism, not post-mortem state); guest-OS-level death
+      via the in-guest agent (kvm panic; proxmox distinguishing crash vs
+      in-guest poweroff — the task correlation can't); cut the
+      `aeo-agent-v0.1.2` STATIC release + bump the snippet template's
+      URL+SHA pin (workflow ready + chain re-proven; needs this work
+      committed/pushed and the tag — the staged kill-137 re-proof is DONE,
+      see the fix note above); EARLY-EXIT the level poller when every
+      not-up node already has
+      a death verdict; swallow the cosmetic engine stderr from
+      probing/inspecting an exited or absent container (podman "exec
+      sessions" + "no such object" leaks); eBPF signal streams as the later
+      tier.
+- [ ] **5. Mutual TLS with per-node identity on the agent conduit.** aurae
+      does SPIFFE-style x509 mTLS down to the Unix socket — every client has
+      a minted identity (docs/certs.md, certgen per client). aeo's agent auth
+      is a bearer token (the live-debug default was literally
+      "aeo-dev-token"). The existing HTTPS-conduit follow-up (§ aeo-agent
+      slices) is server-TLS + token; the aurae-shaped upgrade is MUTUAL auth
+      with per-node certs minted at seed time via lib/secrets — parent
+      verifies child AND vice versa down the delegate chain (depth 0 -> 1 ->
+      2). Also feeds the multi-host/WireGuard design: per-node crypto
+      identity was the flagged caveat of host-level WG (the host's pf/routing
+      is trusted; node certs give the independent identity back).
+- [ ] **6. `aeo logs <node> [--follow]` — streaming workload output.** aurae
+      streams daemon logs + subprocess stdout/stderr as first-class API
+      (observe.proto GetSubProcessStream). aeo has `exec` but no log verb — a
+      day-2 ops gap; the agent chain is already the transport (delegate a
+      STREAM instead of a command; for host-visible containers it's just
+      `podman logs -f` behind the verb).
+- [ ] **7. (Minor) Discovery.** aurae's `Discover()` RPC returns
+      node/instance identity + version. aeo's multi-host epic wants the agent
+      to answer "who are you, what do you hold" for cross-host inventory
+      (the 5-proxmox-host + chromebook-control-plane design). FOLD INTO the
+      multi-host design doc rather than building standalone — it's one verb
+      on the agent protocol.
+
+Sequencing: 3+4 are self-contained and buildable now (grammar + diag work, no
+new architecture); 2 is a runner phase with immediate cutover payoff; 1 is
+the strategic one and rides clawk item 3 (OCI-as-rootfs); 5 rides the
+existing HTTPS-conduit item + lib/secrets; 6 is small once the agent protocol
+grows a stream shape; 7 folds into the multi-host design doc.
+
+## One to watch: uvm (surveyed 2026-07-17 — future substrate, not yet)
+
+uvm (~/scm/uvm, github.com/maximecb/uvm — Maxime Chevalier-Boisvert's
+minimalist APPLICATION VM) is a different category from clawk/aurae: a stack-
+bytecode interpreter with ~40 frozen syscalls, NO FFI, self-contained app
+images, and an anti-code-rot mission (APIs freeze at 1.0). Pre-1.0,
+interpreter-only, programs ship as `.asm` TEXT files today. Little to copy
+now; the value is as a FUTURE SUBSTRATE — and it would be aeo's purest
+containment tier, stronger than bwrap STRUCTURALLY: no FFI and no syscall
+escape means a program's entire reachable universe is the ~40 calls.
+Containment isn't a filter that could be misconfigured; the capability
+DOESN'T EXIST in the machine. Bonus alignment: frozen APIs + self-contained
+images compose with aeo's reproducibility story — an attested uvm image in a
+composition deploys bit-identically decades later, which no container image
+can promise.
+
+Spec findings (from spec/syscalls.json, 2026-07-17):
+- NO outbound TCP at all — net surface is net_listen/accept/read/write/close,
+  server-side only, no net_connect. So a uvm workload can SERVE but not DIAL:
+  deny_egress() is free-by-construction, but a non-leaf workload (app -> db)
+  is impossible until outbound lands.
+- Permission system HALF-SKETCHED: every syscall carries a `permission` tag
+  (net_server, net_io, …) but spec/permissions.json is literally 0 bytes —
+  the grant mechanism is planned, unbuilt. When it lands it's exactly the
+  shape constrain{} renders onto: per-node grants over a small enumerable
+  capability set.
+- Roadmap items that map straight onto aeo verbs: single-file binary app
+  image with metadata (-> image() + the easiest attest() ever — one file,
+  one sha256); headless/no-SDL build (a server node can't require SDL2);
+  "suspend a running program to a new app image file" (-> the snapshot/
+  suspend verbs as a PORTABLE FILE — cleaner than clawk's RAM+disk pair).
+
+READINESS GATE for a driver_uvm (re-check the repo against this list before
+building anything): (1) headless/no-SDL build; (2) the binary image format
+(can't meaningfully attest a .asm text file — no metadata/entry contract);
+(3) outbound net_connect for non-leaf workloads; (4) the permission system
+for constrain{} rendering. Driver shape when it's time: the bwrap/
+firecracker tier — pidfile/systemd-run-tracked process, command() = the app
+image, probe = process-alive + TCP health, deny_egress recorded as
+STRUCTURAL rather than rendered.
+
+Copyable NOW (small, independent of the substrate):
+- [ ] **"Containment by absence" as a recorded posture class.** A boundary
+      can be ABSENT-BY-CONSTRUCTION (bwrap --unshare-all, --network none, a
+      uvm with no net_connect syscall) vs FILTERED-BY-POLICY (pf rules,
+      internal nets, allow-lists). aeo's audit/status records what was
+      RENDERED but not which class it is — record it ("egress: impossible"
+      vs "egress: filtered") for a more truthful audit trail and a stronger
+      attestation-of-posture story. Lands in: lib/audit + status.
+- [ ] **Declarative spec -> generated docs/bindings.** uvm's
+      spec/syscalls.json generates the markdown docs, Rust constants, AND C
+      headers from one source. aeo analog: spec the agent protocol verbs
+      (dispatch/delegate/status/report, soon streams) once and generate
+      docs/ + the LLM.md tables, so protocol and docs can't drift. Small.
+- [ ] **Attest follow-up note**: §3's "attest a qcow2 / jail-dataset hash"
+      cross-substrate item should name the single-file app image as the
+      degenerate ideal case (one file, one hash) when a uvm/appimage-like
+      substrate arrives.

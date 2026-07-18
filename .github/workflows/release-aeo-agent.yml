@@ -1,4 +1,4 @@
-# release-aeo-agent.yml — build aeo-agent (linux-amd64, glibc) and publish it as a
+# release-aeo-agent.yml — build aeo-agent (linux-amd64, STATIC) and publish it as a
 # GitHub Release asset, so a proxmox_vm guest's cloud-init can `curl` the binary in
 # (the aeo-agent "doer" delivery path) instead of baking it or shipping it over ssh.
 #
@@ -16,13 +16,18 @@
 # you can pin it. workflow_dispatch is a BUILD-ONLY dry run (no publish) for testing
 # the build without cutting a tag.
 #
-# TARGET (in the asset name — linux/x86_64/glibc): builds on ubuntu-latest -> a
-# dynamically-linked x86_64 glibc ELF (interpreter /lib64/ld-linux-x86-64.so.2),
-# which is what a Debian/Ubuntu cloud image runs. libc is IN THE NAME on purpose:
-# it's the axis that silently breaks — a glibc binary won't run on a musl guest
-# (Alpine). The build step ASSERTS arch+libc so the name can't lie. A musl or arm64
-# guest needs its own matching asset (aeo-agent-linux-x86_64-musl / -aarch64-glibc)
-# — a build-matrix follow-up.
+# TARGET (in the asset name — linux/x86_64/static): a STATICALLY linked x86_64 ELF.
+# WHY STATIC (2026-07-18, found by the death-forensics arm): the dynamic glibc
+# build grew a libnghttp2.so.14 dependency (std.http-era growth) that
+# debian:stable-slim — the agent-in-container base the recursive chain runs the
+# agent in — does NOT ship, so a fresh dynamic agent exec'd there died exit 127
+# and the whole nested chain broke. Static removes the ENTIRE runtime-deps axis:
+# the same binary runs in a full guest OS, debian-slim, musl Alpine, and bare
+# busybox (all four proven live). The agent needs no runtime NSS/DNS from libc
+# (it binds IP literals and shells to curl), so the static-glibc getaddrinfo
+# caveat doesn't apply. The build step ASSERTS arch+static so the name can't
+# lie. An arm64 guest needs its own matching asset (aeo-agent-linux-aarch64-
+# static) — a build-matrix follow-up.
 
 name: release-aeo-agent
 
@@ -48,7 +53,9 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install build prerequisites
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq build-essential curl tar
+        # libssl-dev + libnghttp2-dev provide the STATIC archives (libssl.a,
+        # libcrypto.a, libnghttp2.a) the -static link needs.
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq build-essential curl tar libssl-dev libnghttp2-dev
 
       - name: Install the Aether toolchain (ae)
         # get.sh builds ae from source (Aether -> C -> make); no chicken-and-egg.
@@ -64,25 +71,27 @@ jobs:
       - name: Verify ae is on PATH
         run: ae --version
 
-      - name: Build aeo-agent (linux, x86_64, glibc)
+      - name: Build aeo-agent (linux, x86_64, static)
+        # AE_CC carries the -static: ae hands it to the C-compile+link step.
+        # (Proven locally: AE_CC="gcc -static" -> "not a dynamic executable",
+        # and the result serves /health in debian-slim, alpine AND busybox.)
         run: |
-          ae build bin/aeo-agent.ae -o aeo-agent-linux-x86_64-glibc --lib lib
-          file aeo-agent-linux-x86_64-glibc
-          # ASSERT the name is honest: the asset says linux-x86_64-glibc, so fail
-          # the build if it isn't. glibc == the /lib64/ld-linux-x86-64.so.2 loader
-          # (musl would be ld-musl-x86_64.so.1 and would silently not run on a glibc
-          # guest — the exact trap the libc-in-the-name is meant to prevent).
-          file aeo-agent-linux-x86_64-glibc | grep -q 'ELF 64-bit.*x86-64' \
+          AE_CC="gcc -static" ae build bin/aeo-agent.ae -o aeo-agent-linux-x86_64-static --lib lib
+          file aeo-agent-linux-x86_64-static
+          # ASSERT the name is honest: the asset says linux-x86_64-static, so fail
+          # the build if it isn't. Static == no interpreter, no runtime .so deps —
+          # the exact axis a dynamic build silently breaks on (the exit-127 trap).
+          file aeo-agent-linux-x86_64-static | grep -q 'ELF 64-bit.*x86-64' \
             || { echo "not an x86_64 ELF — asset name would be a lie"; exit 1; }
-          file aeo-agent-linux-x86_64-glibc | grep -q 'ld-linux-x86-64' \
-            || { echo "not glibc-linked (musl?) — asset name would be a lie"; exit 1; }
-          chmod +x aeo-agent-linux-x86_64-glibc
+          file aeo-agent-linux-x86_64-static | grep -q 'statically linked' \
+            || { echo "not statically linked — asset name would be a lie (the exit-127 trap returns)"; exit 1; }
+          chmod +x aeo-agent-linux-x86_64-static
 
       - name: Checksum
         id: sum
         run: |
-          sha256sum aeo-agent-linux-x86_64-glibc | tee aeo-agent-linux-x86_64-glibc.sha256
-          echo "sha256=$(cut -d' ' -f1 aeo-agent-linux-x86_64-glibc.sha256)" >> "$GITHUB_OUTPUT"
+          sha256sum aeo-agent-linux-x86_64-static | tee aeo-agent-linux-x86_64-static.sha256
+          echo "sha256=$(cut -d' ' -f1 aeo-agent-linux-x86_64-static.sha256)" >> "$GITHUB_OUTPUT"
 
       - name: Summary (pin this SHA256 in the cloud-init snippet)
         run: |
@@ -95,7 +104,7 @@ jobs:
               echo "Cut a tag to publish: \`git tag aeo-agent-vX.Y.Z && git push origin aeo-agent-vX.Y.Z\`"
             fi
             echo ""
-            echo "- asset: \`aeo-agent-linux-x86_64-glibc\`"
+            echo "- asset: \`aeo-agent-linux-x86_64-static\`"
             echo "- **SHA256:** \`${{ steps.sum.outputs.sha256 }}\`"
             echo ""
             echo "Pin it in the guest cloud-init: \`AEO_AGENT_SHA256=${{ steps.sum.outputs.sha256 }}\`"
@@ -109,20 +118,22 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            aeo-agent-linux-x86_64-glibc
-            aeo-agent-linux-x86_64-glibc.sha256
+            aeo-agent-linux-x86_64-static
+            aeo-agent-linux-x86_64-static.sha256
           tag_name: ${{ github.ref_name }}
           body: |
-            aeo-agent (linux, x86_64, glibc) — the in-guest orchestration agent a
+            aeo-agent (linux, x86_64, STATIC) — the in-guest orchestration agent a
             proxmox_vm fetches via cloud-init to complete its node and run its
-            workload container.
+            workload container. Statically linked: the same binary runs in a full
+            guest OS, debian-slim, musl Alpine, or busybox (no runtime .so deps —
+            the agent-in-container path depends on this).
 
-            **Asset:** `aeo-agent-linux-x86_64-glibc`
+            **Asset:** `aeo-agent-linux-x86_64-static`
             **SHA256:** `${{ steps.sum.outputs.sha256 }}`
 
             Verify + run in cloud-init:
             ```
-            curl -fsSL https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/aeo-agent-linux-x86_64-glibc -o /usr/local/bin/aeo-agent
+            curl -fsSL https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/aeo-agent-linux-x86_64-static -o /usr/local/bin/aeo-agent
             echo "${{ steps.sum.outputs.sha256 }}  /usr/local/bin/aeo-agent" | sha256sum -c -
             chmod +x /usr/local/bin/aeo-agent
             ```

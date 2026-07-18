@@ -42,6 +42,10 @@
 # fail-closed verify below stays valid for the life of this pin. To move to a new
 # agent, cut a new `aeo-agent-v*` tag (CI prints its SHA in the job summary) and
 # bump AEO_AGENT_URL + AEO_AGENT_SHA256 here.
+# NB from aeo-agent-v0.1.2 the asset is `aeo-agent-linux-x86_64-static`
+# (STATICALLY linked — the dynamic build grew a libnghttp2 dep that broke the
+# agent-in-container path with exit 127; static removes the runtime-deps axis
+# and runs in debian-slim/alpine/busybox alike). Bump the URL's asset name too.
 
 package_update: true
 packages:

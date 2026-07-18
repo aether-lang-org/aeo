@@ -26,7 +26,7 @@ import std.fs (write_atomic)
 
 exports (
     name, engine_resolve,
-    up, up_net, up_confined, up_green, alias_move, network_ensure, network_ensure_internal, down, down_many, down_many_command, probe, inspect_argv, inspect_state, list_running, extract_argv, extract_facts, image_digest, exec_capture, build, build_entrypoint, built_tag,
+    up, up_net, up_confined, up_green, alias_move, network_ensure, network_ensure_internal, down, down_many, down_many_command, probe, inspect_argv, inspect_state, death_argv, death_state, list_running, extract_argv, extract_facts, image_digest, exec_capture, build, build_entrypoint, built_tag,
     ps_running_argv, ps_all_running_argv, running_names, run_argv, run_argv_net, run_argv_confined, stop_argv, rm_argv, exec_health_argv,
     net_disconnect_argv, net_connect_alias_argv,
     pasta_dropin_path, pasta_dropin_content, pasta_forwarder_ensure, pasta_forwarder_active, pasta_forwarder_clear,
@@ -691,6 +691,53 @@ inspect_state(res_name: string, engine_pref: string) -> string {
         return ""
     }
     // strip a trailing newline for a clean canonical value.
+    n = string_length(out)
+    if n > 0 {
+        if string_char_at(out, n - 1) == 10 {
+            return string_substring(out, 0, n - 1)
+        }
+    }
+    return out
+}
+
+// --- death forensics: the KERNEL's verdict on a dead container ---------------
+//
+// death_state pulls the ENGINE's post-mortem fields for a node (podman AND
+// docker both expose State.OOMKilled/ExitCode) as the canonical
+// status|oom|exit line; the substrate-agnostic classification of that line
+// into a human verdict lives in lib/death (death.death_cause), shared with the
+// systemd-unit kinds (nspawn/firecracker). Reading the cgroup's memory.events
+// oom_kill counter directly (ground truth when the engine under-reports
+// rootless OOMs) is the follow-up.
+
+// death_argv(res_name) — `<engine> inspect NAME --format '<post-mortem>'`. Pure.
+death_argv(res_name: string) -> ptr {
+    av = list_new()
+    list_add(av, "inspect")
+    list_add(av, res_name)
+    list_add(av, "--format")
+    list_add(av, "status={{.State.Status}}|oom={{.State.OOMKilled}}|exit={{.State.ExitCode}}")
+    return av
+}
+
+// death_state(res_name, engine_pref) — the live post-mortem line
+// (status=<s>|oom=<bool>|exit=<n>), or "" if the container doesn't exist or no
+// engine. Same stderr-swallowing shape as inspect_state (an absent container is
+// the normal case, not an error to surface).
+death_state(res_name: string, engine_pref: string) -> string {
+    eng = engine_resolve(engine_pref)
+    if eng == "" {
+        return ""
+    }
+    av = death_argv(res_name)
+    out, _eout, status, err = run_full(eng, av, null, "")
+    list_free(av)
+    if err != "" {
+        return ""
+    }
+    if status != 0 {
+        return ""
+    }
     n = string_length(out)
     if n > 0 {
         if string_char_at(out, n - 1) == 10 {

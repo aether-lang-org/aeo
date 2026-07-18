@@ -39,12 +39,14 @@ import std.os (run_capture, os_which)
 import std.list
 import std.string (string_length, string_char_at, string_from_char, string_from_int, string_get_int, string_substring)
 import std.fs (write_atomic)
+import death (unit_death_line)
 
 exports (
     name,
     available, up, down, probe, exec_capture,
     config_json, mem_mib, kernel_path, rootfs_path,
-    pidfile_for, sockfile_for, configfile_for, _shq
+    pidfile_for, sockfile_for, configfile_for, _shq,
+    show_death_argv, death_state
 )
 
 name() -> string { return "firecracker" }
@@ -184,10 +186,15 @@ _launch(bin: string, sock: string, cfg: string, res_name: string, log: string) -
     sr = os_which("systemd-run")
     if string_length(sr) > 0 {
         _systemctl_user_stop(res_name)          // clear any prior unit of this name
+        _systemctl_user_reset_failed(res_name)  // incl. a FAILED corpse (would block --unit reuse)
         av = list_new()
         list_add(av, "--user")
         list_add(av, "--unit=${unit_name(res_name)}")
-        list_add(av, "--collect")               // GC the unit when it exits
+        // deliberately NO --collect: systemd keeps a FAILED transient unit
+        // loaded until reset-failed — the post-mortem death_state reads
+        // (Result=oom-kill / signal / exit-code). --collect would GC the
+        // corpse before the diag could ask why it died. Success still
+        // unloads immediately; down()/relaunch reset-fail the corpse away.
         list_add_raw(av, bin)
         list_add(av, "--api-sock")
         list_add_raw(av, sock)
@@ -227,6 +234,56 @@ _systemctl_user_stop(res_name: string) {
     list_free(av)
 }
 
+// `systemctl --user reset-failed aeo-fc-NAME` — best-effort corpse clearing.
+_systemctl_user_reset_failed(res_name: string) {
+    av = list_new()
+    list_add(av, "--user")
+    list_add(av, "reset-failed")
+    list_add(av, unit_name(res_name))
+    _o, _s, _e = run_capture(_systemctl(), av, null)
+    list_free(av)
+}
+
+// `systemctl --user show aeo-fc-NAME -p Result -p ExecMainCode -p
+// ExecMainStatus` — the microVM process's post-mortem. Pure builder.
+show_death_argv(res_name: string) -> ptr {
+    av = list_new()
+    list_add(av, "--user")
+    list_add(av, "show")
+    list_add(av, unit_name(res_name))
+    list_add(av, "-p")
+    list_add(av, "Result")
+    list_add(av, "-p")
+    list_add(av, "ExecMainCode")
+    list_add(av, "-p")
+    list_add(av, "ExecMainStatus")
+    return av
+}
+
+// death_state(res_name) — the canonical status|oom|exit post-mortem line for a
+// dead microVM's unit ("" = running / never ran / unknown / no systemd —
+// including the setsid-bg fallback launch, whose exit status is lost until
+// the supervisor owns pidfile kinds). NB this is the HOST-side verdict (the
+// firecracker process); meaningful for a microVM since its RAM is the
+// process's RSS — a host OOM of the unit IS the microVM's OOM. Guest-OS-level
+// death (panic inside) is the in-guest agent's future layer.
+death_state(res_name: string) -> string {
+    sc = _systemctl()
+    if string_length(sc) == 0 {
+        return ""
+    }
+    av = show_death_argv(res_name)
+    out, status, err = run_capture(sc, av, null)
+    list_free(av)
+    if err != "" {
+        return ""
+    }
+    if status != 0 {
+        return ""
+    }
+    return unit_death_line(out)
+}
+
 // 1 if `systemctl --user is-active aeo-fc-NAME` reports the unit active.
 _unit_active(res_name: string) -> int {
     sc = _systemctl()
@@ -256,6 +313,7 @@ _systemctl() -> string {
 // pidfile/socket/config. Absent == ok.
 down(res_name: string) -> string {
     _systemctl_user_stop(res_name)        // stop the --user unit if present
+    _systemctl_user_reset_failed(res_name)  // expire a FAILED corpse (post-mortem read window ends here)
     pid = _read_pid(res_name)             // fallback path (setsid/bg launch)
     if pid > 0 {
         _kill(pid)

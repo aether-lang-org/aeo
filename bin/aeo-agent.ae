@@ -241,6 +241,24 @@ _dispatch_verb(me: string, token: string, line: string) -> string {
         }
         return protocol.encode_report(token, node, st)
     }
+    if v == "death" {
+        // POST-MORTEM of a child container, read FROM INSIDE the boundary (the
+        // parent's host engine can't see in — the same reason status exists).
+        // Replies the canonical status|oom|exit line as the report state (the
+        // line is spaceless by construction, so it rides the space-separated
+        // wire intact), or "none". The PARENT classifies (lib/death) — this
+        // side only reads. The delegate path names its child container
+        // aeo-<node> (agent-in-container); the boot path uses the bare name —
+        // try both.
+        dl = driver_linux.death_state("aeo-${node}", "")
+        if string_length(dl) == 0 {
+            dl = driver_linux.death_state(node, "")
+        }
+        if string_length(dl) == 0 {
+            dl = "none"
+        }
+        return protocol.encode_report(token, node, dl)
+    }
     if v == "halt" {
         println("aeo-agent[${me}]: halt ${node}")
         _de = _down_node(node)

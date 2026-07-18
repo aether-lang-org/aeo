@@ -32,10 +32,12 @@ import std.os (run_capture, os_which, getenv)
 import std.list
 import std.string (string_length, string_char_at, string_substring, string_contains, string_from_char, string_index_of)
 import secrets
+import death (unit_death_line)
 
 exports (
     name,
     up, bhyve_up, guest_container_up, agent_delegate, agent_delegate_at, agent_delegate_fire, agent_status, agent_status_at, build_agent_seed, exec_capture, down, probe,
+    show_death_argv, death_state, guest_death_state, agent_death_at, agent_death_line,
     bhyve_argv, qemu_argv, bhyvectl_destroy_argv,
     pidfile_for, bootrom_path
 )
@@ -572,6 +574,51 @@ agent_status_at(base: string, child: string, token: string) -> int {
     }
     return 0
 }
+
+// agent_death_at(base, child, token) — the nested-in-REMOTE-guest post-mortem:
+// ask the guest's resident agent (the containment-correct hop — ssh
+// reachability is box-specific, the agent conduit is what the chain already
+// requires) for the child container's canonical death line. The agent runs
+// the engine inspect INSIDE the guest and replies the spaceless line as the
+// report state; "" = none/unreachable. The caller classifies via lib/death.
+agent_death_at(base: string, child: string, token: string) -> string {
+    return agent_death_line(_agent_post(base, "death ${token} ${child}"))
+}
+
+// pure: extract the death line from a `report <tok> <node> <line>` reply.
+// The line is the LAST space-separated field (spaceless by construction);
+// "none" or a non-report reply -> "".
+agent_death_line(rep: string) -> string {
+    n = string_length(rep)
+    if n == 0 {
+        return ""
+    }
+    // strip a trailing newline, then take the tail after the last space.
+    while n > 0 {
+        c = string_char_at(rep, n - 1)
+        if c != 10 {
+            if c != 13 {
+                break
+            }
+        }
+        n = n - 1
+    }
+    i = n
+    while i > 0 {
+        if string_char_at(rep, i - 1) == 32 {
+            break
+        }
+        i = i - 1
+    }
+    if i == 0 {
+        return ""                     // no spaces — not a report rep
+    }
+    tail = string_substring(rep, i, n)
+    if string_contains(tail, "status=") == 0 {
+        return ""                     // "none" / "up" / anything non-canonical
+    }
+    return tail
+}
 // POST a protocol line to the agent's /dispatch, return the reply body ("" on
 // error). Shared by delegate + status polling.
 _agent_post(base: string, body: string) -> string {
@@ -645,7 +692,7 @@ guest_container_up(host_vm: string, host_ip: string, name: string, dockerfile: s
     remote = "set -e; ${run_part}"
     av = list_new()
     list_add(av, "-c")
-    list_add(av, "ssh -i ${_guest_key()} -o StrictHostKeyChecking=no -o ConnectTimeout=10 ubuntu@${ip} ${_shquote(remote)}")
+    list_add(av, "ssh -i ${_guest_key()} -o StrictHostKeyChecking=no -o ConnectTimeout=10 ${_guest_user()}@${ip} ${_shquote(remote)}")
     out, status, err = run_capture("/bin/sh", av, null)
     list_free(av)
     if status != 0 {
@@ -664,7 +711,7 @@ exec_capture(host_vm: string, host_ip: string, cmd: string) -> string {
     }
     av = list_new()
     list_add(av, "-c")
-    list_add(av, "ssh -i ${_guest_key()} -o StrictHostKeyChecking=no -o ConnectTimeout=10 ubuntu@${ip} ${_shquote(cmd)}")
+    list_add(av, "ssh -i ${_guest_key()} -o StrictHostKeyChecking=no -o ConnectTimeout=10 ${_guest_user()}@${ip} ${_shquote(cmd)}")
     out, status, err = run_capture("/bin/sh", av, null)
     list_free(av)
     if err != "" {
@@ -683,9 +730,15 @@ exec_capture(host_vm: string, host_ip: string, cmd: string) -> string {
 // binding bhyve_up assigned this VM); if that doesn't answer ssh, fall back to
 // a MAC->arp/lease lookup. So multiple VMs each resolve to their OWN address.
 _guest_ip(host_vm: string, host_ip: string) -> string {
+    // Reachability pre-check via nc when it exists; on a box WITHOUT nc, trust
+    // the resolved host_ip and let ssh's own ConnectTimeout surface
+    // unreachability — a missing nc used to fall into the bhyve MAC-lookup
+    // branch and silently blank the whole exec seam (found on a minimal Arch
+    // host, 2026-07-18). The MAC/arp fallback still runs when nc says
+    // port-closed (the bhyve DHCP-lease case).
     av = list_new()
     list_add(av, "-c")
-    list_add(av, "if nc -z -w2 ${host_ip} 22 2>/dev/null; then echo ${host_ip}; else MAC=$(grep -o 'network0_mac=\"[^\"]*\"' /zroot/vm/${host_vm}/${host_vm}.conf 2>/dev/null | cut -d'\"' -f2); ping -c1 -W1 172.16.0.255 >/dev/null 2>&1; arp -an 2>/dev/null | grep -i \"$MAC\" | grep -oE '172.16.0.[0-9]+' | head -1; fi")
+    list_add(av, "if ! command -v nc >/dev/null 2>&1; then echo ${host_ip}; elif nc -z -w2 ${host_ip} 22 2>/dev/null; then echo ${host_ip}; else MAC=$(grep -o 'network0_mac=\"[^\"]*\"' /zroot/vm/${host_vm}/${host_vm}.conf 2>/dev/null | cut -d'\"' -f2); ping -c1 -W1 172.16.0.255 >/dev/null 2>&1; arp -an 2>/dev/null | grep -i \"$MAC\" | grep -oE '172.16.0.[0-9]+' | head -1; fi")
     out, status, err = run_capture("/bin/sh", av, null)
     list_free(av)
     return _first_line(out)
@@ -697,6 +750,17 @@ _guest_key() -> string {
         return k
     }
     return "${_home()}/.ssh/id_rsa"
+}
+
+// The guest login user for the ssh exec seam. Cloud images differ (ubuntu /
+// debian / fedora …); AEO_GUEST_USER overrides the ubuntu default, mirroring
+// AEO_SSH_KEY.
+_guest_user() -> string {
+    u = getenv("AEO_GUEST_USER")
+    if string_length(u) > 0 {
+        return u
+    }
+    return "ubuntu"
 }
 
 // First non-empty line of s, trimmed of a trailing newline.
@@ -830,7 +894,7 @@ bhyve_realize_cold(builder_vm: string, builder_ip: string, install_csv: string, 
 _guest_ssh_script(ip: string, script: string) -> string {
     av = list_new()
     list_add(av, "-c")
-    list_add(av, "ssh -i ${_guest_key()} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 ubuntu@${ip} ${_shq(script)}")
+    list_add(av, "ssh -i ${_guest_key()} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 ${_guest_user()}@${ip} ${_shq(script)}")
     out, status, err = run_capture("/bin/sh", av, null)
     list_free(av)
     if status != 0 {
@@ -1159,8 +1223,10 @@ _launch_persistent(bin: string, av: ptr, res_name: string) -> string {
     if string_length(sr) == 0 {
         return "aeo: systemd-run not found — persistent VM launch needs it on this host"
     }
-    // best-effort clear any prior unit of this name
+    // best-effort clear any prior unit of this name (incl. a FAILED corpse,
+    // which would block --unit reuse now that death_state keeps corpses)
     _systemctl_user_stop(unit)
+    _systemctl_user_reset_failed(unit)
     cmd = list_new()
     list_add(cmd, "--user")
     list_add(cmd, "--unit=${unit}")
@@ -1203,7 +1269,73 @@ down(kind: string, res_name: string) -> string {
         _kill(pid)
     }
     _rm_pidfile(res_name)
+    // our own kill fails the systemd unit (Result=signal) — expire that corpse
+    // so a DELIBERATE teardown isn't read as a death (and --unit stays reusable).
+    _systemctl_user_reset_failed("aeo-${res_name}")
     return ""
+}
+
+// `systemctl --user show aeo-NAME -p Result -p ExecMainCode -p ExecMainStatus`
+// — the qemu process's post-mortem (the kvm launch is a Type=forking --user
+// unit tracking qemu's -daemonize pid via PIDFile; proven on systemd 258 that
+// an external SIGKILL of that pid still yields Result/ExecMainCode/Status).
+show_death_argv(res_name: string) -> ptr {
+    av = list_new()
+    list_add(av, "--user")
+    list_add(av, "show")
+    list_add(av, "aeo-${res_name}")
+    list_add(av, "-p")
+    list_add(av, "Result")
+    list_add(av, "-p")
+    list_add(av, "ExecMainCode")
+    list_add(av, "-p")
+    list_add(av, "ExecMainStatus")
+    return av
+}
+
+// death_state(res_name) — the canonical status|oom|exit post-mortem line for a
+// dead kvm VM's unit ("" = running / never ran / unknown / no systemd; bhyve
+// has no unit and naturally reads ""). This is the HOST-side verdict — the
+// qemu PROCESS died (host OOM, stray kill). Guest-OS-level death (panic
+// inside a still-running qemu) is the in-guest agent's future layer.
+death_state(res_name: string) -> string {
+    av = show_death_argv(res_name)
+    out, status, err = run_capture("/usr/bin/systemctl", av, null)
+    list_free(av)
+    if err != "" {
+        return ""
+    }
+    if status != 0 {
+        return ""
+    }
+    return unit_death_line(out)
+}
+
+// guest_death_state(host_vm, host_ip, res_name) — the post-mortem of a
+// container NESTED in a local VM guest, read through the same ssh exec seam
+// as `aeo exec` (resolved guest IP + guest key) running the engine inspect
+// in-guest. "" on unreachable guest / absent container / alive. The remote
+// format arg is single-quoted so its pipes survive the guest shell; _shquote
+// protects the whole command across the local sh -c + ssh hop.
+guest_death_state(host_vm: string, host_ip: string, res_name: string) -> string {
+    out = exec_capture(host_vm, host_ip, "podman inspect ${res_name} --format 'status={{.State.Status}}|oom={{.State.OOMKilled}}|exit={{.State.ExitCode}}'")
+    n = string_length(out)
+    if n > 0 {
+        if string_char_at(out, n - 1) == 10 {
+            return string_substring(out, 0, n - 1)
+        }
+    }
+    return out
+}
+
+// `systemctl --user reset-failed aeo-NAME` — best-effort corpse clearing.
+_systemctl_user_reset_failed(unit: string) {
+    av = list_new()
+    list_add(av, "--user")
+    list_add(av, "reset-failed")
+    list_add(av, unit)
+    o, s, e = run_capture("/usr/bin/systemctl", av, null)
+    list_free(av)
 }
 
 // Liveness probe. The VM must be up (bhyve → vm-bhyve "Running"; kvm →

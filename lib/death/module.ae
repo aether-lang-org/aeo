@@ -1,0 +1,142 @@
+// lib/death — the substrate-portable "why did it die" classifier.
+//
+// The audit trail records the decisions AEO makes; when a node dies inside its
+// boundary the KERNEL made the decision (OOM kill, fatal signal) and the diag
+// used to say only "not up within window". Each driver contributes a
+// death_state() that reads its substrate's post-mortem source and returns ONE
+// canonical line:
+//
+//   status=<s>|oom=<true|false>|exit=<n>      ("" = nothing to report)
+//
+// and THIS module owns the two pure, substrate-agnostic pieces:
+//   death_cause(line)      — canonical line -> one human verdict string
+//   unit_death_line(show)  — `systemctl show -p Result,ExecMainCode,
+//                            ExecMainStatus` output -> the canonical line
+//                            (the shared source for every systemd-unit-held
+//                            kind: nspawn, firecracker, future unitized ones)
+//
+// Per-substrate sources (the map, from the 2026-07-18 survey):
+//   container (podman/docker)  engine inspect            driver_linux.death_state
+//   container engine=wsl_podman  same inspect via wsl    driver_windows.death_state
+//   nspawn                     systemd unit Result       driver_nspawn.death_state
+//   firecracker                systemd --user unit       driver_firecracker.death_state
+//   bwrap / bhyve              exit status LOST today — needs the supervisor
+//   jail (rctl deny)           an EVENT not a state — the denials-ledger shape
+//   kvm / proxmox guests       two-layer: unit/API + in-guest agent (future)
+
+import std.string (string_length, string_substring, string_index_of, string_equals, string_get_int, string_from_int)
+
+exports ( death_cause, unit_death_line )
+
+// death_cause(line) — classify a canonical post-mortem line into one verdict
+// string. "" when there's no death to report (empty line, or status != exited).
+// Precedence: OOM beats exit-code (an OOM kill also reports 137).
+death_cause(line: string) -> string {
+    if string_length(line) == 0 {
+        return ""
+    }
+    // pre-classified verdicts pass through: a substrate whose source already
+    // names the cause (proxmox task-history correlation) carries it in a
+    // trailing `cause=` field instead of forcing a lossy exit-code encoding.
+    c = _death_field(line, "cause")
+    if string_length(c) > 0 {
+        return c
+    }
+    st = _death_field(line, "status")
+    // the sick-but-alive class (lxc arm): the kernel OOM-killed WORKLOAD
+    // processes inside while the container's init survives — the node is
+    // running yet never becomes ready. Only reported when the driver saw a
+    // nonzero oom_kill counter, so a plain running container stays silent.
+    if string_equals(st, "running") == 1 {
+        if string_equals(_death_field(line, "oom"), "true") == 1 {
+            return "OOM kills inside (cgroup memory limit; container still running)"
+        }
+        return ""
+    }
+    if string_equals(st, "exited") == 0 {
+        return ""
+    }
+    if string_equals(_death_field(line, "oom"), "true") == 1 {
+        return "OOM-killed (cgroup memory limit)"
+    }
+    ec = string_get_int(_death_field(line, "exit"))
+    if ec > 128 {
+        return "killed by ${_signame(ec - 128)} (exit ${string_from_int(ec)})"
+    }
+    if ec > 0 {
+        return "exited with code ${string_from_int(ec)}"
+    }
+    return "exited cleanly (code 0) before becoming ready"
+}
+
+// unit_death_line(show) — map a systemd unit's post-mortem to the canonical
+// line. Input is raw `systemctl [--user] show <unit> -p Result -p ExecMainCode
+// -p ExecMainStatus` output (Key=Value lines). systemd's fields:
+//   Result        success | exit-code | signal | oom-kill | timeout | core-dump
+//   ExecMainCode  0 = still running (or unit never ran / not found — systemctl
+//                 show prints defaults for unknown units rather than failing),
+//                 1 = CLD_EXITED, 2 = CLD_KILLED, 3 = CLD_DUMPED
+//   ExecMainStatus  exit code (CLD_EXITED) or signal number (KILLED/DUMPED)
+// A killed/dumped main process is canonicalized to exit=128+signal, matching
+// the shell/engine convention death_cause classifies.
+unit_death_line(show: string) -> string {
+    code = string_get_int(_unit_field(show, "ExecMainCode"))
+    if code <= 0 {
+        return ""             // running, never ran, or unit unknown — no death
+    }
+    statusn = string_get_int(_unit_field(show, "ExecMainStatus"))
+    oom = "false"
+    if string_equals(_unit_field(show, "Result"), "oom-kill") == 1 {
+        oom = "true"
+    }
+    ec = statusn
+    if code >= 2 {
+        ec = 128 + statusn    // CLD_KILLED / CLD_DUMPED carry the signal number
+    }
+    ecs = string_from_int(ec)
+    return "status=exited|oom=${oom}|exit=${ecs}"
+}
+
+// one field from a `k=v|k=v` line ("" if absent). NB comparisons on the result
+// must use string_equals — a substring result never == a literal by identity.
+_death_field(line: string, key: string) -> string {
+    needle = "${key}="
+    idx = string_index_of(line, needle)
+    if idx < 0 {
+        return ""
+    }
+    rest = string_substring(line, idx + string_length(needle), string_length(line))
+    bar = string_index_of(rest, "|")
+    if bar >= 0 {
+        return string_substring(rest, 0, bar)
+    }
+    return rest
+}
+
+// one field from newline-separated `Key=Value` systemctl-show output.
+_unit_field(show: string, key: string) -> string {
+    needle = "${key}="
+    idx = string_index_of(show, needle)
+    if idx < 0 {
+        return ""
+    }
+    rest = string_substring(show, idx + string_length(needle), string_length(show))
+    nl = string_index_of(rest, "\n")
+    if nl >= 0 {
+        return string_substring(rest, 0, nl)
+    }
+    return rest
+}
+
+_signame(sig: int) -> string {
+    match sig {
+        6 -> { return "SIGABRT"; }
+        7 -> { return "SIGBUS"; }
+        8 -> { return "SIGFPE"; }
+        9 -> { return "SIGKILL"; }
+        11 -> { return "SIGSEGV"; }
+        13 -> { return "SIGPIPE"; }
+        15 -> { return "SIGTERM"; }
+        _ -> { return "signal ${string_from_int(sig)}"; }
+    }
+}

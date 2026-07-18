@@ -34,11 +34,13 @@
 import std.os (run_capture)
 import std.list
 import std.string (string_length, string_contains, string_trim)
+import death (unit_death_line)
 
 exports (
     name,
     available, up, down, probe, exec_capture,
-    unit_name, run_argv, is_active_argv, exec_argv, terminate_argv, stop_argv
+    unit_name, run_argv, is_active_argv, exec_argv, terminate_argv, stop_argv,
+    show_death_argv, reset_failed_argv, death_state
 )
 
 name() -> string { return "nspawn" }
@@ -67,16 +69,20 @@ available() -> int {
 
 // --- pure argv builders (unit-testable; the actual tool invocations) ----------
 
-// systemd-run launch: run nspawn as a transient, named, garbage-collected unit.
-//   systemd-run --unit=aeo-nspawn-NAME --collect --quiet \
+// systemd-run launch: run nspawn as a transient, named unit.
+//   systemd-run --unit=aeo-nspawn-NAME --quiet \
 //       /usr/bin/systemd-nspawn --machine=NAME --directory=ROOTFS \
 //       (--boot | --as-pid2 /bin/sh -c CMD)
 // cmd "" -> --boot the rootfs's own init (full system container). cmd non-empty
 // -> run it as the payload under a stub pid-1 init (--as-pid2).
+// Deliberately NO --collect: systemd's default keeps a FAILED transient unit
+// loaded until reset-failed, which is exactly the post-mortem death_state
+// reads (Result=oom-kill / signal / exit-code); --collect would garbage-
+// collect the corpse before the diag could ask why it died. A successful exit
+// still unloads immediately; down() reset-fails the corpse away.
 run_argv(res_name: string, rootfs: string, cmd: string) -> ptr {
     av = list_new()
     list_add(av, "--unit=${unit_name(res_name)}")
-    list_add(av, "--collect")
     list_add(av, "--quiet")
     list_add(av, "/usr/bin/systemd-nspawn")
     list_add(av, "--machine=${res_name}")
@@ -130,6 +136,49 @@ stop_argv(res_name: string) -> ptr {
     return av
 }
 
+// `systemctl reset-failed aeo-nspawn-NAME` — expire a FAILED corpse at down.
+reset_failed_argv(res_name: string) -> ptr {
+    av = list_new()
+    list_add(av, "reset-failed")
+    list_add(av, unit_name(res_name))
+    return av
+}
+
+// `systemctl show aeo-nspawn-NAME -p Result -p ExecMainCode -p ExecMainStatus`
+// — the unit's post-mortem. Pure builder; the read needs NO sudo (unit state
+// is world-readable, unlike the mutations).
+show_death_argv(res_name: string) -> ptr {
+    av = list_new()
+    list_add(av, "show")
+    list_add(av, unit_name(res_name))
+    list_add(av, "-p")
+    list_add(av, "Result")
+    list_add(av, "-p")
+    list_add(av, "ExecMainCode")
+    list_add(av, "-p")
+    list_add(av, "ExecMainStatus")
+    return av
+}
+
+// death_state(res_name) — the canonical status|oom|exit post-mortem line for a
+// dead node's unit ("" = running / never ran / unknown / no systemd). The
+// classification to a human verdict is lib/death's death_cause, shared across
+// substrates. systemd is the richest source here: Result=oom-kill is
+// first-class, so a memory-capped nspawn machine reports the kernel's OOM
+// verdict with no cgroup spelunking.
+death_state(res_name: string) -> string {
+    av = show_death_argv(res_name)
+    out, status, err = run_capture("systemctl", av, null)
+    list_free(av)
+    if err != "" {
+        return ""
+    }
+    if status != 0 {
+        return ""
+    }
+    return unit_death_line(out)
+}
+
 // --- exec'ing entry points ---------------------------------------------------
 
 // Bring the system container up idempotently. `image` is the rootfs DIRECTORY
@@ -171,6 +220,11 @@ down(res_name: string) -> string {
     sav = stop_argv(res_name)
     _so, _ss, _se = _sudo("systemctl", sav)
     list_free(sav)
+    // clear a lingering FAILED corpse (kept, post---collect-removal, so
+    // death_state can read it) — teardown is when the post-mortem expires.
+    rav = reset_failed_argv(res_name)
+    _ro, _rs, _re = _sudo("systemctl", rav)
+    list_free(rav)
     return ""
 }
 

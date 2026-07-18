@@ -51,7 +51,7 @@ import std.http.client (
     response_status, response_body, response_free
 )
 
-exports ( up, down, probe, available, preflight, reachable, guest_ip, api_base, resolve_vmid )
+exports ( up, down, probe, available, preflight, reachable, guest_ip, api_base, resolve_vmid, death_state )
 
 // ---- endpoint + auth ----------------------------------------------------------
 
@@ -291,6 +291,58 @@ _eq(a: string, b: string) -> int {
 _ep(nm: string) -> string {
     if compose.get_kind(nm) == "proxmox_ct" { return "lxc" }
     return "qemu"
+}
+
+// ---- death forensics (the REMOTE arm, over the token seam) --------------------
+//
+// PVE exposes no exit code for a dead VM/CT, but its TASK HISTORY carries the
+// deliberate-vs-died distinction: every operator/API stop is a task
+// (qmstop/qmshutdown / vzstop/vzshutdown), so a guest that is STOPPED with no
+// stop-shaped task newer than its last start-shaped task DIED — the hypervisor
+// process crashed, the host killed it (OOM), or it powered off from inside.
+// That pre-classified verdict rides the canonical line's `cause=` field (the
+// lib/death pass-through). Guest-OS-level cause (panic vs clean poweroff) is
+// the in-guest agent's future layer; host dmesg is outside the token seam.
+death_state(nm: string) -> string {
+    vmid = resolve_vmid(nm, _pve_name(nm))
+    if vmid < 0 { return "" }                  // destroyed/unknown — no verdict
+    st = _status_of(nm, vmid)
+    if _eq(st, "stopped") == 0 { return "" }   // running (or unreadable) — no death
+    // tasks come newest-first; the first start/stop-shaped task decides.
+    r = _pve(nm, "GET", "/nodes/${compose.get_pve_node(nm)}/tasks?vmid=${string_from_int(vmid)}&limit=50", list_new())
+    if _res_code(r) != "200" { return "" }
+    d = _data(_res_body(r))
+    if d == null { return "" }
+    cnt = json_array_size(d)
+    i = 0
+    while i < cnt {
+        row = json_array_get_raw(d, i)
+        t = _gs(row, "type")
+        if _task_is_stop(t) == 1 {
+            return ""                          // deliberate stop/shutdown/destroy
+        }
+        if _task_is_start(t) == 1 {
+            return "status=exited|oom=false|exit=-1|cause=stopped with no stop task (hypervisor process died, host-killed, or powered off from inside the guest)"
+        }
+        i = i + 1
+    }
+    return ""                                  // no lifecycle history visible
+}
+
+_task_is_stop(t: string) -> int {
+    if _eq(t, "qmstop") == 1 { return 1 }
+    if _eq(t, "qmshutdown") == 1 { return 1 }
+    if _eq(t, "qmdestroy") == 1 { return 1 }
+    if _eq(t, "vzstop") == 1 { return 1 }
+    if _eq(t, "vzshutdown") == 1 { return 1 }
+    if _eq(t, "vzdestroy") == 1 { return 1 }
+    return 0
+}
+_task_is_start(t: string) -> int {
+    if _eq(t, "qmstart") == 1 { return 1 }
+    if _eq(t, "qmreboot") == 1 { return 1 }
+    if _eq(t, "vzstart") == 1 { return 1 }
+    return 0
 }
 
 // status/current -> status string ("running"/"stopped"/"") for a known VMID.

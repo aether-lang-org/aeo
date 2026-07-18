@@ -32,6 +32,7 @@ import driver_windows
 import driver_wslc
 import driver_loadbalancer
 import driver_proxmox
+import death
 import compose
 import ipam
 import pf
@@ -182,7 +183,10 @@ _await_level(booted: ptr, min_secs: int) -> int {
     return 0
 }
 
-// Print each non-UP node in a timed-out level + its state (diagnostic).
+// Print each non-UP node in a timed-out level + its state (diagnostic). For
+// engine containers, also ask the KERNEL why: an exited container's post-mortem
+// (OOM kill / fatal signal / exit code) turns "not up within window" into an
+// actionable verdict — and goes on the audit chain (forensics, like attest-refuse).
 _diag_level_not_up(booted: ptr, budget: int) {
     m = list_size(booted)
     i = 0
@@ -194,7 +198,75 @@ _diag_level_not_up(booted: ptr, budget: int) {
             if st == STATE_FAILED() { sn = "FAILED" }
             if st == STATE_BOOTING() { sn = "BOOTING (never became ready in ${string_from_int(budget)}ms)" }
             if st == STATE_DOWN() { sn = "DOWN" }
-            println("aeo: [${bn}] NOT UP at level timeout — state=${sn}")
+            // per-substrate post-mortem: each driver's death_state returns the
+            // canonical status|oom|exit line; lib/death classifies it. Absent
+            // node / remote engine / no verdict -> "" and the plain line below.
+            verdict = ""
+            k = compose.get_kind(bn)
+            if k == "container" {
+                eng = compose.get_engine(bn)
+                dhost = compose.get_host(bn)
+                dhk = ""
+                if string_length(dhost) > 0 { dhk = compose.get_kind(dhost) }
+                if eng == "wslc" {
+                    verdict = death.death_cause(driver_wslc.death_state(bn))
+                } else {
+                if eng == "wsl_podman" {
+                    verdict = death.death_cause(driver_windows.death_state(bn, compose.get_wsl_distro(bn)))
+                } else {
+                    if dhk == "proxmox_vm" {
+                        // nested in a REMOTE guest: the guest's resident agent
+                        // runs the inspect (the same conduit probe uses — a
+                        // host engine or ssh can't be assumed to reach in).
+                        dgip = driver_proxmox.guest_ip(dhost)
+                        if string_length(dgip) > 0 {
+                            dtok = _agent_token(dhost)
+                            if string_length(dtok) == 0 { dtok = "aeo-dev-token" }
+                            dbase = "http://${dgip}:${string_from_int(_agent_port(dhost))}"
+                            verdict = death.death_cause(driver_vm.agent_death_at(dbase, bn, dtok))
+                        }
+                    } else {
+                    if dhk == "kvm" {
+                        // nested in a LOCAL VM guest: the engine inspect runs
+                        // in-guest over the exec seam (resolved IP + guest key).
+                        dhip = ipam.resolve_ip(compose.get_system(dhost), dhost)
+                        verdict = death.death_cause(driver_vm.guest_death_state(dhost, dhip, bn))
+                    } else {
+                        if dhk == "bhyve" {
+                            dhip = ipam.resolve_ip(compose.get_system(dhost), dhost)
+                            verdict = death.death_cause(driver_vm.guest_death_state(dhost, dhip, bn))
+                        } else {
+                            verdict = death.death_cause(driver_linux.death_state(bn, eng))
+                        }
+                    }
+                    }
+                }
+                }
+            }
+            if k == "nspawn" {
+                verdict = death.death_cause(driver_nspawn.death_state(bn))
+            }
+            if k == "firecracker" {
+                verdict = death.death_cause(driver_firecracker.death_state(bn))
+            }
+            if k == "kvm" {
+                verdict = death.death_cause(driver_vm.death_state(bn))
+            }
+            if k == "lxc" {
+                verdict = death.death_cause(driver_lxc.death_state(bn))
+            }
+            if k == "proxmox_vm" {
+                verdict = death.death_cause(driver_proxmox.death_state(bn))
+            }
+            if k == "proxmox_ct" {
+                verdict = death.death_cause(driver_proxmox.death_state(bn))
+            }
+            if string_length(verdict) > 0 {
+                println("aeo: [${bn}] NOT UP at level timeout — state=${sn}; kernel verdict: ${verdict}")
+                _ = audit.record(bn, k, "death", verdict)
+            } else {
+                println("aeo: [${bn}] NOT UP at level timeout — state=${sn}")
+            }
         }
         i = i + 1
     }
@@ -358,19 +430,36 @@ _batch_pidfile_alive(booted: ptr) -> string {
 }
 
 // The level's total wait budget (ms): the longest per-node health window
-// (get_budget attempts × get_interval ms — the within()/every() config), but
-// never shorter than `min_secs`. So the slowest node's configured window wins.
+// (get_budget attempts × get_interval ms — the within()/every() config). The
+// `min_secs` floor protects DEFAULT-window nodes only (a slow VM with no
+// declared window still gets a real budget under the level poller); a level
+// where EVERY node states its own within()/up_within() is the operator's
+// explicit budget and is honoured as-is — shorter or longer — so a
+// dead-on-arrival node under within(10s) reports in 10s, not 2 minutes.
 _level_budget_ms(booted: ptr, min_secs: int) -> int {
-    best = min_secs * 1000
+    best = 0
+    all_explicit = 1
     m = list_size(booted)
     i = 0
     while i < m {
         bn = list_get_raw(booted, i)
+        if compose.get_within_ms(bn) <= 0 {
+            all_explicit = 0
+        }
         w = _node_window_ms(bn)
         if w > best {
             best = w
         }
         i = i + 1
+    }
+    if all_explicit == 1 {
+        if m > 0 {
+            return best
+        }
+    }
+    fl = min_secs * 1000
+    if best < fl {
+        return fl
     }
     return best
 }

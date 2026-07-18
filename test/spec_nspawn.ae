@@ -41,12 +41,14 @@ main() {
         aeocha.describe("run_argv — systemd-run wrapping systemd-nspawn") {
             aeocha.it("no command -> --boot the rootfs's own init (system container)") callback {
                 got = _join(run_argv("db", "/var/lib/machines/db", ""))
-                want = "--unit=aeo-nspawn-db --collect --quiet /usr/bin/systemd-nspawn --machine=db --directory=/var/lib/machines/db --boot"
+                // NO --collect: a FAILED corpse must linger for death_state's
+                // post-mortem read (down() reset-fails it away).
+                want = "--unit=aeo-nspawn-db --quiet /usr/bin/systemd-nspawn --machine=db --directory=/var/lib/machines/db --boot"
                 aeocha.expect_str(got).to_equal_str(want)
             }
             aeocha.it("command set -> run it as the payload via --as-pid2") callback {
                 got = _join(run_argv("app", "/srv/rootfs", "sleep 600"))
-                want = "--unit=aeo-nspawn-app --collect --quiet /usr/bin/systemd-nspawn --machine=app --directory=/srv/rootfs --as-pid2 /bin/sh -c sleep 600"
+                want = "--unit=aeo-nspawn-app --quiet /usr/bin/systemd-nspawn --machine=app --directory=/srv/rootfs --as-pid2 /bin/sh -c sleep 600"
                 aeocha.expect_str(got).to_equal_str(want)
             }
         }

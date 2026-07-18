@@ -32,13 +32,13 @@ import std.list
 import std.string (string_length, string_contains, string_char_at, string_substring)
 import driver_linux (
     run_argv_confined, run_argv, stop_argv, rm_argv,
-    ps_running_argv, ps_all_running_argv, exec_health_argv
+    ps_running_argv, ps_all_running_argv, exec_health_argv, death_argv
 )
 
 exports (
     name, available,
     up, down, probe, exec_capture, running_names,
-    wsl_argv, wsl_exe
+    wsl_argv, wsl_exe, death_state
 )
 
 name() -> string { return "windows" }
@@ -155,6 +155,35 @@ down(res_name: string, distro: string) -> string {
         return "aeo: 'wsl podman rm' failed for '${res_name}' (exit ${status}): ${out}"
     }
     return ""
+}
+
+// death_state(res_name, distro) — the canonical status|oom|exit post-mortem
+// line for a dead container INSIDE the WSL distro ("" = absent/alive/no wsl).
+// Same engine inspect as driver_linux.death_state, wrapped in `wsl -d`; the
+// classification is lib/death's shared death_cause. (Modeled from the proven
+// wsl_argv pattern; live-prove on a real Win11 guest when one is back up.)
+death_state(res_name: string, distro: string) -> string {
+    if available() == 0 {
+        return ""
+    }
+    dinner = death_argv(res_name)
+    dav = wsl_argv(distro, dinner)
+    list_free(dinner)
+    out, status, err = run_capture(wsl_exe(), dav, null)
+    list_free(dav)
+    if err != "" {
+        return ""
+    }
+    if status != 0 {
+        return ""
+    }
+    n = string_length(out)
+    if n > 0 {
+        if string_char_at(out, n - 1) == 10 {
+            return string_substring(out, 0, n - 1)
+        }
+    }
+    return out
 }
 
 // Liveness probe inside WSL. 1 if running AND (no health, or health exits 0

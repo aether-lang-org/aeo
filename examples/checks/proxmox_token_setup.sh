@@ -158,6 +158,25 @@ api PUT "/access/acl" --data-urlencode "path=/sdn/zones" \
     --data-urlencode "propagate=1" >/dev/null 2>&1 || \
     echo "    (note: /sdn/zones grant skipped — no SDN zone on this box; not fatal)" >&2
 
+# --- 4b. task VISIBILITY — Sys.Audit on /nodes, in its OWN tiny role -------------
+# Death forensics (driver_proxmox.death_state) tells "died" from "deliberately
+# stopped" by task-history correlation — but PVE only shows a non-root user its
+# OWN tasks unless it holds Sys.Audit on the node (live finding, PVE 9.2: a
+# root@pam `pct stop` was INVISIBLE to the token, so an operator stop read as a
+# death). Sys.Audit is read-only (same class as the VM.Audit/Pool.Audit the role
+# already carries); keeping it in a separate aeo-taskviewer role on /nodes keeps
+# aeo-deployer's blast-radius statement unchanged.
+TASKROLE="aeo-taskviewer"
+echo "[*] role  $TASKROLE  ← Sys.Audit @ /nodes (task-history visibility)" >&2
+if [ "$(code GET "/access/roles/${TASKROLE}")" = "200" ]; then
+    api PUT "/access/roles/${TASKROLE}" --data-urlencode "privs=Sys.Audit" >/dev/null
+else
+    api POST "/access/roles" --data-urlencode "roleid=${TASKROLE}" --data-urlencode "privs=Sys.Audit" >/dev/null
+fi
+api PUT "/access/acl" --data-urlencode "path=/nodes" \
+    --data-urlencode "roles=${TASKROLE}" --data-urlencode "users=${SVC_USER}" \
+    --data-urlencode "propagate=1" >/dev/null
+
 # --- 5. privilege-separated, EXPIRING token -------------------------------------
 # expire = now + TTL_DAYS, computed here (the .ae model can't call Date.now()).
 EXPIRE=$(TTL="$TTL_DAYS" python3 -c "import time,os;print(int(time.time())+int(os.environ['TTL'])*86400)")
@@ -188,6 +207,10 @@ fi
 api PUT "/access/acl" --data-urlencode "path=/sdn/zones" \
     --data-urlencode "roles=${ROLE}" --data-urlencode "tokens=${TOKENID}" \
     --data-urlencode "propagate=1" >/dev/null 2>&1 || true
+# task visibility on the TOKEN too (privsep intersection — see 4b).
+api PUT "/access/acl" --data-urlencode "path=/nodes" \
+    --data-urlencode "roles=${TASKROLE}" --data-urlencode "tokens=${TOKENID}" \
+    --data-urlencode "propagate=1" >/dev/null
 
 cat >&2 <<EOF
 

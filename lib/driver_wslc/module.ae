@@ -30,12 +30,13 @@
 
 import std.os (run_capture, os_which, getenv)
 import std.list
-import std.string (string_length, string_contains, string_char_at, string_substring, string_index_of)
+import std.string (string_length, string_contains, string_char_at, string_substring, string_index_of, string_equals, string_from_int)
 
 exports (
     name, available, wslc_exe,
     up, down, probe, exec_capture, running_names,
-    run_argv, list_json_argv, stop_argv, remove_argv, exec_argv
+    run_argv, list_json_argv, stop_argv, remove_argv, exec_argv,
+    inspect_death_argv, death_line, death_state
 )
 
 name() -> string { return "wslc" }
@@ -154,6 +155,121 @@ exec_argv(res_name: string, cmd: string) -> ptr {
     list_add_raw(av, "-c")
     list_add_raw(av, cmd)
     return av
+}
+
+// --- death forensics (the wslc arm) ------------------------------------------
+//
+// `wslc inspect NAME` returns Docker-shaped JSON with State.Status +
+// State.ExitCode — spiked against the REAL wslc 2.9.3.0 on the winbaz guest
+// (2026-07-18): /bin/false -> ExitCode 1; `wslc kill` -> ExitCode 137 (the
+// >128 signal convention holds). wslc's State has NO OOMKilled field, so oom
+// is always reported false here — a wslc OOM kill will classify as "killed by
+// SIGKILL (exit 137)", which is still a verdict, just less specific. A stopped
+// container LINGERS (visible in `list --all`) until removed, so the corpse is
+// readable at diag time.
+
+// `wslc inspect NAME` — pure builder.
+inspect_death_argv(res_name: string) -> ptr {
+    av = list_new()
+    list_add(av, "inspect")
+    list_add(av, res_name)
+    return av
+}
+
+// death_line(js) — parse wslc's inspect JSON into the canonical
+// status|oom|exit line ("" if not exited / unparseable). Field extraction is
+// needle-based like the probe's Name match (wslc formats with `"Key": value`);
+// locked against a real captured fixture in spec_death.
+death_line(js: string) -> string {
+    if string_length(js) == 0 {
+        return ""
+    }
+    st = _js_str(js, "\"Status\":")
+    if string_equals(st, "exited") == 0 {
+        return ""
+    }
+    ec = _js_int(js, "\"ExitCode\":")
+    return "status=exited|oom=false|exit=${string_from_int(ec)}"
+}
+
+// death_state(res_name) — the canonical post-mortem line for a dead wslc
+// container ("" = absent/running/no wslc host).
+death_state(res_name: string) -> string {
+    if available() == 0 {
+        return ""
+    }
+    av = inspect_death_argv(res_name)
+    out, status, err = run_capture(wslc_exe(), av, null)
+    list_free(av)
+    if err != "" {
+        return ""
+    }
+    if status != 0 {
+        return ""
+    }
+    return death_line(out)
+}
+
+// string value after `"Key":` (skips spaces, reads between quotes; "" if absent).
+_js_str(js: string, needle: string) -> string {
+    i = string_index_of(js, needle)
+    if i < 0 {
+        return ""
+    }
+    i = i + string_length(needle)
+    n = string_length(js)
+    while i < n {
+        c = string_char_at(js, i)
+        if c != 32 {
+            break
+        }
+        i = i + 1
+    }
+    if i >= n {
+        return ""
+    }
+    if string_char_at(js, i) != 34 {
+        return ""
+    }
+    i = i + 1
+    j = i
+    while j < n {
+        if string_char_at(js, j) == 34 {
+            return string_substring(js, i, j)
+        }
+        j = j + 1
+    }
+    return ""
+}
+
+// int value after `"Key":` (skips spaces, reads digits; 0 if absent).
+_js_int(js: string, needle: string) -> int {
+    i = string_index_of(js, needle)
+    if i < 0 {
+        return 0
+    }
+    i = i + string_length(needle)
+    n = string_length(js)
+    while i < n {
+        c = string_char_at(js, i)
+        if c != 32 {
+            break
+        }
+        i = i + 1
+    }
+    v = 0
+    while i < n {
+        c = string_char_at(js, i)
+        if c < 48 {
+            break
+        }
+        if c > 57 {
+            break
+        }
+        v = v * 10 + (c - 48)
+        i = i + 1
+    }
+    return v
 }
 
 // split "K=V,K=V" and append `-e K=V` for each.
