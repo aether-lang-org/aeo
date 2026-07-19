@@ -33,13 +33,13 @@
 
 import std.os (run_capture)
 import std.list
-import std.string (string_length, string_contains, string_trim)
+import std.string (string_length, string_contains, string_trim, string_index_of, string_substring)
 import death (unit_death_line)
 
 exports (
     name,
     available, up, down, probe, exec_capture,
-    unit_name, run_argv, is_active_argv, exec_argv, terminate_argv, stop_argv,
+    unit_name, run_argv, run_argv_shared, is_active_argv, exec_argv, terminate_argv, stop_argv,
     show_death_argv, reset_failed_argv, death_state
 )
 
@@ -81,12 +81,20 @@ available() -> int {
 // collect the corpse before the diag could ask why it died. A successful exit
 // still unloads immediately; down() reset-fails the corpse away.
 run_argv(res_name: string, rootfs: string, cmd: string) -> ptr {
+    return run_argv_shared(res_name, rootfs, cmd, "")
+}
+
+// run_argv plus share() mounts (`src|dst|mode` per line -> --bind-ro=src:dst
+// by default, --bind=src:dst for share_rw), placed with the nspawn options
+// (before --boot / --as-pid2).
+run_argv_shared(res_name: string, rootfs: string, cmd: string, shares: string) -> ptr {
     av = list_new()
     list_add(av, "--unit=${unit_name(res_name)}")
     list_add(av, "--quiet")
     list_add(av, "/usr/bin/systemd-nspawn")
     list_add(av, "--machine=${res_name}")
     list_add(av, "--directory=${rootfs}")
+    _add_share_binds(av, shares)
     if string_length(cmd) == 0 {
         list_add(av, "--boot")
     } else {
@@ -99,6 +107,41 @@ run_argv(res_name: string, rootfs: string, cmd: string) -> ptr {
 }
 
 // `systemctl is-active aeo-nspawn-NAME` — prints "active" + exits 0 iff up.
+// share() entries (`src|dst|mode` per line) -> --bind-ro=src:dst (default) /
+// --bind=src:dst (share_rw).
+_add_share_binds(av: ptr, shares: string) {
+    rest = shares
+    more = 1
+    if string_length(rest) == 0 {
+        more = 0
+    }
+    while more == 1 {
+        nl = string_index_of(rest, "\n")
+        one = rest
+        if nl >= 0 {
+            one = string_substring(rest, 0, nl)
+            rest = string_substring(rest, nl + 1, string_length(rest))
+        } else {
+            more = 0
+        }
+        p1 = string_index_of(one, "|")
+        if p1 > 0 {
+            src = string_substring(one, 0, p1)
+            r2 = string_substring(one, p1 + 1, string_length(one))
+            p2 = string_index_of(r2, "|")
+            if p2 > 0 {
+                dst = string_substring(r2, 0, p2)
+                mode = string_substring(r2, p2 + 1, string_length(r2))
+                if string_contains(mode, "rw") == 1 {
+                    list_add(av, "--bind=${src}:${dst}")
+                } else {
+                    list_add(av, "--bind-ro=${src}:${dst}")
+                }
+            }
+        }
+    }
+}
+
 is_active_argv(res_name: string) -> ptr {
     av = list_new()
     list_add(av, "is-active")
@@ -185,7 +228,7 @@ death_state(res_name: string) -> string {
 // (required — nspawn boots a populated tree, unlike bwrap's host-userland bind);
 // `cmd` "" -> --boot the rootfs init, else run cmd as the payload. Returns "" on
 // success else an error.
-up(res_name: string, image: string, cmd: string) -> string {
+up(res_name: string, image: string, cmd: string, shares: string) -> string {
     if probe(res_name, "", "") == 1 {
         return ""
     }
@@ -195,7 +238,7 @@ up(res_name: string, image: string, cmd: string) -> string {
     if string_length(image) == 0 {
         return "aeo: nspawn '${res_name}' has no image() set (want a rootfs directory, e.g. /var/lib/machines/${res_name})"
     }
-    rav = run_argv(res_name, image, cmd)
+    rav = run_argv_shared(res_name, image, cmd, shares)
     out, status, err = _sudo("systemd-run", rav)
     list_free(rav)
     if err != "" {

@@ -26,7 +26,7 @@ import std.fs (write_atomic)
 
 exports (
     name, engine_resolve,
-    up, up_net, up_confined, up_green, alias_move, network_ensure, network_ensure_internal, down, down_many, down_many_command, probe, inspect_argv, inspect_state, death_argv, death_state, list_running, extract_argv, extract_facts, image_digest, exec_capture, build, build_entrypoint, built_tag,
+    up, up_net, up_confined, up_green, alias_move, network_ensure, network_ensure_internal, down, down_many, down_many_command, probe, inspect_argv, inspect_state, death_argv, death_state, list_running, extract_argv, extract_facts, image_digest, exec_capture, build, build_entrypoint, built_tag, run_argv_shared,
     ps_running_argv, ps_all_running_argv, running_names, run_argv, run_argv_net, run_argv_confined, stop_argv, rm_argv, exec_health_argv,
     net_disconnect_argv, net_connect_alias_argv,
     pasta_dropin_path, pasta_dropin_content, pasta_forwarder_ensure, pasta_forwarder_active, pasta_forwarder_clear,
@@ -136,13 +136,19 @@ run_argv_net(res_name: string, image: string, cmd: string, expose: int, net: str
 // the default join). When deny_egress sets --network none, host port publish (-p)
 // is also dropped (none = no network at all).
 run_argv_confined(res_name: string, image: string, cmd: string, expose: int, net: string, env: string, confine: string) -> ptr {
-    return _run_argv_core(res_name, image, cmd, expose, net, env, confine, 1)
+    return _run_argv_core(res_name, image, cmd, expose, net, env, confine, "", 1)
+}
+
+// run_argv_confined plus share() mounts (the pure, spec-testable surface for
+// the -v rendering; up_confined threads the same shares through the core).
+run_argv_shared(res_name: string, image: string, cmd: string, expose: int, net: string, env: string, confine: string, shares: string) -> ptr {
+    return _run_argv_core(res_name, image, cmd, expose, net, env, confine, shares, 1)
 }
 
 // The engine-portable core. `with_replace` 1 emits podman's `--replace`
 // (in-place idempotency); 0 omits it — docker has no such flag, so the docker
 // path gets its idempotency from a pre-`rm -f` in up_confined/up_green instead.
-_run_argv_core(res_name: string, image: string, cmd: string, expose: int, net: string, env: string, confine: string, with_replace: int) -> ptr {
+_run_argv_core(res_name: string, image: string, cmd: string, expose: int, net: string, env: string, confine: string, shares: string, with_replace: int) -> ptr {
     av = list_new()
     list_add(av, "run")
     list_add(av, "-d")
@@ -160,6 +166,9 @@ _run_argv_core(res_name: string, image: string, cmd: string, expose: int, net: s
     }
     // splice the confinement flag tokens (cgroup/security/network).
     _add_token_args(av, confine)
+    // share() mounts — argv-listed directly (paths may contain spaces, so they
+    // must NOT ride the space-split confine channel).
+    _add_share_args(av, shares)
     if string_length(env) > 0 {
         _add_env_args(av, env)
     }
@@ -200,6 +209,44 @@ _add_token_args(av: ptr, flags: string) {
                 list_add(av, tok)
             }
             rest = string_substring(rest, sp + 1, string_length(rest))
+        }
+    }
+}
+
+// share() mounts: one `src|dst|mode` entry per line -> `-v src:dst:ro` (the
+// read-only DEFAULT) or `-v src:dst` (explicit share_rw). No auto-:Z — the
+// SELinux relabel decision is the operator's (the documented Fedora-family
+// trap; a wrong :Z on $HOME relabels the host).
+_add_share_args(av: ptr, shares: string) {
+    rest = shares
+    more = 1
+    if string_length(rest) == 0 {
+        more = 0
+    }
+    while more == 1 {
+        nl = string_index_of(rest, "\n")
+        one = rest
+        if nl >= 0 {
+            one = string_substring(rest, 0, nl)
+            rest = string_substring(rest, nl + 1, string_length(rest))
+        } else {
+            more = 0
+        }
+        p1 = string_index_of(one, "|")
+        if p1 > 0 {
+            src = string_substring(one, 0, p1)
+            r2 = string_substring(one, p1 + 1, string_length(one))
+            p2 = string_index_of(r2, "|")
+            if p2 > 0 {
+                dst = string_substring(r2, 0, p2)
+                mode = string_substring(r2, p2 + 1, string_length(r2))
+                list_add(av, "-v")
+                if string_contains(mode, "rw") == 1 {
+                    list_add(av, "${src}:${dst}")
+                } else {
+                    list_add(av, "${src}:${dst}:ro")
+                }
+            }
         }
     }
 }
@@ -457,12 +504,12 @@ up(res_name: string, image: string, cmd: string, expose: int, engine_pref: strin
 // up_net — like up, plus a shared `net` (peers resolve by name) and `env`
 // ("K=V,K=V"). Used for the host-container path so app can reach db by name.
 up_net(res_name: string, image: string, cmd: string, expose: int, net: string, env: string, engine_pref: string) -> string {
-    return up_confined(res_name, image, cmd, expose, net, env, "", engine_pref)
+    return up_confined(res_name, image, cmd, expose, net, env, "", "", engine_pref)
 }
 
 // up_confined — up_net plus `confine`, the lib/confine_linux flag string
 // (cgroup caps + cap-drop/seccomp + netpolicy). The CONFINED host-container path.
-up_confined(res_name: string, image: string, cmd: string, expose: int, net: string, env: string, confine: string, engine_pref: string) -> string {
+up_confined(res_name: string, image: string, cmd: string, expose: int, net: string, env: string, confine: string, shares: string, engine_pref: string) -> string {
     eng = engine_resolve(engine_pref)
     if eng == "" {
         return "aeo: no container engine found (need podman or docker on PATH)"
@@ -477,7 +524,7 @@ up_confined(res_name: string, image: string, cmd: string, expose: int, net: stri
     // podman gets `--replace` (in-place idempotency); docker has no such flag,
     // so its path pre-clears any stopped leftover and runs a replace-less argv.
     with_replace = _pre_clear_for(eng, res_name)
-    av = _run_argv_core(res_name, image, cmd, expose, net, env, confine, with_replace)
+    av = _run_argv_core(res_name, image, cmd, expose, net, env, confine, shares, with_replace)
     out, status, err = run_capture(eng, av, null)
     list_free(av)
     if err != "" {
@@ -531,7 +578,7 @@ up_green(green_name: string, image: string, cmd: string, net: string, env: strin
     // expose=0: blue owns the published host port; green joins the net for the
     // in-cluster alias cut only.
     with_replace = _pre_clear_for(eng, green_name)
-    av = _run_argv_core(green_name, image, cmd, 0, net, env, confine, with_replace)
+    av = _run_argv_core(green_name, image, cmd, 0, net, env, confine, "", with_replace)
     out, status, err = run_capture(eng, av, null)
     list_free(av)
     if err != "" {

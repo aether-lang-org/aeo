@@ -710,6 +710,85 @@ wired yet; mapped here as candidate kinds. Ordered by how cleanly they'd land:
 - [ ] **Raw primitives** — unshare (namespaces), chroot (the oldest container).
       Too low-level to be node kinds on their own; bwrap is the usable wrapper.
 
+## share() — filesystem overlay INTO a node (slice 1 DONE 2026-07-19)
+
+A share is a CAPABILITY GRANT (a filesystem pinhole through the boundary — the
+publish()/gpu() class): explicit per node, READ-ONLY by default (`share_rw` is
+the writable opt-in), repeatable, and every grant hash-chained onto the audit
+trail (event=share, mode included). Stored `src|dst|mode` per line; shares ride
+their OWN argv parameter (paths may contain spaces — they must NOT ride the
+space-split confine flag channel).
+- [x] **Slice 1 — grammar + local arms, LIVE-PROVEN (2026-07-19)**: compose
+      `share(src,dst)`/`share_rw` + get_shares + reset_nodes clearing (no
+      capability bleed across compositions); renderers: podman/docker
+      `-v src:dst[:ro]` (NO auto-:Z — the SELinux relabel stays the operator's
+      call, the documented Fedora trap), bwrap `--ro-bind/--bind` (placed after
+      the base rootfs binds, before the fresh /proc//dev//tmp), nspawn
+      `--bind-ro=/--bind=`; runner threads shares into the three up dispatches
+      + audit-records. spec_share (6). LIVE PROOF (one run, all four nodes,
+      with the death forensics as the instrument): ro nodes read the shared
+      file then TRIED to write -> "kernel verdict: exited with code 7/9" (the
+      refusal IS the proof; no blocked-file appeared on the host); share_rw
+      nodes wrote THROUGH to the host (out-*.txt appeared with content) and
+      promoted UP; all four grants hash-chained; clean teardown.
+- [ ] **Slice 2 — proxmox_vm virtiofs (the box is ready)**: PVE 9.2 has
+      first-class virtiofs (`virtiofs0: <dirid>` + /cluster/mapping/dir —
+      probed live on .204, mappings list is empty). The operator-places/
+      token-references split fits exactly: admin creates the directory mapping
+      once (like snippets/templates), the composition references it, the token
+      needs `Mapping.Use` (add to token_setup like §4b). Guest mounts
+      `mount -t virtiofs <tag> <dst>` — the in-guest half belongs to the agent
+      (cloud-init or a mount verb). proxmox_ct: storage-backed `mp[n]` volumes
+      are token-grantable; RAW host-path binds are root@pam-only by PVE policy
+      — refuse loudly under a least-priv token with the widen-or-volume
+      reasoning, never silently degrade.
+- [x] **kvm 9p + lxc arms — pulled forward + LIVE-PROVEN on .160
+      (2026-07-19), plus the container/bwrap re-proof there.** All four
+      CachyOS permutations green:
+      - container + bwrap: the local demo re-ran identically (ro verdicts
+        exit 7/9, rw write-through, audit-chained).
+      - **lxc**: shares render as `-s lxc.mount.entry=<src> <dst-rel> none
+        bind[,ro],create=dir 0 0` AT START (no config-file write — rides the
+        existing lxc-start invocation; dst is RELATIVE to the rootfs, LXC
+        convention). LIVE (unprivileged lxc): ro read OK, ro write ->
+        "Read-only file system" (LXC's internal ro-remount on bind entries
+        works), rw wrote through to the host. EN ROUTE: `_sudo_lxc` gained
+        the sudo-or-plain LIFECYCLE fallback (the death read's _lxc_query
+        pattern promoted to all ops) — driver_lxc now works end-to-end on
+        unprivileged-lxc hosts with no sudoers grant. GOTCHAS: unprivileged
+        rw shares need the mapped uid granted on the host dir (setfacl
+        u:100000:rwx); alpine lxc-attach needs /bin/busybox FULL PATHS (the
+        dltest spike trap again).
+      - **kvm 9p**: `-virtfs local,path=<src>,mount_tag=aeoshN,
+        security_model=none[,readonly=on]` per share (9p is UNPRIVILEGED,
+        unlike virtiofs's sidecar; readonly=on enforces ro AT THE DEVICE;
+        security_model=none maps guest writes to the qemu uid — rootless-
+        correct). Guest mounts `mount -t 9p -o trans=virtio,version=9p2000.L
+        aeoshN <dst>`. LIVE with a REAL debian guest via the driver: NoCloud
+        seed as a VFAT cidata volume on the deterministic
+        /tmp/aeo-seed-<n>.iso path (mkfs.vfat+mcopy — no ISO tooling
+        needed), cloud-init mounted both tags, copied a file OUT of the ro
+        share INTO the rw share (write-through observed on the host), and
+        the ro-violation attempt left NO marker (readonly=on held). FINDING
+        that cost a cycle: debian's `genericcloud` image ships the CLOUD
+        KERNEL which OMITS the 9p modules — the mount silently fails; use
+        `generic` (full kernel). Down clean both runs.
+- [ ] **Slice 3 remainder — bhyve virtio-9p** (`-s N,virtio-9p,share=/path` +
+      guest mount_virtfs; FreeBSD box needed); firecracker is
+      REFUSED-by-construction (no share device — the nested_virt() pattern:
+      ungrantable, loud at check).
+- [ ] **Slice 4 — the agent-courier `put` verb** (push files over the
+      authenticated agent conduit — substrate-agnostic, reaches nested
+      containers, no PVE privilege at all; the small-payload complement to
+      mappings).
+- [ ] Follow-ups: lxc `lxc.mount.entry` arm; wslc/wsl_podman Windows-path
+      translation; up_green share parity (cutover green currently gets NO
+      shares — parity needed before cutover of share-bearing nodes);
+      check-time model gate (absolute paths, kind×share matrix, refusals);
+      bwrap probe/exec fresh sandboxes do NOT carry data shares (documented
+      limitation); attest() over a share manifest (verify-before-mount for
+      data — the fail-closed story extended to content).
+
 ## Cross-cutting / smaller
 
 - [ ] **Podman 6.0 readiness (released ~2026-06-25) — preflight + follow-throughs.**
@@ -1601,10 +1680,47 @@ VERB DISCIPLINE that transfers), and the Rust-rewrite instinct.
       verdict — correct), `podman kill` in-guest ->
       "status=exited|oom=false|exit=137" -> "killed by SIGKILL (exit 137)".
       Clean aeo down.
+      BWRAP + BHYVE ARMS 2026-07-18 (seventh round) — the "supervisor-gated"
+      pair turned out to need NO supervisor:
+      - **bwrap — BUILT + LIVE-PROVEN (Crostini)**: the launch now PREFERS a
+        transient --user unit with bwrap as the unit's MAIN process (plain
+        setsid stays as the non-systemd fallback, honestly verdict-less).
+        KEY EMPIRICAL FINDING that picked the shape: the first attempt
+        (Type=forking + PIDFile over the info-fd child-pid, the kvm shape)
+        tracks a pid that is NOT systemd's child — "we'll most likely not
+        notice when it exits" — and indeed the unit stayed active/success
+        after the kill. bwrap-as-main works because bubblewrap PROPAGATES
+        the sandboxed child's death as its own exit (128+signal): kill -9
+        of the INNER process -> unit Result=exit-code ExecMainStatus=137 ->
+        the shared unit_death_line. Side benefits: the unit scope fixes the
+        latent SIGHUP-reap fragility (the kvm/firecracker bug, previously
+        unfixed here), down() now `systemctl stop`s the WHOLE cgroup (outer
+        + reaper + child — a pid-kill of outer could orphan the sandbox),
+        and the pidfile carries MainPID so the batch-sweep contract is
+        unchanged. LIVE on TWO boxes: kill of the inner process mid-window
+        -> "kernel verdict: killed by SIGKILL (exit 137)", death event
+        hash-chained (kind=bwrap) — proven on Crostini (Debian 12) AND
+        CachyOS .160 (Arch, systemd 258), clean teardown both (no failed
+        units, no leftover processes).
+      - **bhyve — BUILT, source-derived (live pending a FreeBSD box)**:
+        vm-bhyve IS already the supervisor — its run loop interprets
+        bhyve's guest-meaningful exit codes (0=reset, 1=poweroff, 2=halt,
+        3=triple fault) for restart-vs-stop and logs "bhyve exited with
+        status N" / "fatal; loader returned error N" to the guest's
+        vm-bhyve.log. driver_vm.bhyve_death_state reads that log when the
+        VM is down; bhyve_death_from_log maps codes to cause= verdicts
+        ("guest TRIPLE FAULT (bhyve exit 3 — crashed)" etc.). Wordings
+        taken from churchers/vm-bhyve lib/vm-run (2026-07-18) and
+        fixture-locked in spec_death; MODELED until a FreeBSD box is back
+        on the bench.
+      The supervisor design remains relevant as the general
+      parent-of-every-node answer (and the non-systemd-host fallback is
+      still verdict-less) — but no death-forensics row is gated on it now.
+      spec_death 43.
       Remaining follow-ups: memory.events oom_kill as ground truth where the
       engine under-reports rootless OOMs (podman arm; the lxc arm now reads
-      it directly); bwrap/bhyve exit status (needs the supervisor as parent —
-      the universal waitpid); jail rctl denies are EVENT-shaped (the
+      it directly); live-prove the bhyve log arm on a FreeBSD box (fixtures
+      are source-derived); jail rctl denies are EVENT-shaped (the
       denials-ledger mechanism, not post-mortem state); guest-OS-level death
       via the in-guest agent (kvm panic; proxmox distinguishing crash vs
       in-guest poweroff — the task correlation can't); RELEASED 2026-07-18:

@@ -26,7 +26,7 @@ import std.string (string_length, string_index_of, string_substring, string_cont
 exports (
     name,
     up, down, probe, exec_capture,
-    create_argv, start_argv, stop_argv, destroy_argv, info_argv, attach_argv,
+    create_argv, start_argv, start_argv_shared, stop_argv, destroy_argv, info_argv, attach_argv,
     image_dist, image_release,
     death_log_path, death_from_log, death_state
 )
@@ -72,9 +72,20 @@ create_argv(res_name: string, image: string) -> ptr {
 }
 
 start_argv(res_name: string) -> ptr {
+    return start_argv_shared(res_name, "")
+}
+
+// start_argv plus share() mounts, set AT START via `-s lxc.mount.entry=...`
+// (no config-file write — rides the same lxc-start invocation/grant). Entry
+// shape: `<src> <dst-rel> none bind[,ro],create=dir 0 0` — the TARGET is
+// RELATIVE to the container rootfs (LXC convention: a leading / would name a
+// host path), so dst has its leading slash stripped. LXC applies `ro` on bind
+// entries via its internal remount, so the read-only default is enforced.
+start_argv_shared(res_name: string, shares: string) -> ptr {
     av = list_new()
     list_add(av, "-n")
     list_add(av, res_name)
+    _add_share_defs(av, shares)
     // INFO-level log to an aeo-owned file: LXC records the init post-mortem
     // there ("Child <pid> ended on signal Killed(9)" / "ended on error (N)" —
     // wording proven against real LXC 6.x on .160, 2026-07-18) and NOWHERE
@@ -135,11 +146,53 @@ attach_argv(res_name: string, cmd: string) -> ptr {
     return av
 }
 
+// share() entries (`src|dst|mode` per line) -> -s lxc.mount.entry=... defs.
+_add_share_defs(av: ptr, shares: string) {
+    rest = shares
+    more = 1
+    if string_length(rest) == 0 {
+        more = 0
+    }
+    while more == 1 {
+        nl = string_index_of(rest, "\n")
+        one = rest
+        if nl >= 0 {
+            one = string_substring(rest, 0, nl)
+            rest = string_substring(rest, nl + 1, string_length(rest))
+        } else {
+            more = 0
+        }
+        p1 = string_index_of(one, "|")
+        if p1 > 0 {
+            src = string_substring(one, 0, p1)
+            r2 = string_substring(one, p1 + 1, string_length(one))
+            p2 = string_index_of(r2, "|")
+            if p2 > 0 {
+                dst = string_substring(r2, 0, p2)
+                mode = string_substring(r2, p2 + 1, string_length(r2))
+                // strip the leading slash: lxc.mount.entry targets are
+                // relative to the container rootfs.
+                if string_length(dst) > 0 {
+                    if string_char_at(dst, 0) == 47 {
+                        dst = string_substring(dst, 1, string_length(dst))
+                    }
+                }
+                list_add(av, "-s")
+                if string_contains(mode, "rw") == 1 {
+                    list_add(av, "lxc.mount.entry=${src} ${dst} none bind,create=dir 0 0")
+                } else {
+                    list_add(av, "lxc.mount.entry=${src} ${dst} none bind,ro,create=dir 0 0")
+                }
+            }
+        }
+    }
+}
+
 // --- exec'ing entry points ---------------------------------------------------
 
 // Bring the LXC container up idempotently. `image` is "dist:release" (e.g.
 // "alpine:3.21"). Returns "" on success else an error.
-up(res_name: string, image: string) -> string {
+up(res_name: string, image: string, shares: string) -> string {
     if probe(res_name, "", "") == 1 {
         return ""
     }
@@ -152,7 +205,7 @@ up(res_name: string, image: string) -> string {
     _co, _cs, _ce = _sudo_lxc("lxc-create", cav)
     list_free(cav)
     // start
-    sav = start_argv(res_name)
+    sav = start_argv_shared(res_name, shares)
     out, status, err = _sudo_lxc("lxc-start", sav)
     list_free(sav)
     if err != "" {
@@ -471,7 +524,27 @@ _sudo_lxc(tool: string, argv: ptr) -> {
         _ = list_add_raw(full, a)     // copy the element ptr verbatim (no string interp)
         i = i + 1
     }
-    out, status, err = run_capture("sudo", full, null)
+    // stderr swallowed on the sudo attempt: a denied `sudo -n` on an
+    // unprivileged-lxc host is the NORMAL trigger for the plain fallback
+    // below, not noise to surface.
+    out, _eo, status, err = run_full("sudo", full, null, "")
     list_free(full)
-    return out, status, err
+    if err == "" {
+        if status == 0 {
+            return out, status, err
+        }
+    }
+    // PLAIN fallback: an unprivileged-lxc host (subuid maps + user cgroup
+    // delegation) owns its containers directly — the rootful sudo grant is
+    // simply absent there. Rootful hosts never reach this (sudo succeeded).
+    plain = list_new()
+    i = 0
+    while i < n {
+        a = list_get_raw(argv, i)
+        _ = list_add_raw(plain, a)
+    i = i + 1
+    }
+    pout, pstatus, perr = run_capture("/usr/bin/${tool}", plain, null)
+    list_free(plain)
+    return pout, pstatus, perr
 }

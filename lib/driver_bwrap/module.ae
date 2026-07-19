@@ -37,15 +37,30 @@
 // is Linux-only — it needs user namespaces — so the LIVE paths run only on a
 // Linux host; the argv half is authored + tested anywhere, including macOS.)
 
-import std.os (run_capture, os_which)
+import std.os (run_capture, run_full, os_which)
 import std.list
-import std.string (string_length, string_char_at, string_from_char, string_from_int, string_get_int, string_trim)
+import std.string (string_length, string_char_at, string_from_char, string_from_int, string_get_int, string_trim, string_index_of, string_substring, string_contains)
+import death (unit_death_line)
 
 exports (
     name,
     available, up, down, probe, exec_capture,
-    sandbox_argv, pidfile_for, logfile_for, _shq
+    sandbox_argv, sandbox_argv_shared, pidfile_for, logfile_for, _shq,
+    unit_name, show_death_argv, death_state
 )
+
+// The transient --user unit that (when systemd-run exists) runs bwrap as its
+// MAIN process. bubblewrap PROPAGATES the sandboxed child's death as its own
+// exit status (128+signal for signal deaths — proven live: kill -9 of the
+// inner process -> ExecMainStatus=137), so the unit's failed corpse
+// (Result/ExecMainCode/ExecMainStatus, kept until reset-failed) IS the
+// sandbox post-mortem death_state reads. This is what gives bwrap a death
+// verdict at all — the old bare setsid path loses the exit status forever
+// (nothing waits on it), and that path remains the verdict-less fallback on
+// non-systemd hosts.
+unit_name(res_name: string) -> string {
+    return "aeo-bwrap-${res_name}"
+}
 
 name() -> string { return "bwrap" }
 
@@ -95,6 +110,14 @@ infofile_for(res_name: string) -> string {
 // holding bwrap's real child-pid (from --info-fd, see _bg_command) — is the
 // lifecycle handle; down() SIGKILLs that pid and bwrap tears the sandbox down.
 sandbox_argv(rootfs: string, cmd: string) -> ptr {
+    return sandbox_argv_shared(rootfs, cmd, "")
+}
+
+// sandbox_argv plus share() mounts (`src|dst|mode` per line -> --ro-bind /
+// --bind, placed AFTER the base rootfs binds so a data mount can overlay a
+// path inside them, BEFORE the fresh /proc//dev//tmp). The read-only default
+// matches the grammar's capability-grant doctrine.
+sandbox_argv_shared(rootfs: string, cmd: string, shares: string) -> ptr {
     av = list_new()
     list_add(av, "--unshare-all")
     list_add(av, "--new-session")
@@ -115,6 +138,7 @@ sandbox_argv(rootfs: string, cmd: string) -> ptr {
         _ro_try(av, "/lib64")
         _ro_try(av, "/etc")
     }
+    _add_share_binds(av, shares)
     list_add(av, "--proc")
     list_add(av, "/proc")
     list_add(av, "--dev")
@@ -126,6 +150,42 @@ sandbox_argv(rootfs: string, cmd: string) -> ptr {
     list_add(av, "-c")
     list_add(av, cmd)
     return av
+}
+
+// share() entries -> --ro-bind src dst (default) / --bind src dst (share_rw).
+_add_share_binds(av: ptr, shares: string) {
+    rest = shares
+    more = 1
+    if string_length(rest) == 0 {
+        more = 0
+    }
+    while more == 1 {
+        nl = string_index_of(rest, "\n")
+        one = rest
+        if nl >= 0 {
+            one = string_substring(rest, 0, nl)
+            rest = string_substring(rest, nl + 1, string_length(rest))
+        } else {
+            more = 0
+        }
+        p1 = string_index_of(one, "|")
+        if p1 > 0 {
+            src = string_substring(one, 0, p1)
+            r2 = string_substring(one, p1 + 1, string_length(one))
+            p2 = string_index_of(r2, "|")
+            if p2 > 0 {
+                dst = string_substring(r2, 0, p2)
+                mode = string_substring(r2, p2 + 1, string_length(r2))
+                if string_contains(mode, "rw") == 1 {
+                    list_add(av, "--bind")
+                } else {
+                    list_add(av, "--ro-bind")
+                }
+                list_add(av, src)
+                list_add(av, dst)
+            }
+        }
+    }
 }
 
 // append `--ro-bind-try PATH PATH` (bind read-only if it exists, else skip).
@@ -140,7 +200,7 @@ _ro_try(av: ptr, path: string) {
 // Bring the sandbox up idempotently. `image` is an optional rootfs directory
 // ("" = sandbox the host userland); `cmd` is the (required) process to run.
 // Returns "" on success else an error.
-up(res_name: string, image: string, cmd: string) -> string {
+up(res_name: string, image: string, cmd: string, shares: string) -> string {
     if probe(res_name, "", "") == 1 {
         return ""
     }
@@ -154,21 +214,73 @@ up(res_name: string, image: string, cmd: string) -> string {
     pf = pidfile_for(res_name)
     log = logfile_for(res_name)
     info = infofile_for(res_name)
-    av = sandbox_argv(image, cmd)
-    bg = _bg_command(bin, av, pf, log, info)
-    list_free(av)
-    // /bin/sh -c '<bwrap --info-fd 3 line> & ... record child-pid' — background
-    // the sandbox and record its REAL pid (from bwrap's info-fd, not $!; see
-    // _bg_command). run_capture returns once the foreground poll+record is done;
-    // bwrap keeps running (reparented to init), tracked by the pidfile.
-    sh = list_new()
-    list_add(sh, "-c")
-    list_add(sh, bg)
-    _out, _status, err = run_capture("/bin/sh", sh, null)
-    list_free(sh)
-    if err != "" {
-        return "aeo: bwrap spawn failed for '${res_name}': ${err}"
+    av = sandbox_argv_shared(image, cmd, shares)
+    // Launch: PREFER a transient --user unit with bwrap as the unit's MAIN
+    // process (no sh wrapper, no info-fd — bubblewrap PROPAGATES the sandboxed
+    // child's death as its own exit, 128+signal included, so the unit's
+    // Result/ExecMainStatus IS the sandbox post-mortem death_state reads;
+    // proven live: kill -9 of the inner process -> ExecMainStatus=137). The
+    // pidfile records the unit's MainPID (bwrap outer — it lives exactly as
+    // long as the sandbox, so kill -0 liveness holds), keeping the batch-sweep
+    // contract. The unit scope also survives aeo's exit on systemd boxes where
+    // a bare bg-child gets SIGHUP-reaped (the kvm/firecracker fix). Fall back
+    // to the plain sh -c path on a non-systemd host (no post-mortem there;
+    // death_state reads "").
+    sr = os_which("systemd-run")
+    if string_length(sr) > 0 {
+        _systemctl_user2("stop", unit_name(res_name))
+        _systemctl_user2("reset-failed", unit_name(res_name))
+        srav = list_new()
+        list_add(srav, "--user")
+        list_add(srav, "--unit=${unit_name(res_name)}")
+        // keep the "see the log" contract without a shell: journal AND file.
+        list_add(srav, "--property=StandardOutput=append:${log}")
+        list_add(srav, "--property=StandardError=append:${log}")
+        list_add(srav, bin)
+        nsr = list_size(av)
+        isr = 0
+        while isr < nsr {
+            list_add_raw(srav, list_get_raw(av, isr))
+            isr = isr + 1
+        }
+        _o, _s, err = run_capture(sr, srav, null)
+        list_free(srav)
+        if err != "" {
+            list_free(av)
+            return "aeo: bwrap spawn failed for '${res_name}': ${err}"
+        }
+        // record the unit's MainPID as the tracked pid (poll briefly — the
+        // unit registers fast; an instantly-dead sandbox fails the unit and
+        // the MainPID stays 0, falling through to the did-not-start error,
+        // whose corpse death_state can then explain).
+        tries = 0
+        while tries < 20 {
+            mp = _unit_main_pid(res_name)
+            if mp > 0 {
+                _write_pidfile(res_name, mp)
+                tries = 100
+            } else {
+                _sleep_100ms()
+                tries = tries + 1
+            }
+        }
+    } else {
+        // /bin/sh -c '<bwrap --info-fd 3 line> & ... record child-pid' — background
+        // the sandbox and record its REAL pid (from bwrap's info-fd, not $!; see
+        // _bg_command). run_capture returns once the foreground poll+record is done;
+        // bwrap keeps running (reparented to init), tracked by the pidfile.
+        bg = _bg_command(bin, av, pf, log, info)
+        sh = list_new()
+        list_add(sh, "-c")
+        list_add(sh, bg)
+        _out, _status, err = run_capture("/bin/sh", sh, null)
+        list_free(sh)
+        if err != "" {
+            list_free(av)
+            return "aeo: bwrap spawn failed for '${res_name}': ${err}"
+        }
     }
+    list_free(av)
     // The pid must have been recorded; an immediately-dead sandbox (bad command,
     // missing /usr) is the common first-run failure — point at the log.
     if _read_pid(res_name) <= 0 {
@@ -177,15 +289,114 @@ up(res_name: string, image: string, cmd: string) -> string {
     return ""
 }
 
-// Tear down: SIGKILL the recorded child-pid + drop the pidfile/info. Absent == success.
+// Tear down. Unit path: `systemctl --user stop` kills the WHOLE unit cgroup
+// (outer bwrap + reaper + sandboxed process — cleaner than a single pid kill,
+// which on the unit path would hit bwrap outer and could orphan the child).
+// Fallback path: SIGKILL the recorded pid. Then drop the corpse + files.
+// Absent == success.
 down(res_name: string) -> string {
+    _systemctl_user2("stop", unit_name(res_name))
     pid = _read_pid(res_name)
     if pid > 0 {
         _kill(pid)
     }
     _rm_pidfile(res_name)
     _rm_infofile(res_name)
+    // expire any unit corpse (a deliberate teardown isn't a death) + free the
+    // --unit name for reuse. Best-effort.
+    _systemctl_user2("reset-failed", unit_name(res_name))
     return ""
+}
+
+// `systemctl --user show aeo-bwrap-NAME -p Result -p ExecMainCode -p
+// ExecMainStatus` — the sandbox's post-mortem. Pure builder.
+show_death_argv(res_name: string) -> ptr {
+    av = list_new()
+    list_add(av, "--user")
+    list_add(av, "show")
+    list_add(av, unit_name(res_name))
+    list_add(av, "-p")
+    list_add(av, "Result")
+    list_add(av, "-p")
+    list_add(av, "ExecMainCode")
+    list_add(av, "-p")
+    list_add(av, "ExecMainStatus")
+    return av
+}
+
+// death_state(res_name) — the canonical status|oom|exit post-mortem line for a
+// dead sandbox's unit ("" = running / never ran / unknown / non-systemd host —
+// incl. the setsid fallback launch, whose exit status is genuinely lost).
+death_state(res_name: string) -> string {
+    sc = os_which("systemctl")
+    if string_length(sc) == 0 {
+        return ""
+    }
+    av = show_death_argv(res_name)
+    out, status, err = run_capture(sc, av, null)
+    list_free(av)
+    if err != "" {
+        return ""
+    }
+    if status != 0 {
+        return ""
+    }
+    return unit_death_line(out)
+}
+
+// the unit's MainPID as int (0 if unknown / systemctl absent).
+_unit_main_pid(res_name: string) -> int {
+    sc = os_which("systemctl")
+    if string_length(sc) == 0 {
+        return 0
+    }
+    av = list_new()
+    list_add(av, "--user")
+    list_add(av, "show")
+    list_add(av, unit_name(res_name))
+    list_add(av, "-p")
+    list_add(av, "MainPID")
+    list_add(av, "--value")
+    out, status, err = run_capture(sc, av, null)
+    list_free(av)
+    if err != "" {
+        return 0
+    }
+    if status != 0 {
+        return 0
+    }
+    return string_get_int(string_trim(out))
+}
+
+_write_pidfile(res_name: string, pid: int) {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "echo ${string_from_int(pid)} > ${pidfile_for(res_name)}")
+    _o, _s, _e = run_capture("/bin/sh", av, null)
+    list_free(av)
+}
+
+_sleep_100ms() {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "sleep 0.1")
+    _o, _s, _e = run_capture("/bin/sh", av, null)
+    list_free(av)
+}
+
+// best-effort `systemctl --user <verb> <unit>` (absent systemctl / unit == fine;
+// stderr swallowed — "not loaded" on an absent unit is the normal case).
+_systemctl_user2(verb: string, unit: string) {
+    sc = os_which("systemctl")
+    if string_length(sc) == 0 {
+        return
+    }
+    av = list_new()
+    list_add(av, "--user")
+    list_add(av, verb)
+    list_add(av, unit)
+    _o, _eo, _s, _e = run_full(sc, av, null, "")
+    list_free(av)
 }
 
 // Liveness. 1 if the recorded pid is alive (kill -0) and, when `health` is

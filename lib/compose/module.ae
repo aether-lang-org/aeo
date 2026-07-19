@@ -42,7 +42,7 @@ exports (
     engine, get_engine,
     check, smoke, suite, get_phase_spec_count, get_phase_spec_at,
     image, command, dockerfile, health, dataset, ip, depends, env, get_env, attest, get_attest,
-    cpus, memory, nic, expose, wsl_distro,
+    cpus, memory, nic, expose, wsl_distro, share, share_rw, get_shares,
     gpu, gpu_device, get_gpu_mode, get_gpu_device, gpu_flags, gpu_alloc_error,
     guest_image, network, ssh_key,
     health_interval, health_budget, within, every, without, get_within_ms, get_without_ms,
@@ -390,6 +390,34 @@ ip(_ctx: ptr, v: string)      { config.put("aeo.cmp.ip.${_ctx}", v) }
 // env(KEY, VAL) — an environment variable the container runs with. Accumulates
 // "K=V" pairs (comma-joined). On a shared aeo network, peers resolve by name, so
 // e.g. env("REDIS_HOST", "db") lets the app reach the db CONTAINER by name.
+// --- share(): overlay a host directory INTO the node -----------------------------
+//
+// A share is a CAPABILITY GRANT (a filesystem pinhole through the boundary, the
+// same class as publish()/gpu()): explicit per node, READ-ONLY by default, and
+// audit-recorded at up. `share(src, dst)` mounts src (a host path on local
+// substrates) at dst inside the node, read-only; `share_rw` is the explicit
+// writable opt-in. Repeatable — each call appends. Rendering is per-substrate
+// (podman/docker -v, bwrap --ro-bind/--bind, nspawn --bind-ro=/--bind=; remote
+// kinds resolve src differently — the proxmox_vm virtiofs arm is the next
+// slice). Stored one entry per line as `src|dst|ro` / `src|dst|rw` (paths may
+// contain spaces/commas; they can't contain newlines or pipes).
+share(_ctx: ptr, src: string, dst: string) {
+    _share_add(_ctx, src, dst, "ro")
+}
+share_rw(_ctx: ptr, src: string, dst: string) {
+    _share_add(_ctx, src, dst, "rw")
+}
+_share_add(_ctx: ptr, src: string, dst: string, mode: string) {
+    prev = config.get("aeo.cmp.shares.${_ctx}")
+    entry = "${src}|${dst}|${mode}"
+    if string_length(prev) == 0 {
+        config.put("aeo.cmp.shares.${_ctx}", entry)
+    } else {
+        config.put("aeo.cmp.shares.${_ctx}", "${prev}\n${entry}")
+    }
+}
+get_shares(nm: string) -> string { return config.get("aeo.cmp.shares.${nm}") }
+
 env(_ctx: ptr, k: string, v: string) {
     prev = config.get("aeo.cmp.env.${_ctx}")
     entry = "${k}=${v}"
@@ -1135,6 +1163,9 @@ reset_nodes() {
         config.put("aeo.cmp.pveagent.${nm}", "")
         config.put("aeo.cmp.pveostemplate.${nm}", "")
         config.put("aeo.cmp.pverootfs.${nm}", "")
+        // shares APPEND per call, so a re-declared name would accumulate a prior
+        // tree's mounts — a capability leak across compositions. Clear.
+        config.put("aeo.cmp.shares.${nm}", "")
         i = i + 1
     }
     config.put("aeo.cmp.count", "0")

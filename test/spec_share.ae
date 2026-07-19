@@ -1,0 +1,131 @@
+// spec_share.ae — the share() grammar (filesystem overlay INTO a node) and its
+// per-substrate renderings.
+//
+// A share is a CAPABILITY GRANT (a filesystem pinhole through the boundary,
+// the publish()/gpu() class): explicit per node, READ-ONLY by default
+// (share_rw is the opt-in), repeatable, audit-recorded at up. This locks the
+// PURE core — the model round-trip and the exact flags each local substrate
+// renders (podman/docker -v, bwrap --ro-bind/--bind, nspawn --bind-ro=/
+// --bind=). The behavioral ro/rw enforcement is proven live (a write inside
+// an ro share must fail), not here.
+//
+//   sh test/run-spec.sh test/spec_share.ae
+
+import aeocha
+import compose
+import driver_linux
+import driver_bwrap
+import driver_nspawn
+import driver_vm
+import driver_lxc
+import std.list (list_get_raw, list_size, list_free)
+import std.string
+
+main() {
+    fw = aeocha.init()
+    aeocha.describe(fw, "share() — filesystem overlay into a node") {
+
+        aeocha.describe("the compose model") {
+            aeocha.it("share() records src|dst read-only; share_rw appends writable; repeatable") callback {
+                compose.reset_nodes()
+                compose.system("share_model") {
+                    c = compose.container("c1") {
+                        compose.image("docker.io/library/alpine:latest")
+                        compose.share("/srv/data", "/data")
+                        compose.share_rw("/srv/out", "/out")
+                    }
+                }
+                aeocha.expect_str(compose.get_shares("c1")).to_equal_str("/srv/data|/data|ro\n/srv/out|/out|rw")
+            }
+            aeocha.it("reset_nodes clears shares (no capability bleed across compositions)") callback {
+                compose.reset_nodes()
+                compose.system("share_model2") {
+                    c = compose.container("c1") {
+                        compose.image("docker.io/library/alpine:latest")
+                    }
+                }
+                aeocha.expect_str(compose.get_shares("c1")).to_equal_str("")
+            }
+        }
+
+        aeocha.describe("driver_linux rendering (-v)") {
+            aeocha.it("ro default -> -v src:dst:ro; rw -> -v src:dst") callback {
+                s = "/srv/data|/data|ro\n/srv/out|/out|rw"
+                av = driver_linux.run_argv_shared("c1", "img", "", 0, "", "", "", s)
+                j = _join(av)
+                aeocha.expect_str(j).to_contain("-v /srv/data:/data:ro")
+                aeocha.expect_str(j).to_contain("-v /srv/out:/out ")
+                list_free(av)
+            }
+        }
+
+        aeocha.describe("bwrap rendering (--ro-bind/--bind, before /proc//dev//tmp)") {
+            aeocha.it("ro default is --ro-bind; rw is --bind") callback {
+                s = "/srv/data|/data|ro\n/srv/out|/out|rw"
+                av = driver_bwrap.sandbox_argv_shared("", "sleep 1", s)
+                j = _join(av)
+                aeocha.expect_str(j).to_contain("--ro-bind /srv/data /data")
+                aeocha.expect_str(j).to_contain("--bind /srv/out /out")
+                list_free(av)
+            }
+            aeocha.it("no shares -> identical to the plain builder") callback {
+                a = driver_bwrap.sandbox_argv_shared("", "sleep 1", "")
+                b = driver_bwrap.sandbox_argv("", "sleep 1")
+                aeocha.expect_str(_join(a)).to_equal_str(_join(b))
+                list_free(a)
+                list_free(b)
+            }
+        }
+
+        aeocha.describe("kvm rendering (virtio-9p -virtfs exports)") {
+            aeocha.it("ro gets readonly=on at the DEVICE; tags are aeoshN by order") callback {
+                s = "/srv/data|/data|ro\n/srv/out|/out|rw"
+                av = driver_vm.qemu_argv_shared("vic", "/tmp/d.qcow2", 1, "1G", "", "/tmp/p.pid", s)
+                j = _join(av)
+                aeocha.expect_str(j).to_contain("-virtfs local,path=/srv/data,mount_tag=aeosh0,security_model=none,readonly=on")
+                aeocha.expect_str(j).to_contain("-virtfs local,path=/srv/out,mount_tag=aeosh1,security_model=none")
+                list_free(av)
+            }
+        }
+
+        aeocha.describe("lxc rendering (-s lxc.mount.entry, dst RELATIVE to rootfs)") {
+            aeocha.it("ro default carries bind,ro; rw plain bind; leading slash stripped") callback {
+                s = "/srv/data|/data|ro\n/srv/out|/out|rw"
+                av = driver_lxc.start_argv_shared("c1", s)
+                j = _join(av)
+                aeocha.expect_str(j).to_contain("lxc.mount.entry=/srv/data data none bind,ro,create=dir 0 0")
+                aeocha.expect_str(j).to_contain("lxc.mount.entry=/srv/out out none bind,create=dir 0 0")
+                list_free(av)
+            }
+        }
+
+        aeocha.describe("nspawn rendering (--bind-ro=/--bind=)") {
+            aeocha.it("ro default is --bind-ro=src:dst; rw is --bind=src:dst") callback {
+                s = "/srv/data|/data|ro\n/srv/out|/out|rw"
+                av = driver_nspawn.run_argv_shared("db", "/var/lib/machines/db", "", s)
+                j = _join(av)
+                aeocha.expect_str(j).to_contain("--bind-ro=/srv/data:/data")
+                aeocha.expect_str(j).to_contain("--bind=/srv/out:/out")
+                list_free(av)
+            }
+        }
+    }
+    aeocha.run_summary(fw)
+}
+
+// join an argv list with single spaces.
+_join(av: ptr) -> string {
+    s = ""
+    n = list_size(av)
+    i = 0
+    while i < n {
+        it = list_get_raw(av, i)
+        if i == 0 {
+            s = "${it}"
+        } else {
+            s = "${s} ${it}"
+        }
+        i = i + 1
+    }
+    return s
+}

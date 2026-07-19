@@ -183,6 +183,36 @@ _await_level(booted: ptr, min_secs: int) -> int {
     return 0
 }
 
+// The node's share() mounts for driver dispatch — and the AUDIT record: a
+// share is a filesystem pinhole through the boundary (the publish()/gpu()
+// class of capability grant), so every granted mount goes on the hash chain.
+// Newlines flattened to "; " (an audit entry is one line).
+_shares_of(nm: string) -> string {
+    sh = compose.get_shares(nm)
+    if string_length(sh) > 0 {
+        flat = ""
+        rest = sh
+        more = 1
+        while more == 1 {
+            nl = string_index_of(rest, "\n")
+            one = rest
+            if nl >= 0 {
+                one = string_substring(rest, 0, nl)
+                rest = string_substring(rest, nl + 1, string_length(rest))
+            } else {
+                more = 0
+            }
+            if string_length(flat) == 0 {
+                flat = one
+            } else {
+                flat = "${flat}; ${one}"
+            }
+        }
+        _ = audit.record(nm, compose.get_kind(nm), "share", flat)
+    }
+    return sh
+}
+
 // Print each non-UP node in a timed-out level + its state (diagnostic). For
 // engine containers, also ask the KERNEL why: an exited container's post-mortem
 // (OOM kill / fatal signal / exit code) turns "not up within window" into an
@@ -251,6 +281,12 @@ _diag_level_not_up(booted: ptr, budget: int) {
             }
             if k == "kvm" {
                 verdict = death.death_cause(driver_vm.death_state(bn))
+            }
+            if k == "bhyve" {
+                verdict = death.death_cause(driver_vm.bhyve_death_state(bn))
+            }
+            if k == "bwrap" {
+                verdict = death.death_cause(driver_bwrap.death_state(bn))
             }
             if k == "lxc" {
                 verdict = death.death_cause(driver_lxc.death_state(bn))
@@ -621,7 +657,7 @@ driver_up(nm: string, k: string) -> string {
     if k == "lxc" {
         // REAL LXC system container (driver_lxc), not podman. image() is the
         // download-template "dist:release" (e.g. "alpine:3.21").
-        return driver_lxc.up(nm, compose.get_image(nm))
+        return driver_lxc.up(nm, compose.get_image(nm), _shares_of(nm))
     }
     if k == "container" {
         // ENGINE DISPATCH: `container` is the one OCI kind; get_engine(nm) picks
@@ -774,7 +810,7 @@ driver_up(nm: string, k: string) -> string {
         // pins docker). This is the fix for the old second-class docker path —
         // docker-pinned nodes now get the SAME shared-net + env + confine
         // treatment as podman ones, differing only in the engine binary.
-        return driver_linux.up_confined(nm, img, compose.get_command(nm), compose.get_expose(nm), net, compose.get_env(nm), confine, eng)
+        return driver_linux.up_confined(nm, img, compose.get_command(nm), compose.get_expose(nm), net, compose.get_env(nm), confine, _shares_of(nm), eng)
     }
     if k == "jail" {
         return driver_bsd.up(nm, compose.get_dataset(nm), "", compose.get_ip(nm), compose.get_command(nm))
@@ -794,7 +830,7 @@ driver_up(nm: string, k: string) -> string {
         return driver_vm.bhyve_up(nm, gi, _realize_target(gi), gip, compose.get_cpus(nm), compose.get_memory(nm), compose.get_network(nm), compose.get_ssh_key(nm))
     }
     if k == "kvm" {
-        return driver_vm.up("kvm", nm, compose.get_image(nm), compose.get_cpus(nm), compose.get_memory(nm), compose.get_nic(nm))
+        return driver_vm.up("kvm", nm, compose.get_image(nm), compose.get_cpus(nm), compose.get_memory(nm), compose.get_nic(nm), _shares_of(nm))
     }
     if k == "proxmox_vm" {
         // REMOTE VM on a Proxmox VE host, over its HTTPS API (driver_proxmox):
@@ -812,13 +848,13 @@ driver_up(nm: string, k: string) -> string {
         // UNPRIVILEGED bubblewrap sandbox (driver_bwrap): the lightest tier, no
         // host setup. image() is an optional rootfs dir ("" = sandbox the host
         // userland); command() is the (required) process the sandbox runs.
-        return driver_bwrap.up(nm, compose.get_image(nm), compose.get_command(nm))
+        return driver_bwrap.up(nm, compose.get_image(nm), compose.get_command(nm), _shares_of(nm))
     }
     if k == "nspawn" {
         // systemd-nspawn SYSTEM container (driver_nspawn): the systemd-native LXC
         // peer. image() is the (required) rootfs directory; command() "" -> --boot
         // the rootfs init, else run command() as the container payload.
-        return driver_nspawn.up(nm, compose.get_image(nm), compose.get_command(nm))
+        return driver_nspawn.up(nm, compose.get_image(nm), compose.get_command(nm), _shares_of(nm))
     }
     if k == "firecracker" {
         // Firecracker microVM (driver_firecracker): a minimal-device-model VMM.

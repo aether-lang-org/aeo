@@ -37,7 +37,7 @@ import death (unit_death_line)
 exports (
     name,
     up, bhyve_up, guest_container_up, agent_delegate, agent_delegate_at, agent_delegate_fire, agent_status, agent_status_at, build_agent_seed, exec_capture, down, probe,
-    show_death_argv, death_state, guest_death_state, agent_death_at, agent_death_line,
+    show_death_argv, death_state, guest_death_state, agent_death_at, agent_death_line, bhyve_death_state, bhyve_death_from_log, qemu_argv_shared,
     bhyve_argv, qemu_argv, bhyvectl_destroy_argv,
     pidfile_for, bootrom_path
 )
@@ -105,6 +105,19 @@ bhyvectl_destroy_argv(res_name: string) -> ptr {
 //       -drive file=IMAGE,if=virtio -display none -daemonize \
 //       -pidfile PIDFILE [-nic tap,ifname=TAP,script=no]
 qemu_argv(res_name: string, image: string, cpus: int, mem: string, tap: string, pidfile: string) -> ptr {
+    return qemu_argv_shared(res_name, image, cpus, mem, tap, pidfile, "")
+}
+
+// qemu_argv plus share() mounts as virtio-9p exports: one
+//   -virtfs local,path=<src>,mount_tag=aeoshN,security_model=none[,readonly=on]
+// per entry (N = declaration order). 9p works UNPRIVILEGED (unlike virtiofs,
+// which needs a virtiofsd sidecar — a follow-up fast path). The guest mounts
+//   mount -t 9p -o trans=virtio,version=9p2000.L aeoshN <dst>
+// (cloud-init runcmd or the agent). readonly=on enforces ro AT THE DEVICE —
+// the guest cannot remount its way past it. security_model=none maps guest
+// access to the qemu process's own uid (right for rootless qemu: guest root
+// writes land as the operator's files, no privilege gained).
+qemu_argv_shared(res_name: string, image: string, cpus: int, mem: string, tap: string, pidfile: string, shares: string) -> ptr {
     av = list_new()
     list_add(av, "-enable-kvm")
     list_add(av, "-name")
@@ -129,6 +142,7 @@ qemu_argv(res_name: string, image: string, cpus: int, mem: string, tap: string, 
         list_add(av, "-drive")
         list_add(av, "file=${seed},if=virtio,media=cdrom")
     }
+    _add_virtfs_args(av, shares)
     // Networking: a tap (nic("tapN")) needs root/CAP_NET_ADMIN to create the
     // device — for ROOTLESS qemu (e.g. an unprivileged Bazzite user) that fails
     // with "could not configure /dev/net/tun: Operation not permitted". When no
@@ -332,14 +346,14 @@ build_agent_seed(res_name: string, token: string, agent_bin: string, ssh_key: st
 // Bring the VM up idempotently. `kind` is "bhyve" or "kvm". `image` is the
 // disk; `cpus`/`mem` size it; `tap` is the host NIC ("" for none).
 // Returns "" on success else an error message.
-up(kind: string, res_name: string, image: string, cpus: int, mem: string, tap: string) -> string {
+up(kind: string, res_name: string, image: string, cpus: int, mem: string, tap: string, shares: string) -> string {
     // bhyve has its own entry (bhyve_up — provisions via vm-bhyve from the
     // guest declaration); this generic up() handles kvm (qemu).
     if kind == "kvm" {
         if string_length(image) == 0 {
             return "aeo: vm '${res_name}' has no image() set"
         }
-        return _up_kvm(res_name, image, cpus, mem, tap)
+        return _up_kvm(res_name, image, cpus, mem, tap, shares)
     }
     return "aeo: vm '${res_name}' has unknown kind '${kind}'"
 }
@@ -1158,7 +1172,7 @@ _vm_ok(sub: string, name: string) -> int {
     return 0
 }
 
-_up_kvm(res_name: string, image: string, cpus: int, mem: string, tap: string) -> string {
+_up_kvm(res_name: string, image: string, cpus: int, mem: string, tap: string, shares: string) -> string {
     bin = os_which("qemu-system-x86_64")
     if bin == "" {
         return "aeo: kvm needs qemu-system-x86_64 on PATH (not found)"
@@ -1178,7 +1192,7 @@ _up_kvm(res_name: string, image: string, cpus: int, mem: string, tap: string) ->
         }
     }
     pf = pidfile_for(res_name)
-    av = qemu_argv(res_name, image, cpus, mem, tap, pf)
+    av = qemu_argv_shared(res_name, image, cpus, mem, tap, pf, shares)
     // Launch so the VM SURVIVES the aeo process exiting. A plain -daemonize'd
     // qemu spawned as a child of the (short-lived) aeo front-door gets SIGHUP'd
     // when its launching session scope is reaped on a systemd box (this bit the
@@ -1309,6 +1323,146 @@ death_state(res_name: string) -> string {
         return ""
     }
     return unit_death_line(out)
+}
+
+// share() entries (`src|dst|mode` per line) -> -virtfs 9p exports (see
+// qemu_argv_shared). The dst half is for the GUEST mount step, not qemu — the
+// tag aeoshN carries the pairing by order.
+_add_virtfs_args(av: ptr, shares: string) {
+    rest = shares
+    more = 1
+    if string_length(rest) == 0 {
+        more = 0
+    }
+    idx = 0
+    while more == 1 {
+        nl = string_index_of(rest, "\n")
+        one = rest
+        if nl >= 0 {
+            one = string_substring(rest, 0, nl)
+            rest = string_substring(rest, nl + 1, string_length(rest))
+        } else {
+            more = 0
+        }
+        p1 = string_index_of(one, "|")
+        if p1 > 0 {
+            src = string_substring(one, 0, p1)
+            r2 = string_substring(one, p1 + 1, string_length(one))
+            p2 = string_index_of(r2, "|")
+            if p2 > 0 {
+                mode = string_substring(r2, p2 + 1, string_length(r2))
+                list_add(av, "-virtfs")
+                if string_contains(mode, "rw") == 1 {
+                    list_add(av, "local,path=${src},mount_tag=aeosh${_itoa(idx)},security_model=none")
+                } else {
+                    list_add(av, "local,path=${src},mount_tag=aeosh${_itoa(idx)},security_model=none,readonly=on")
+                }
+            }
+        }
+        idx = idx + 1
+    }
+}
+
+// ---- bhyve death forensics (the vm-bhyve supervisor log) ----------------------
+//
+// bhyve's exit code is GUEST-MEANINGFUL by design (0=reset/reboot, 1=powered
+// off, 2=halted, 3=triple fault, else error) and vm-bhyve — which SUPERVISES
+// the bhyve process (its run loop is what interprets these codes for
+// restart-vs-stop) — logs it verbatim to the guest's log:
+//   "bhyve exited with status N"            (lib/vm-run, util::log "guest")
+//   "fatal; loader returned error N"        (boot loader failure)
+// So the verdict is already captured by the substrate's own supervisor; aeo
+// just reads the LAST such line when the VM is down. Wordings taken from
+// vm-bhyve upstream source (churchers/vm-bhyve lib/vm-run, 2026-07-18) —
+// MODELED until a FreeBSD box live-proves it (none on the bench right now).
+
+// bhyve_death_state(res_name) — pre-classified cause= line for a DOWN bhyve
+// VM ("" = running / no log / nothing recorded).
+bhyve_death_state(res_name: string) -> string {
+    if _bhyve_running(res_name) == 1 {
+        return ""
+    }
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "cat /zroot/vm/${res_name}/vm-bhyve.log 2>/dev/null")
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    if err != "" {
+        return ""
+    }
+    if status != 0 {
+        return ""
+    }
+    return bhyve_death_from_log(out)
+}
+
+// bhyve_death_from_log(text) — parse the LAST exit line into a canonical
+// cause= line. Pure (fixture-tested).
+bhyve_death_from_log(text: string) -> string {
+    ex = _last_int_after(text, "bhyve exited with status ")
+    ld = _last_int_after(text, "fatal; loader returned error ")
+    if ex < 0 {
+        if ld < 0 {
+            return ""
+        }
+        return "status=exited|oom=false|exit=-1|cause=boot loader failed (error ${_itoa(ld)})"
+    }
+    if ld >= 0 {
+        if _last_needle_at(text, "fatal; loader returned error ") > _last_needle_at(text, "bhyve exited with status ") {
+            return "status=exited|oom=false|exit=-1|cause=boot loader failed (error ${_itoa(ld)})"
+        }
+    }
+    c = "bhyve error exit ${_itoa(ex)}"
+    if ex == 0 { c = "guest reset (bhyve exit 0 — reboot requested)" }
+    if ex == 1 { c = "guest powered off from inside (bhyve exit 1)" }
+    if ex == 2 { c = "guest halted (bhyve exit 2)" }
+    if ex == 3 { c = "guest TRIPLE FAULT (bhyve exit 3 — crashed)" }
+    return "status=exited|oom=false|exit=${_itoa(ex)}|cause=${c}"
+}
+
+// position of the LAST occurrence of needle (-1 if absent).
+_last_needle_at(text: string, needle: string) -> int {
+    best = 0 - 1
+    from = 0
+    n = string_length(text)
+    while from < n {
+        rest = string_substring(text, from, n)
+        i = string_index_of(rest, needle)
+        if i < 0 {
+            return best
+        }
+        best = from + i
+        from = from + i + 1
+    }
+    return best
+}
+
+// int right after the LAST occurrence of needle (-1 if absent/no digits).
+_last_int_after(text: string, needle: string) -> int {
+    i = _last_needle_at(text, needle)
+    if i < 0 {
+        return 0 - 1
+    }
+    i = i + string_length(needle)
+    n = string_length(text)
+    v = 0
+    seen = 0
+    while i < n {
+        c = string_char_at(text, i)
+        if c < 48 {
+            break
+        }
+        if c > 57 {
+            break
+        }
+        v = v * 10 + (c - 48)
+        seen = 1
+        i = i + 1
+    }
+    if seen == 0 {
+        return 0 - 1
+    }
+    return v
 }
 
 // guest_death_state(host_vm, host_ip, res_name) — the post-mortem of a

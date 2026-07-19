@@ -18,6 +18,7 @@ import driver_firecracker
 import driver_vm
 import driver_wslc
 import driver_lxc
+import driver_bwrap
 import std.list (list_get_raw, list_size, list_free)
 import std.string
 
@@ -162,6 +163,36 @@ main() {
             aeocha.it("start_argv carries the post-mortem log flags") callback {
                 av = driver_lxc.start_argv("db")
                 aeocha.expect_str(_join(av)).to_equal_str("-n db -o /tmp/aeo-lxc-db.log -l INFO")
+                list_free(av)
+            }
+        }
+
+        aeocha.describe("bhyve_death_from_log — vm-bhyve's supervisor log (source-derived wording)") {
+            aeocha.it("a triple fault is a crash verdict (bhyve exit 3)") callback {
+                lg = "Jul 18 12:00:01: booting\nJul 18 12:03:44: bhyve exited with status 3\n"
+                aeocha.expect_str(death_cause(driver_vm.bhyve_death_from_log(lg))).to_equal_str("guest TRIPLE FAULT (bhyve exit 3 — crashed)")
+            }
+            aeocha.it("exit 1 = powered off from inside; exit 0 = reset") callback {
+                aeocha.expect_str(death_cause(driver_vm.bhyve_death_from_log("x: bhyve exited with status 1\n"))).to_equal_str("guest powered off from inside (bhyve exit 1)")
+                aeocha.expect_str(death_cause(driver_vm.bhyve_death_from_log("x: bhyve exited with status 0\n"))).to_equal_str("guest reset (bhyve exit 0 — reboot requested)")
+            }
+            aeocha.it("the LAST exit line wins across boots") callback {
+                lg = "a: bhyve exited with status 0\nb: booting\nc: bhyve exited with status 2\n"
+                aeocha.expect_str(death_cause(driver_vm.bhyve_death_from_log(lg))).to_equal_str("guest halted (bhyve exit 2)")
+            }
+            aeocha.it("a loader failure is its own verdict") callback {
+                lg = "x: fatal; loader returned error 15\n"
+                aeocha.expect_str(death_cause(driver_vm.bhyve_death_from_log(lg))).to_equal_str("boot loader failed (error 15)")
+            }
+            aeocha.it("a log with no exit line yields no verdict") callback {
+                aeocha.expect_str(driver_vm.bhyve_death_from_log("x: booting\n")).to_equal_str("")
+            }
+        }
+
+        aeocha.describe("bwrap — the unitized sandbox's post-mortem argv (pure)") {
+            aeocha.it("--user scoped show of aeo-bwrap-NAME") callback {
+                av = driver_bwrap.show_death_argv("db")
+                aeocha.expect_str(_join(av)).to_equal_str("--user show aeo-bwrap-db -p Result -p ExecMainCode -p ExecMainStatus")
                 list_free(av)
             }
         }
