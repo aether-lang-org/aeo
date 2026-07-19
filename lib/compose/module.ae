@@ -36,7 +36,7 @@ exports (
     ostemplate, rootfs,
     get_pve_host, get_pve_node, get_pve_token, get_pve_storage, get_pve_bridge, get_pve_template,
     get_pve_cloud_init, get_pve_agent, get_pve_ostemplate, get_pve_rootfs,
-    proxmox_model_errors,
+    proxmox_model_errors, share_model_errors,
     resource,
     container, lxc, kvm, jail, bhyve, bwrap, nspawn, firecracker, kata,
     engine, get_engine,
@@ -1511,6 +1511,52 @@ get_pve_rootfs(nm: string) -> string     { return config.get("aeo.cmp.pverootfs.
 // AND: because driver_proxmox (live create/start) is not yet realized, the gate
 // states plainly that `up` is model-only today — so the file never claims a
 // deploy it won't perform. Returns "" when every proxmox_vm is well-formed.
+// share_model_errors() — the honest gate for share()/share_rw(): a declared
+// mount on a kind whose renderer isn't wired must fail LOUD at check/up, never
+// silently come up without its data (the silent-false-done class — the
+// _kind_has_driver lesson applied to a capability grant). Wired today:
+// container (LOCAL engines, not nested in a VM host), bwrap, nspawn, lxc, kvm.
+share_model_errors() -> string {
+    out = ""
+    n = _count()
+    i = 0
+    while i < n {
+        nm = name_at(i)
+        if string_length(get_shares(nm)) > 0 {
+            k = config.get("aeo.cmp.kind.${nm}")
+            if k == "firecracker" {
+                out = _pve_err(out, "share() on '${nm}' (firecracker): REFUSED — the minimal device model has no share device (9p/virtiofs); ungrantable by construction")
+            }
+            if k == "proxmox_vm" {
+                out = _pve_err(out, "share() on '${nm}' (proxmox_vm): not rendered yet — the PVE virtiofs arm (directory mapping + Mapping.Use) is queued; remove the share or wait for that slice")
+            }
+            if k == "proxmox_ct" {
+                out = _pve_err(out, "share() on '${nm}' (proxmox_ct): not rendered yet — storage-backed mp[n] volumes are the token-grantable path; raw host binds are root-only on PVE")
+            }
+            if k == "bhyve" {
+                out = _pve_err(out, "share() on '${nm}' (bhyve): not rendered yet — the virtio-9p arm is queued (needs a FreeBSD box to prove)")
+            }
+            if k == "jail" {
+                out = _pve_err(out, "share() on '${nm}' (jail): not rendered yet")
+            }
+            if k == "container" {
+                eng = get_engine(nm)
+                if eng == "wslc" {
+                    out = _pve_err(out, "share() on '${nm}' (engine wslc): not rendered yet — Windows path translation is queued")
+                }
+                if eng == "wsl_podman" {
+                    out = _pve_err(out, "share() on '${nm}' (engine wsl_podman): not rendered yet — Windows path translation is queued")
+                }
+                if string_length(get_host(nm)) > 0 {
+                    out = _pve_err(out, "share() on '${nm}': a container NESTED in a VM guest does not carry shares through the delegate path yet — declare the share on the host VM instead")
+                }
+            }
+        }
+        i = i + 1
+    }
+    return out
+}
+
 proxmox_model_errors() -> string {
     out = ""
     n = _count()

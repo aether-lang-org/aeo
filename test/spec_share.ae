@@ -109,6 +109,57 @@ main() {
                 list_free(av)
             }
         }
+        aeocha.describe("share_model_errors — the loud gate for unwired kinds") {
+            aeocha.it("firecracker is REFUSED by construction; proxmox not-yet-rendered; wired kinds pass") callback {
+                compose.reset_nodes()
+                compose.system("share_gate") {
+                    // cnode FIRST: VM-opener kinds float curhost onto later
+                    // siblings, which would make cnode read as nested.
+                    c = compose.container("cnode") {
+                        compose.image("docker.io/library/alpine:latest")
+                        compose.share("/srv/data", "/data")
+                    }
+                    f = compose.firecracker("fnode") {
+                        compose.image("/tmp/bundle")
+                        compose.share("/srv/data", "/data")
+                    }
+                    p = compose.proxmox_vm("pnode") {
+                        compose.share("/srv/data", "/data")
+                    }
+                }
+                e = compose.share_model_errors()
+                aeocha.expect_str(e).to_contain("REFUSED")
+                aeocha.expect_str(e).to_contain("fnode")
+                aeocha.expect_str(e).to_contain("pnode")
+                aeocha.expect_str(e).to_contain("not rendered yet")
+                // the wired container node contributes NO error line
+                if string_contains(e, "cnode") == 1 {
+                    aeocha.expect_str("cnode-should-not-error").to_equal_str("")
+                }
+            }
+            aeocha.it("a nested-in-VM container share is refused (delegate path carries none)") callback {
+                compose.reset_nodes()
+                compose.system("share_gate2") {
+                    vm = compose.kvm_vm("host_vm") {
+                        compose.image("/tmp/d.qcow2")
+                        nested = compose.container("napp") {
+                            compose.image("docker.io/library/alpine:latest")
+                            compose.share("/srv/data", "/data")
+                        }
+                    }
+                }
+                aeocha.expect_str(compose.share_model_errors()).to_contain("NESTED in a VM guest")
+            }
+            aeocha.it("no shares anywhere -> no errors") callback {
+                compose.reset_nodes()
+                compose.system("share_gate3") {
+                    c = compose.container("plain") {
+                        compose.image("docker.io/library/alpine:latest")
+                    }
+                }
+                aeocha.expect_str(compose.share_model_errors()).to_equal_str("")
+            }
+        }
     }
     aeocha.run_summary(fw)
 }

@@ -3056,6 +3056,11 @@ _preflight() -> string {
     if string_length(pverr) > 0 {
         return "aeo: proxmox_vm model error(s):\n${pverr}"
     }
+    // share() gate: a mount on an unwired kind must never silently vanish.
+    sherr = compose.share_model_errors()
+    if string_length(sherr) > 0 {
+        return "aeo: share() model error(s):\n${sherr}"
+    }
     fam = family()
     n = compose.count()
     i = 0
@@ -3352,6 +3357,11 @@ main() {
         pverr = compose.proxmox_model_errors()
         if pverr != "" {
             println("aeo: proxmox_vm model error(s):\n${pverr}")
+            exit(1)
+        }
+        sherr = compose.share_model_errors()
+        if sherr != "" {
+            println("aeo: share() model error(s):\n${sherr}")
             exit(1)
         }
         // Proxmox REMOTE-HOST preflight: for each proxmox_vm, reach the PVE box

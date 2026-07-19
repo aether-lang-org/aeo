@@ -784,7 +784,14 @@ space-split confine flag channel).
 - [ ] Follow-ups: lxc `lxc.mount.entry` arm; wslc/wsl_podman Windows-path
       translation; up_green share parity (cutover green currently gets NO
       shares — parity needed before cutover of share-bearing nodes);
-      check-time model gate (absolute paths, kind×share matrix, refusals);
+      [DONE 2026-07-19: share_model_errors() — the loud kind×share gate,
+      wired into _preflight + check like the proxmox gate: firecracker
+      REFUSED-by-construction, proxmox_vm/ct + bhyve + jail + wsl engines
+      not-rendered-yet errors, nested-in-VM-guest containers refused
+      (delegate path carries no shares); spec-locked incl. the curhost-float
+      trap (a container declared AFTER a VM opener reads as nested).
+      A declared share can no longer silently vanish on any kind.]
+      absolute-path validation (still open);
       bwrap probe/exec fresh sandboxes do NOT carry data shares (documented
       limitation); attest() over a share manifest (verify-before-mount for
       data — the fail-closed story extended to content).
