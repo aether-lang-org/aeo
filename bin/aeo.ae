@@ -736,9 +736,15 @@ _cp(src: string, dst: string) -> int {
     return status
 }
 
-// setenv via the libc extern (os doesn't expose setenv in this surface;
-// see std.os note "callers reaching for os.setenv find them where…").
-extern setenv(name: string, value: string, overwrite: int) -> int
+// setenv via std.os's PORTABLE wrapper (io_setenv_raw underneath) — NOT a raw
+// libc `extern setenv`, which is undeclared on Windows (mingw uses _putenv /
+// SetEnvironmentVariable) and broke the x86_64-windows cross-compile. os.setenv
+// returns an err-string ("" ok); we keep the int-returning shape (1 ok / 0 fail)
+// so the 17 `_ = _setenv(...)` call sites are unchanged.
 _setenv(name: string, value: string) -> int {
-    return setenv(name, value, 1)
+    e = os.setenv(name, value)
+    if string_length(e) > 0 {
+        return 0
+    }
+    return 1
 }

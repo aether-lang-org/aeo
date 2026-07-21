@@ -46,7 +46,11 @@
 # Requires: curl, python3. Idempotent: re-running updates role/pool/ACL in place.
 set -eu
 
-PVE_HOST="${PVE_HOST:-192.168.0.204:8006}"
+# Default LOCALHOST: this script runs ON the PVE host, and a box-specific
+# default is a live-fired footgun — run on a NEW box with LAN reach, it
+# silently provisions (and ROTATES the token of!) the OLD box (2026-07-19:
+# bazprox's token_setup rotated .204's token twice before this fix).
+PVE_HOST="${PVE_HOST:-127.0.0.1:8006}"
 PVE_ADMIN_USER="${PVE_ADMIN_USER:-root@pam}"          # bootstrap identity (used once)
 PVE_REALM="${PVE_REALM:-pve}"                          # service user's realm
 SVC_USER="aeo@${PVE_REALM}"
