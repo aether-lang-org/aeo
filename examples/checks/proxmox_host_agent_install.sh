@@ -28,15 +28,15 @@
 #
 # Env knobs:
 #   PVE_SSH        ssh target (root@host). Required.
-#   AEO_AGENT_VER  release tag to install (default aeo-agent-v0.1.1).
+#   AEO_AGENT_VER  release tag to install (default aeo-agent-v0.1.2).
 #   AEO_HOST_NODE  the agent's node identity (default the host's hostname).
 #   AEO_HOST_PORT  loopback listen port (default 9460).
 #   AEO_HOST_TOKEN the shared token (default: generated on the host, printed once).
 set -eu
 
 PVE_SSH="${PVE_SSH:?set PVE_SSH=root@<pve-host>}"
-VER="${AEO_AGENT_VER:-aeo-agent-v0.1.1}"
-ASSET="aeo-agent-linux-x86_64-glibc"
+VER="${AEO_AGENT_VER:-aeo-agent-v0.1.2}"
+ASSET="aeo-agent-linux-x86_64-static"
 BASE="https://github.com/aether-lang-org/aeo/releases/download/${VER}"
 PORT="${AEO_HOST_PORT:-9460}"
 SSH="ssh -o StrictHostKeyChecking=accept-new -o ConnectTimeout=8 ${PVE_SSH}"

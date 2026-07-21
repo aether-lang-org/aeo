@@ -183,8 +183,9 @@ reports outward. `agent(1)` makes `probe()` wait for the guest-agent to respond 
 OS alive) before promoting the node to UP.
 
 - **Delivery:** `aeo-agent` is fetched from an immutable, versioned GitHub Release
-  (`aeo-agent-v*`, asset `aeo-agent-linux-x86_64-glibc`), built by
-  `.github/workflows/release-aeo-agent.yml`. A PVE cicustom snippet is text-only and
+  (`aeo-agent-v*`, asset `aeo-agent-linux-x86_64-static`), built by
+  `.github/workflows/release-aeo-agent.yml`. See `docs/releasing-aeo.md` for how
+  releases are cut and consumed. A PVE cicustom snippet is text-only and
   PVE has no snippet-write API, so the guest *fetches* — Releases is the durable,
   checksummed host. The snippet is [`proxmox_cloudinit.yaml`](../examples/checks/proxmox_cloudinit.yaml).
 - **Host-side agent (optional):**
