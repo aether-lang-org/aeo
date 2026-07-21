@@ -45,16 +45,16 @@ on:
 permissions:
   contents: write        # create the release + upload the asset
 
-# TWO build jobs feed one release job:
-#   build-linux    — native x86_64, STATIC (gcc -static). Unchanged from the
-#                    original single-job workflow; the load-bearing asset.
-#   build-freebsd  — x86_64 FreeBSD, CROSS-compiled on the Linux runner via zig
-#                    (ae --target=x86_64-freebsd). Serves bhyve guests, which are
-#                    a first-class aeo substrate but had NO fetchable agent asset.
-#                    PROVEN: cross-built on Linux, runs on a real FreeBSD 15 box
-#                    and serves /health. Requires the ae FreeBSD-cross pthread
-#                    fix — the build-freebsd job self-gates on it (see there).
-# The release job downloads both artifacts and publishes them under one tag.
+# THREE build jobs feed one release job:
+#   build-linux    — native x86_64, STATIC (gcc -static). The load-bearing asset.
+#   build-freebsd  — x86_64 FreeBSD, CROSS-compiled via zig. Serves bhyve guests.
+#                    Self-gates on the ae FreeBSD-cross pthread fix (see there).
+#   build-windows  — x86_64 Windows, CROSS-compiled via zig. Serves Win11 guests
+#                    (the agent driver_windows path: workload via WSL2+podman).
+#                    No sysroot/base/gate needed (Tier-A + plaintext agent).
+#   All three PROVEN end-to-end: cross-built on Linux, run on a real box of that
+#   OS and serve /health=ok (FreeBSD 15 box, Win11 VM).
+# The release job downloads every produced artifact and publishes them one tag.
 
 jobs:
   build-linux:
@@ -216,8 +216,78 @@ jobs:
             aeo-agent-freebsd-x86_64.sha256
           if-no-files-found: error
 
+  build-windows:
+    # x86_64 Windows, cross-compiled on the Linux runner via zig. Serves Win11
+    # guests (bhyve; docs/aeo-agent-windows-pipeline.md). The agent's Windows
+    # code path is real: it imports driver_windows and platform()-dispatches the
+    # workload to `wsl -d <distro> -- podman ...` (bin/aeo-agent.ae ~320); the
+    # linux arm uses podman directly. Same protocol/transport/boot core.
+    #
+    # NO crossbuild sysroot, NO base, NO version gate: Windows is Tier-A (zig
+    # bundles the Windows CRT/libc), the agent is plaintext HTTP (no OpenSSL /
+    # nghttp2 to link), and `ae --target=x86_64-windows` has shipped since 0.427.
+    # So this is just: get ae, get zig, cross-build. Proven end-to-end: the .exe
+    # runs on a real Win11 box and serves /health=ok.
+    #
+    # DYNAMIC vs the Windows system DLLs (kernel32/ws2_32/…) — always present in
+    # any Windows guest; the static-in-busybox concern doesn't apply.
+    runs-on: ubuntu-latest
+    outputs:
+      sha256: ${{ steps.sum.outputs.sha256 }}
+      built: ${{ steps.build.outputs.built }}
+    env:
+      ZIG_VERSION: '0.13.0'
+    steps:
+      - name: Checkout aeo
+        uses: actions/checkout@v4
+
+      - name: Install build prerequisites
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq build-essential curl tar xz-utils
+
+      - name: Install the Aether toolchain (ae)
+        run: |
+          curl -sSL https://raw.githubusercontent.com/aether-lang-org/aether/main/get.sh \
+            | AETHER_REF="${{ github.event.inputs.ref }}" PREFIX="$HOME/.local" sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Install zig (the cross-compiler ae --target drives)
+        run: |
+          zdir="zig-linux-x86_64-${ZIG_VERSION}"
+          curl -fsSL "https://ziglang.org/download/${ZIG_VERSION}/${zdir}.tar.xz" -o /tmp/zig.tar.xz
+          tar -xJf /tmp/zig.tar.xz -C "$HOME"
+          echo "$HOME/${zdir}" >> "$GITHUB_PATH"
+
+      - name: Build aeo-agent (windows, x86_64)
+        id: build
+        # No CROSSBUILD_SYSROOT: the plaintext agent needs no OpenSSL/zlib/etc.,
+        # and zig bundles the Windows CRT. -> a self-contained .exe.
+        run: |
+          ae build bin/aeo-agent.ae -o aeo-agent-windows-x86_64.exe --lib lib --target=x86_64-windows
+          file aeo-agent-windows-x86_64.exe
+          # ASSERT the name is honest: a real x86-64 Windows PE.
+          file aeo-agent-windows-x86_64.exe | grep -q 'PE32+ executable' \
+            || { echo "not a Windows PE — asset name would be a lie"; exit 1; }
+          file aeo-agent-windows-x86_64.exe | grep -q 'x86-64' \
+            || { echo "not x86-64 — asset name would be a lie"; exit 1; }
+          echo "built=true" >> "$GITHUB_OUTPUT"
+
+      - name: Checksum
+        id: sum
+        run: |
+          sha256sum aeo-agent-windows-x86_64.exe | tee aeo-agent-windows-x86_64.exe.sha256
+          echo "sha256=$(cut -d' ' -f1 aeo-agent-windows-x86_64.exe.sha256)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aeo-agent-windows-x86_64
+          path: |
+            aeo-agent-windows-x86_64.exe
+            aeo-agent-windows-x86_64.exe.sha256
+          if-no-files-found: error
+
   release:
-    needs: [build-linux, build-freebsd]
+    needs: [build-linux, build-freebsd, build-windows]
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
@@ -240,6 +310,7 @@ jobs:
             echo "| asset | SHA256 |"
             echo "|---|---|"
             echo "| \`aeo-agent-linux-x86_64-static\` | \`${{ needs.build-linux.outputs.sha256 }}\` |"
+            echo "| \`aeo-agent-windows-x86_64.exe\` | \`${{ needs.build-windows.outputs.sha256 }}\` |"
             if [ "${{ needs.build-freebsd.outputs.built }}" = "true" ]; then
               echo "| \`aeo-agent-freebsd-x86_64\` | \`${{ needs.build-freebsd.outputs.sha256 }}\` |"
             else
@@ -262,6 +333,8 @@ jobs:
           files: |
             dist/aeo-agent-linux-x86_64-static
             dist/aeo-agent-linux-x86_64-static.sha256
+            dist/aeo-agent-windows-x86_64.exe
+            dist/aeo-agent-windows-x86_64.exe.sha256
             dist/aeo-agent-freebsd-x86_64
             dist/aeo-agent-freebsd-x86_64.sha256
           fail_on_unmatched_files: false
@@ -275,6 +348,7 @@ jobs:
             | asset | guest | linkage |
             |---|---|---|
             | `aeo-agent-linux-x86_64-static` | any Linux (full OS, debian-slim, Alpine/musl, busybox) | STATIC — no runtime .so deps |
+            | `aeo-agent-windows-x86_64.exe` | Windows (Win11 bhyve guests; workload via WSL2+podman) | dynamic vs Windows system DLLs (always present) |
             | `aeo-agent-freebsd-x86_64` | FreeBSD (bhyve guests) | dynamic vs the base libc.so.7 + libthr.so.3 (always present in a FreeBSD userland) |
 
             SHA256s are printed in the run summary and in each `<asset>.sha256`.

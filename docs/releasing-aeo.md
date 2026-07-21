@@ -21,6 +21,7 @@ snippet never breaks, and you can roll back / bisect).
 | asset | guest it serves | linkage |
 |---|---|---|
 | `aeo-agent-linux-x86_64-static` | any Linux — full OS, debian-slim, Alpine/musl, busybox | **STATIC** (no runtime `.so` deps) |
+| `aeo-agent-windows-x86_64.exe` | Windows (Win11 bhyve guests; workload via WSL2+podman) | dynamic vs Windows system DLLs (always present) |
 | `aeo-agent-freebsd-x86_64` | FreeBSD (bhyve guests) | dynamic vs the base `libc.so.7` + `libthr.so.3` (always present in a FreeBSD userland) |
 
 Each asset ships a companion `<asset>.sha256`. The run summary prints a table of
@@ -58,8 +59,8 @@ tag creates an actual Release — there is never a rolling/overwritten asset.
 
 ## How the CI builds it (mechanics)
 
-Three jobs: `build-linux` + `build-freebsd` feed a `release` job that publishes
-whatever artifacts they produced.
+Three build jobs — `build-linux`, `build-windows`, `build-freebsd` — feed a
+`release` job that publishes whatever artifacts they produced.
 
 ### The runner has no prebuilt `ae` — it builds the toolchain from source
 
@@ -124,12 +125,17 @@ SHA256 in those consumers (the run summary prints the SHA to copy).
 The agent's targets are dictated by **where guests actually land**, not by what
 `ae` can cross-compile. Add an asset only for a (guest OS, arch) that aeo
 provisions *and* that the agent can function on, and keep the name honest with a
-`file`-based assert (as both existing jobs do).
+`file`-based assert (as every build job does).
 
 - **aarch64-linux** — wanted (ARM VMs / Pi / Graviton), but `ae --target` has no
   musl triple, so a static aarch64 asset isn't reachable by cross-compile today.
   Tracked in `asks/aarch64-agent-runproof-and-static.md` (native ARM build +
   run-proof needed before wiring a job).
-- **windows-x86_64** — the agent already imports `driver_windows`, but the agent
-  *body* can't yet do its job on Windows (no native-workload driver path). Ship
-  it only when that's real; a non-functional binary would be a lie.
+- **x86_64-macos** — the agent cross-builds and even runs + serves /health on
+  macOS, but aeo has NO macOS-guest substrate (no mac driver; nothing provisions
+  a macOS VM as a workload target). A fetchable agent for a guest type that
+  doesn't exist would be dead weight. Revisit only if a macOS substrate appears.
+- **windows-x86_64** — SHIPPED. The agent imports `driver_windows` and
+  platform()-dispatches the workload to WSL2+podman. Note the workload path
+  needs WSL2+podman IN the guest; the agent CORE (boot/contain/protocol/health)
+  runs regardless, which is the same bar the FreeBSD asset ships at.
