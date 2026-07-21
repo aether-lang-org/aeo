@@ -175,7 +175,10 @@ jobs:
         run: |
           git clone --depth 1 "$CROSSBUILD_REPO" "$HOME/aether-crossbuild"
           cd "$HOME/aether-crossbuild"
-          # zig is fetched by provision.sh's toolchain step if absent; ensure PATH.
+          # zig is the cross-compiler provision.sh links with — it does NOT
+          # auto-fetch it, so pull the pinned toolchain first (into ./toolchain/,
+          # the dir added to PATH below).
+          ./scripts/get-zig.sh
           ./scripts/fetch-freebsd-base.sh x86_64 15
           CB_LIBS="zlib pcre2 openssl" ./provision.sh x86_64-freebsd15
           echo "AETHER_SYSROOT=$HOME/aether-crossbuild/bases/x86_64-freebsd15" >> "$GITHUB_ENV"
