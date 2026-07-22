@@ -1,0 +1,167 @@
+// lib/driver_mac_exec — macOS "mac exec" backend: a node is a NATIVE macOS
+// PROCESS run directly on the host, optionally confined by sandbox-exec
+// (Seatbelt). macOS has no container primitive (see docs/research/
+// mac-exec-considered.md), so this is the honest mac-as-a-host substrate — the
+// peer of driver_bsd's host-native model, NOT "containers on mac".
+//
+// A jail is queryable by name (jls); a process is not — so we REMEMBER each
+// node's pid in a pidfile (/tmp/aeo-macexec-<node>.pid). up writes it, probe
+// reads it + checks liveness (kill -0), down reads it + signals then removes it.
+//
+//   up    — idempotent: alive -> no-op; else launch `cmd` detached (setsid-style
+//           via `sh -c '... & echo $! > pidfile'`), optionally under
+//           `sandbox-exec -f <profile>`. A Seatbelt DENIAL is NOT a death — it
+//           returns EPERM to the workload; the process keeps running (proven in
+//           the research doc), so confinement shapes what the node can do, it
+//           doesn't kill it.
+//   down  — kill the pid (TERM), remove the pidfile; absent == success.
+//   probe — pidfile's pid alive (kill -0)? optional health cmd exits 0?
+//
+// All argv assembly is pure builders (unit-testable without a mac); only
+// up/down/probe shell out via os.run_capture.
+
+import std.os (run_capture, platform)
+import std.list
+import std.string (string_length, string_contains)
+
+exports (
+    name, available,
+    up, down, probe, exec_capture,
+    pidfile_for, launch_script, probe_script, down_script
+)
+
+name() -> string {
+    return "mac_exec"
+}
+
+// This backend only makes sense on macOS. platform() is compile-time; a mac
+// build returns "darwin". (The agent gates on AEO_BOOT_KIND, so available() is
+// mostly for a runner-side preflight.)
+available() -> int {
+    if platform() == "darwin" {
+        return 1
+    }
+    return 0
+}
+
+// --- state: one pidfile per node ------------------------------------------
+pidfile_for(node: string) -> string {
+    return "/tmp/aeo-macexec-${node}.pid"
+}
+
+// --- pure script builders (the sh -c payloads; unit-testable) -------------
+
+// Launch: run `cmd` detached, write its pid to the pidfile. If `profile` is a
+// non-empty path, wrap the command in `sandbox-exec -f <profile>` (Seatbelt).
+// The subshell backgrounds the workload and records $! so probe/down can find
+// it. CRITICAL: the workload's stdin/stdout/stderr are ALL redirected to
+// /dev/null — otherwise the backgrounded process inherits run_capture's stdout
+// pipe and keeps it open, so run_capture blocks until the workload EXITS (it
+// hung the whole agent live before this). Redirecting detaches it cleanly so up
+// returns immediately.
+launch_script(node: string, cmd: string, profile: string) -> string {
+    pf = pidfile_for(node)
+    if string_length(profile) > 0 {
+        return "/usr/bin/sandbox-exec -f '${profile}' /bin/sh -c '${cmd}' </dev/null >/dev/null 2>&1 & echo $! > '${pf}'"
+    }
+    return "/bin/sh -c '${cmd}' </dev/null >/dev/null 2>&1 & echo $! > '${pf}'"
+}
+
+// Probe: pidfile exists AND its pid is alive (kill -0). Prints "up" or "down".
+probe_script(node: string) -> string {
+    pf = pidfile_for(node)
+    return "if [ -f '${pf}' ] && kill -0 \"$(cat '${pf}')\" 2>/dev/null; then echo up; else echo down; fi"
+}
+
+// Down: TERM the pid (best-effort), remove the pidfile. Idempotent.
+down_script(node: string) -> string {
+    pf = pidfile_for(node)
+    return "if [ -f '${pf}' ]; then kill -TERM \"$(cat '${pf}')\" 2>/dev/null; rm -f '${pf}'; fi; echo down"
+}
+
+// --- lifecycle (shell out) ------------------------------------------------
+
+// up(node, cmd, profile): launch the node's process. profile="" = unconfined;
+// else a Seatbelt .sb profile path. Returns "" on success, else an error.
+up(node: string, cmd: string, profile: string) -> string {
+    if probe(node, "") == 1 {
+        return ""                              // already running — idempotent
+    }
+    if string_length(cmd) == 0 {
+        return "aeo: mac_exec '${node}' has no cmd() to run"
+    }
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, launch_script(node, cmd, profile))
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    if err != "" {
+        return "aeo: mac_exec spawn failed for '${node}': ${err}"
+    }
+    // Confirm it actually came up (the pidfile is written + the pid is alive).
+    if probe(node, "") == 1 {
+        return ""
+    }
+    return "aeo: mac_exec '${node}' did not start (exit ${status}): ${out}"
+}
+
+// probe(node, health): 1 if the node's process is alive; if `health` is set,
+// also require that command to exit 0 (run as a plain macOS command).
+probe(node: string, health: string) -> int {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, probe_script(node))
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    if err != "" {
+        return 0
+    }
+    if string_contains(out, "up") == 0 {
+        return 0
+    }
+    if string_length(health) == 0 {
+        return 1
+    }
+    hav = list_new()
+    list_add(hav, "-c")
+    list_add(hav, health)
+    _ho, hstatus, herr = run_capture("/bin/sh", hav, null)
+    list_free(hav)
+    if herr != "" {
+        return 0
+    }
+    if hstatus == 0 {
+        return 1
+    }
+    return 0
+}
+
+// down(node): TERM the process, remove the pidfile. Absent == success.
+down(node: string) -> string {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, down_script(node))
+    _o, _s, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    if err != "" {
+        return "aeo: mac_exec down failed for '${node}': ${err}"
+    }
+    return ""
+}
+
+// exec_capture(node, cmd): the operability primitive — run `cmd` on the host
+// (mac exec nodes share the host, so this is just a host command). "" on failure.
+exec_capture(node: string, cmd: string) -> string {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, cmd)
+    out, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    if err != "" {
+        return ""
+    }
+    if status != 0 {
+        return ""
+    }
+    return out
+}
