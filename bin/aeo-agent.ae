@@ -36,6 +36,8 @@ import transport_http (send_command)
 import driver_linux
 import driver_windows
 import driver_wslc
+import driver_proxmox
+import compose
 import std.http (server_create, server_set_host, server_get, server_post,
                  server_start_background,
                  response_set_status, response_set_header, response_set_body,
@@ -308,6 +310,20 @@ _boot_node(node: string) -> string {
         println("aeo-agent: NOOP boot ${node} (AEO_BOOT_NOOP set)")
         return ""
     }
+    // PROXMOX SUBSTRATE: AEO_BOOT_KIND=proxmox_vm|proxmox_ct routes to the PVE
+    // API driver instead of a local container. This is the recursion payload for
+    // an agent RESIDENT ON a PVE host: bazzite's agent delegates to pve's agent,
+    // which drives the PVE API to make VMs/LXCs INSIDE pve. The driver reads its
+    // config from the compose model (aeo.cmp.*); _stamp_proxmox_cfg populates
+    // those keys from the AEO_PVE_* env the parent stamped.
+    kind = _env_or("AEO_BOOT_KIND", "")
+    if string_equals(kind, "proxmox_vm") == 1 {
+        return _boot_proxmox(node, "proxmox_vm")
+    }
+    if string_equals(kind, "proxmox_ct") == 1 {
+        return _boot_proxmox(node, "proxmox_ct")
+    }
+
     img = _env_or("AEO_BOOT_IMAGE", "docker.io/library/busybox:latest")
     cmd = _env_or("AEO_BOOT_CMD", "sleep 600")
     // SUBSTRATE SELECTION: on Windows the workload is a Linux container. Two
@@ -325,6 +341,51 @@ _boot_node(node: string) -> string {
         return driver_windows.up(node, distro, img, cmd, 0, "", "", "")
     }
     return driver_linux.up(node, img, cmd, 0, "")
+}
+
+// Boot a PVE node (VM or LXC) FROM a resident agent, via the PVE API. This is
+// the recursion payload that makes agent(host)->agent(pve)->{VMs,LXCs in pve}
+// real: driver_proxmox reads its config from the compose model (aeo.cmp.*), so
+// the agent stamps those keys from the AEO_PVE_* env the parent couriered, then
+// calls the same up() the runner uses. kind is "proxmox_vm" or "proxmox_ct".
+_boot_proxmox(node: string, kind: string) -> string {
+    _stamp_pve_cfg(node, kind)
+    return driver_proxmox.up(node)
+}
+
+// Stamp the compose model keys driver_proxmox reads (aeo.cmp.*) from the AEO_PVE_*
+// env the parent couriered. Re-stamped by boot/probe/down because each HTTP
+// dispatch is stateless — the driver needs host/node/token present every call.
+// "1" if this node is a PVE kind (so probe/down route to driver_proxmox).
+_stamp_pve_cfg(node: string, kind: string) -> int {
+    if string_length(kind) == 0 {
+        return 0
+    }
+    // Required for both VM and CT: which PVE, which node, the API token, storage.
+    config.put("aeo.cmp.kind.${node}", kind)
+    config.put("aeo.cmp.pvehost.${node}", _env_or("AEO_PVE_HOST", ""))
+    config.put("aeo.cmp.pvenode.${node}", _env_or("AEO_PVE_NODE", ""))
+    config.put("aeo.cmp.pvetoken.${node}", _env_or("AEO_PVE_TOKEN", ""))
+    config.put("aeo.cmp.pvestorage.${node}", _env_or("AEO_PVE_STORAGE", "local-lvm"))
+    config.put("aeo.cmp.pvebridge.${node}", _env_or("AEO_PVE_BRIDGE", "vmbr0"))
+    config.put("aeo.cmp.cpus.${node}", _env_or("AEO_PVE_CPUS", "1"))
+    config.put("aeo.cmp.memory.${node}", _env_or("AEO_PVE_MEMORY", "512M"))
+    if string_equals(kind, "proxmox_ct") == 1 {
+        // LXC: an OS template + rootfs. rootfs MUST be "<storage>:<GiB>" (a bare
+        // number is read by PVE as a filesystem path and rejected "only root can
+        // pass arbitrary filesystem paths"). Only stamp it when the operator gave
+        // the full form; otherwise leave empty so the driver defaults it to
+        // "<storage>:4".
+        config.put("aeo.cmp.pveostemplate.${node}", _env_or("AEO_PVE_OSTEMPLATE", ""))
+        rootfs = _env_or("AEO_PVE_ROOTFS", "")
+        if string_contains(rootfs, ":") == 1 {
+            config.put("aeo.cmp.pverootfs.${node}", rootfs)
+        }
+    } else {
+        // VM: clone this template (must be a member of the token's pool).
+        config.put("aeo.cmp.pvetemplate.${node}", _env_or("AEO_PVE_TEMPLATE", ""))
+    }
+    return 1
 }
 
 // 1 if this agent runs on Windows (compile-time platform). The seam that routes
@@ -361,6 +422,10 @@ _win_backend() -> string {
 // Leaf probe/down, substrate-selected like _boot_node so a node's whole lifecycle
 // (boot/probe/halt) uses ONE arm. On Windows both go through driver_windows (WSL).
 _probe_node(node: string) -> int {
+    pk = _env_or("AEO_BOOT_KIND", "")
+    if _stamp_pve_cfg(node, pk) == 1 {
+        return driver_proxmox.probe(node)
+    }
     if _on_windows() == 1 {
         if string_equals(_win_backend(), "wslc") == 1 {
             return driver_wslc.probe(node, "")
@@ -370,6 +435,10 @@ _probe_node(node: string) -> int {
     return driver_linux.probe(node, "", "")
 }
 _down_node(node: string) -> string {
+    pk = _env_or("AEO_BOOT_KIND", "")
+    if _stamp_pve_cfg(node, pk) == 1 {
+        return driver_proxmox.down(node)
+    }
     if _on_windows() == 1 {
         if string_equals(_win_backend(), "wslc") == 1 {
             return driver_wslc.down(node)
