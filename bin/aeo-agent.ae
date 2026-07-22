@@ -37,6 +37,7 @@ import driver_linux
 import driver_windows
 import driver_wslc
 import driver_proxmox
+import driver_bsd
 import compose
 import std.http (server_create, server_set_host, server_get, server_post,
                  server_start_background,
@@ -323,6 +324,19 @@ _boot_node(node: string) -> string {
     if string_equals(kind, "proxmox_ct") == 1 {
         return _boot_proxmox(node, "proxmox_ct")
     }
+    // JAIL SUBSTRATE: AEO_BOOT_KIND=jail routes to driver_bsd — a FreeBSD jail
+    // over a ZFS dataset, created via self-sudo `jail -c`. The BSD peer of the
+    // proxmox path: an agent RESIDENT ON a FreeBSD host makes jails locally.
+    // AEO_JAIL_DATASET (zfs dataset; driver derives the root mountpoint) or
+    // AEO_JAIL_ROOT (an explicit populated root); AEO_JAIL_IP / AEO_JAIL_CMD
+    // optional.
+    if string_equals(kind, "jail") == 1 {
+        return driver_bsd.up(node,
+            _env_or("AEO_JAIL_DATASET", ""),
+            _env_or("AEO_JAIL_ROOT", ""),
+            _env_or("AEO_JAIL_IP", ""),
+            _env_or("AEO_JAIL_CMD", ""))
+    }
 
     img = _env_or("AEO_BOOT_IMAGE", "docker.io/library/busybox:latest")
     cmd = _env_or("AEO_BOOT_CMD", "sleep 600")
@@ -358,8 +372,12 @@ _boot_proxmox(node: string, kind: string) -> string {
 // dispatch is stateless — the driver needs host/node/token present every call.
 // "1" if this node is a PVE kind (so probe/down route to driver_proxmox).
 _stamp_pve_cfg(node: string, kind: string) -> int {
-    if string_length(kind) == 0 {
-        return 0
+    // ONLY the proxmox kinds — a non-proxmox kind (e.g. "jail") must return 0 so
+    // probe/down fall through to their own driver, not driver_proxmox.
+    if string_equals(kind, "proxmox_vm") == 0 {
+        if string_equals(kind, "proxmox_ct") == 0 {
+            return 0
+        }
     }
     // Required for both VM and CT: which PVE, which node, the API token, storage.
     config.put("aeo.cmp.kind.${node}", kind)
@@ -426,6 +444,9 @@ _probe_node(node: string) -> int {
     if _stamp_pve_cfg(node, pk) == 1 {
         return driver_proxmox.probe(node)
     }
+    if string_equals(pk, "jail") == 1 {
+        return driver_bsd.probe(node, "", "")
+    }
     if _on_windows() == 1 {
         if string_equals(_win_backend(), "wslc") == 1 {
             return driver_wslc.probe(node, "")
@@ -438,6 +459,9 @@ _down_node(node: string) -> string {
     pk = _env_or("AEO_BOOT_KIND", "")
     if _stamp_pve_cfg(node, pk) == 1 {
         return driver_proxmox.down(node)
+    }
+    if string_equals(pk, "jail") == 1 {
+        return driver_bsd.down(node)
     }
     if _on_windows() == 1 {
         if string_equals(_win_backend(), "wslc") == 1 {
