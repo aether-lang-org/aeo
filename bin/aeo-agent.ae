@@ -28,13 +28,14 @@ import std.os
 import std.os (run_capture, platform)
 import std.list
 import std.config
-import std.string (string_length, string_char_at, string_contains)
+import std.string (string_length, string_char_at, string_contains, string_equals)
 import protocol
 import agent_auth
 import transport_file (ensure_dirs, inbox_dir, outbox_dir, put, recv_one)
 import transport_http (send_command)
 import driver_linux
 import driver_windows
+import driver_wslc
 import std.http (server_create, server_set_host, server_get, server_post,
                  server_start_background,
                  response_set_status, response_set_header, response_set_body,
@@ -309,13 +310,17 @@ _boot_node(node: string) -> string {
     }
     img = _env_or("AEO_BOOT_IMAGE", "docker.io/library/busybox:latest")
     cmd = _env_or("AEO_BOOT_CMD", "sleep 600")
-    // SUBSTRATE SELECTION: on Windows the workload is a Linux container run through
-    // WSL2 (driver_windows: `wsl -d <distro> -- podman ...`); on Linux it's podman
-    // directly (driver_linux). Same container semantics either way — the agent
-    // just picks the arm that matches the host it was compiled for. platform() is
-    // compile-time, so the Windows agent .exe takes the WSL arm with no runtime
-    // branch cost. AEO_WSL_DISTRO selects the distro ("" = WSL's default distro).
+    // SUBSTRATE SELECTION: on Windows the workload is a Linux container. Two
+    // Windows backends (see _win_backend): "wslc" = Microsoft's native WSL
+    // Containers runtime (`wslc run ...`, no podman/distro), "windows" = podman
+    // inside a WSL2 distro (`wsl -d <distro> -- podman ...`). On Linux it's
+    // podman directly (driver_linux). Same container semantics; the agent picks
+    // the arm matching the host it was compiled for. AEO_WSL_DISTRO selects the
+    // distro for the podman arm ("" = WSL default).
     if _on_windows() == 1 {
+        if string_equals(_win_backend(), "wslc") == 1 {
+            return driver_wslc.up(node, img, cmd, 0, "")
+        }
         distro = _env_or("AEO_WSL_DISTRO", "Ubuntu")
         return driver_windows.up(node, distro, img, cmd, 0, "", "", "")
     }
@@ -323,7 +328,7 @@ _boot_node(node: string) -> string {
 }
 
 // 1 if this agent runs on Windows (compile-time platform). The seam that routes
-// child bring-up to driver_windows (podman-through-WSL2) instead of driver_linux.
+// child bring-up to a Windows container backend instead of driver_linux.
 _on_windows() -> int {
     if platform() == "windows" {
         return 1
@@ -331,16 +336,44 @@ _on_windows() -> int {
     return 0
 }
 
+// Which Windows container backend to use: "wslc" or "windows" (podman-in-WSL).
+// AEO_WIN_BACKEND forces one explicitly; otherwise PREFER wslc when Microsoft's
+// native WSL Containers runtime is installed (`wslc.exe`), since it needs no
+// bring-your-own podman AND gets working container networking that
+// podman-rootless-in-WSL often lacks (proven on winbaz: podman arm NET_FAIL,
+// wslc arm NET_OK). Falls back to the podman-in-WSL arm when wslc is absent.
+_win_backend() -> string {
+    forced = _env_or("AEO_WIN_BACKEND", "")
+    if string_equals(forced, "wslc") == 1 {
+        return "wslc"
+    }
+    if string_equals(forced, "windows") == 1 {
+        return "windows"
+    }
+    if string_length(forced) == 0 {
+        if driver_wslc.available() == 1 {
+            return "wslc"
+        }
+    }
+    return "windows"
+}
+
 // Leaf probe/down, substrate-selected like _boot_node so a node's whole lifecycle
 // (boot/probe/halt) uses ONE arm. On Windows both go through driver_windows (WSL).
 _probe_node(node: string) -> int {
     if _on_windows() == 1 {
+        if string_equals(_win_backend(), "wslc") == 1 {
+            return driver_wslc.probe(node, "")
+        }
         return driver_windows.probe(node, _env_or("AEO_WSL_DISTRO", "Ubuntu"), "")
     }
     return driver_linux.probe(node, "", "")
 }
 _down_node(node: string) -> string {
     if _on_windows() == 1 {
+        if string_equals(_win_backend(), "wslc") == 1 {
+            return driver_wslc.down(node)
+        }
         return driver_windows.down(node, _env_or("AEO_WSL_DISTRO", "Ubuntu"))
     }
     return driver_linux.down(node, "")
