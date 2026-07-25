@@ -39,6 +39,7 @@ import driver_wslc
 import driver_proxmox
 import driver_bsd
 import driver_bwrap
+import driver_vm
 import compose
 import std.http (server_create, server_set_host, server_get, server_post,
                  server_start_background,
@@ -351,6 +352,19 @@ _boot_node(node: string) -> string {
             _env_or("AEO_BOOT_CMD", "sleep 600"),
             "")
     }
+    // VM SUBSTRATE: AEO_BOOT_KIND=vm routes to driver_vm's kvm arm — a real
+    // hardware-virt VM (qemu/KVM), arch-aware (x86_64 or aarch64; proven on a Pi
+    // 5). The local-KVM peer of the proxmox arm: an agent RESIDENT ON a
+    // KVM-capable host boots VMs locally, couriering a nested agent into each via
+    // a NoCloud seed (driver reads AEO_AGENT_PATH/AEO_AGENT_BIN/AEO_TOKEN itself).
+    // AEO_VM_IMAGE = the disk image; AEO_VM_CPUS/AEO_VM_MEM size it.
+    if string_equals(kind, "vm") == 1 {
+        return driver_vm.up("kvm", node,
+            _env_or("AEO_VM_IMAGE", ""),
+            _atoi(_env_or("AEO_VM_CPUS", "2")),
+            _env_or("AEO_VM_MEM", "1024"),
+            "", "")
+    }
 
     img = _env_or("AEO_BOOT_IMAGE", "docker.io/library/busybox:latest")
     cmd = _env_or("AEO_BOOT_CMD", "sleep 600")
@@ -464,6 +478,9 @@ _probe_node(node: string) -> int {
     if string_equals(pk, "bwrap") == 1 {
         return driver_bwrap.probe(node, "", "")
     }
+    if string_equals(pk, "vm") == 1 {
+        return driver_vm.probe("kvm", node, "")
+    }
     if _on_windows() == 1 {
         if string_equals(_win_backend(), "wslc") == 1 {
             return driver_wslc.probe(node, "")
@@ -482,6 +499,9 @@ _down_node(node: string) -> string {
     }
     if string_equals(pk, "bwrap") == 1 {
         return driver_bwrap.down(node)
+    }
+    if string_equals(pk, "vm") == 1 {
+        return driver_vm.down("kvm", node)
     }
     if _on_windows() == 1 {
         if string_equals(_win_backend(), "wslc") == 1 {

@@ -986,7 +986,7 @@ bhyve_realize_cold(builder_vm: string, builder_ip: string, install_csv: string, 
 _guest_ssh_script(ip: string, script: string) -> string {
     av = list_new()
     list_add(av, "-c")
-    list_add(av, "ssh -i ${_guest_key()} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 ${_guest_user()}@${ip} ${_shq(script)}")
+    list_add(av, "ssh -i ${_guest_key()} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 ${_guest_user()}@${ip} ${_shquote(script)}")
     out, status, err = run_capture("/bin/sh", av, null)
     list_free(av)
     if status != 0 {
