@@ -26,8 +26,10 @@
 # busybox (all four proven live). The agent needs no runtime NSS/DNS from libc
 # (it binds IP literals and shells to curl), so the static-glibc getaddrinfo
 # caveat doesn't apply. The build step ASSERTS arch+static so the name can't
-# lie. An arm64 guest needs its own matching asset (aeo-agent-linux-aarch64-
-# static) — a build-matrix follow-up.
+# lie. The arm64 guest gets its own matching STATIC asset
+# (aeo-agent-linux-aarch64-static), built NATIVE on an arm64 runner — see
+# build-linux-arm64 for why linux-arm64 follows the native-static rule, not the
+# zig-cross rule the freebsd/windows guest-OS assets use.
 
 name: release-aeo-agent
 
@@ -45,15 +47,20 @@ on:
 permissions:
   contents: write        # create the release + upload the asset
 
-# THREE build jobs feed one release job:
-#   build-linux    — native x86_64, STATIC (gcc -static). The load-bearing asset.
-#   build-freebsd  — x86_64 FreeBSD, CROSS-compiled via zig. Serves bhyve guests.
-#                    Self-gates on the ae FreeBSD-cross pthread fix (see there).
-#   build-windows  — x86_64 Windows, CROSS-compiled via zig. Serves Win11 guests
-#                    (the agent driver_windows path: workload via WSL2+podman).
-#                    No sysroot/base/gate needed (Tier-A + plaintext agent).
-#   All three PROVEN end-to-end: cross-built on Linux, run on a real box of that
-#   OS and serve /health=ok (FreeBSD 15 box, Win11 VM).
+# FOUR build jobs feed one release job:
+#   build-linux       — native x86_64, STATIC (gcc -static). The load-bearing asset.
+#   build-linux-arm64 — native aarch64 on an arm64 runner, STATIC (gcc -static).
+#                       Same static rule as build-linux (couriered into containers);
+#                       gates on the ae cross-crypto HMAC fix. NOT zig-cross — see
+#                       the job header for why linux-arm64 is native-static.
+#   build-freebsd     — x86_64 FreeBSD, CROSS-compiled via zig. Serves bhyve guests.
+#                       Self-gates on the ae FreeBSD-cross pthread fix (see there).
+#   build-windows     — x86_64 Windows, CROSS-compiled via zig. Serves Win11 guests
+#                       (the agent driver_windows path: workload via WSL2+podman).
+#                       No sysroot/base/gate needed (Tier-A + plaintext agent).
+#   The cross assets run in a FULL guest OS (dynamic ok); the two LINUX assets are
+#   STATIC because they're couriered into stripped containers (the exit-127 axis).
+#   All PROVEN end-to-end on a real box of that OS/arch (FreeBSD 15, Win11, Pi 5).
 # The release job downloads every produced artifact and publishes them one tag.
 
 jobs:
@@ -286,8 +293,108 @@ jobs:
             aeo-agent-windows-x86_64.exe.sha256
           if-no-files-found: error
 
+  build-linux-arm64:
+    # arm64 (aarch64) Linux, NATIVE-STATIC on a GitHub arm64 runner — NOT
+    # cross-via-zig like the freebsd/windows jobs. Two reasons this asset must
+    # follow the LINUX rule (native-static) and not the CROSS rule (zig-dynamic):
+    #
+    #   1. STATIC is load-bearing for the LINUX asset (both arches). The linux
+    #      agent is the one couriered INTO containers in the recursive chain
+    #      (debian-slim, musl Alpine, busybox). A dynamic build grows a
+    #      libnghttp2.so.14 dep those bases don't ship -> exit 127, chain breaks
+    #      (the exact trap the x86_64 static assertion guards). freebsd/windows are
+    #      dynamic because they run in a FULL guest OS, not a stripped container —
+    #      that exemption does NOT extend to linux-arm64.
+    #   2. `ae build --target=aarch64-linux` yields a DYNAMIC binary and cannot go
+    #      static via zig today (the ssl/crypto/z/nghttp2/pcre2 archives aren't
+    #      staged for a static aarch64 link). Native gcc -static on an arm64 runner
+    #      is the working static path — same as build-linux for x86_64.
+    #
+    # GATED on the ae toolchain carrying the cross-crypto HMAC fix (aether #1271 /
+    # 141967f1). Before it, std.cryptography's HMAC stubbed to empty on any build
+    # the zig path touched, and aeo's now-fail-CLOSED verifier makes such an agent
+    # INERT (rejects every token). Native gcc -static with libssl-dev present links
+    # a real HMAC, but the gate is belt-and-braces so a stale toolchain can't ship a
+    # crypto-blind arm64 asset. Set AEO_ARM64_MIN_AE to the first released ae with
+    # the fix; the job SKIPS cleanly on older toolchains rather than failing a tag.
+    runs-on: ubuntu-24.04-arm
+    outputs:
+      sha256: ${{ steps.sum.outputs.sha256 }}
+      built: ${{ steps.build.outputs.built }}
+    env:
+      # First ae version carrying the cross-crypto HMAC fix (aether #1271 /
+      # 141967f1). The fix merged AFTER 0.442.0 was cut but before any newer tag,
+      # so 0.443.0 is the EXPECTED first release to carry it — a provisional guess
+      # until that version is actually cut. TODO: set to the real released version,
+      # then this gate self-clears. (Belt-and-braces: a native gcc -static build
+      # with libssl-dev present links a real HMAC regardless, but the gate stops a
+      # pre-fix toolchain from ever shipping a crypto-blind => inert arm64 asset.)
+      AEO_ARM64_MIN_AE: '0.443.0'
+    steps:
+      - name: Checkout aeo
+        uses: actions/checkout@v4
+
+      - name: Install build prerequisites
+        # libssl-dev + libnghttp2-dev provide the STATIC archives (libssl.a,
+        # libcrypto.a, libnghttp2.a) the -static link needs — same as build-linux.
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq build-essential curl tar libssl-dev libnghttp2-dev
+
+      - name: Install the Aether toolchain (ae)
+        run: |
+          curl -sSL https://raw.githubusercontent.com/aether-lang-org/aether/main/get.sh \
+            | AETHER_REF="${{ github.event.inputs.ref }}" PREFIX="$HOME/.local" sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Gate on ae version (skip cleanly if the cross-crypto HMAC fix isn't in yet)
+        id: gate
+        run: |
+          have=$(ae --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+          need="$AEO_ARM64_MIN_AE"
+          low=$(printf '%s\n%s\n' "$have" "$need" | sort -V | head -1)
+          if [ "$have" != "$need" ] && [ "$low" = "$have" ]; then
+            echo "ae $have < $need — cross-crypto HMAC fix (aether #1271) not in this toolchain; skipping arm64 asset (would ship crypto-blind => inert)."
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "ae $have >= $need — building arm64 asset."
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build aeo-agent (linux, aarch64, static)
+        id: build
+        if: steps.gate.outputs.ok == 'true'
+        # Native gcc -static on the arm64 runner — mirrors build-linux exactly. The
+        # runner IS aarch64, so this is a native build, not a cross (no zig).
+        run: |
+          AE_CC="gcc -static" ae build bin/aeo-agent.ae -o aeo-agent-linux-aarch64-static --lib lib
+          file aeo-agent-linux-aarch64-static
+          # ASSERT the name is honest: aarch64 AND statically linked — the same two
+          # lies the x86_64 job guards, on arm64.
+          file aeo-agent-linux-aarch64-static | grep -q 'ELF 64-bit.*aarch64' \
+            || { echo "not an aarch64 ELF — asset name would be a lie"; exit 1; }
+          file aeo-agent-linux-aarch64-static | grep -q 'statically linked' \
+            || { echo "not statically linked — asset name would be a lie (the exit-127 trap returns)"; exit 1; }
+          chmod +x aeo-agent-linux-aarch64-static
+          echo "built=true" >> "$GITHUB_OUTPUT"
+
+      - name: Checksum
+        id: sum
+        if: steps.gate.outputs.ok == 'true'
+        run: |
+          sha256sum aeo-agent-linux-aarch64-static | tee aeo-agent-linux-aarch64-static.sha256
+          echo "sha256=$(cut -d' ' -f1 aeo-agent-linux-aarch64-static.sha256)" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        if: steps.gate.outputs.ok == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: aeo-agent-linux-aarch64-static
+          path: |
+            aeo-agent-linux-aarch64-static
+            aeo-agent-linux-aarch64-static.sha256
+          if-no-files-found: error
+
   release:
-    needs: [build-linux, build-freebsd, build-windows]
+    needs: [build-linux, build-linux-arm64, build-freebsd, build-windows]
     runs-on: ubuntu-latest
     steps:
       - name: Download all artifacts
@@ -311,6 +418,12 @@ jobs:
             echo "|---|---|"
             echo "| \`aeo-agent-linux-x86_64-static\` | \`${{ needs.build-linux.outputs.sha256 }}\` |"
             echo "| \`aeo-agent-windows-x86_64.exe\` | \`${{ needs.build-windows.outputs.sha256 }}\` |"
+            if [ "${{ needs.build-linux-arm64.outputs.built }}" = "true" ]; then
+              echo "| \`aeo-agent-linux-aarch64-static\` | \`${{ needs.build-linux-arm64.outputs.sha256 }}\` |"
+            else
+              echo ""
+              echo "> linux-aarch64 asset SKIPPED — the ae toolchain predates the cross-crypto HMAC fix (see build-linux-arm64 gate)."
+            fi
             if [ "${{ needs.build-freebsd.outputs.built }}" = "true" ]; then
               echo "| \`aeo-agent-freebsd-x86_64\` | \`${{ needs.build-freebsd.outputs.sha256 }}\` |"
             else
@@ -333,6 +446,8 @@ jobs:
           files: |
             dist/aeo-agent-linux-x86_64-static
             dist/aeo-agent-linux-x86_64-static.sha256
+            dist/aeo-agent-linux-aarch64-static
+            dist/aeo-agent-linux-aarch64-static.sha256
             dist/aeo-agent-windows-x86_64.exe
             dist/aeo-agent-windows-x86_64.exe.sha256
             dist/aeo-agent-freebsd-x86_64
@@ -347,7 +462,8 @@ jobs:
 
             | asset | guest | linkage |
             |---|---|---|
-            | `aeo-agent-linux-x86_64-static` | any Linux (full OS, debian-slim, Alpine/musl, busybox) | STATIC — no runtime .so deps |
+            | `aeo-agent-linux-x86_64-static` | any x86_64 Linux (full OS, debian-slim, Alpine/musl, busybox) | STATIC — no runtime .so deps |
+            | `aeo-agent-linux-aarch64-static` | any arm64 Linux (full OS, debian-slim, Alpine/musl, busybox; Raspberry Pi 5, arm64 guests) | STATIC — no runtime .so deps |
             | `aeo-agent-windows-x86_64.exe` | Windows (Win11 bhyve guests; workload via WSL2+podman) | dynamic vs Windows system DLLs (always present) |
             | `aeo-agent-freebsd-x86_64` | FreeBSD (bhyve guests) | dynamic vs the base libc.so.7 + libthr.so.3 (always present in a FreeBSD userland) |
 
