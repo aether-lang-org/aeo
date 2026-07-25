@@ -10,6 +10,15 @@
 // `<image>/vmlinux` and `<image>/rootfs.ext4` — so one image() field carries the
 // whole microVM. cpus()/memory() size it.
 //
+// The guest kernel MUST have virtio-mmio built in. A stock host kernel often does
+// NOT (e.g. Raspberry Pi OS ships CONFIG_VIRTIO unset) — such a kernel boots under
+// firecracker but panics at "Cannot open root device /dev/vda" because it can't
+// see the virtio-blk rootfs. up() therefore preflights the bundle's vmlinux and,
+// when it's absent, fails LOUD with a hint: kata-static installs a firecracker-
+// class virtio kernel (its "dragonball" Image) that a bundle can stage as vmlinux
+// (proven on a Pi 5). We never boot a substitute kernel implicitly — the operator
+// names the bundle; we only point at the ready-made fix.
+//
 //   up    — write a Firecracker config.json (boot-source=vmlinux, drive=rootfs,
 //           machine-config=vcpus/mem) and launch `firecracker --api-sock SOCK
 //           --config-file CONFIG` as a PERSISTENT transient unit via
@@ -35,7 +44,7 @@
 // /dev/kvm). A live BOOT needs a KVM host (Bazzite); Docker-on-macOS has no
 // /dev/kvm, so the boot itself is proved on-box.
 
-import std.os (run_capture, os_which)
+import std.os (run_capture, os_which, getenv)
 import std.list
 import std.string (string_length, string_char_at, string_from_char, string_from_int, string_get_int, string_substring)
 import std.fs (write_atomic)
@@ -149,6 +158,21 @@ up(res_name: string, image: string, cpus: int, mem: string) -> string {
         return "aeo: firecracker '${res_name}' has no image() set (want a bundle dir with vmlinux + rootfs.ext4)"
     }
     bin = os_which("firecracker")
+    // A microVM guest kernel must have virtio-mmio built in. Many host OSes ship a
+    // kernel with virtio DISABLED (e.g. Raspberry Pi OS: CONFIG_VIRTIO unset) — that
+    // host kernel CANNOT be a firecracker guest kernel, and a bundle assembled from
+    // it boots but panics at "Cannot open root device /dev/vda" (no virtio-blk).
+    // We don't guess a substitute (booting a kernel the operator never named is
+    // magic), but when the bundle has no vmlinux we fail LOUD and point at the
+    // ready-made fix: kata-static ships a firecracker-class virtio kernel
+    // (dragonball) that a bundle can symlink/copy as its vmlinux.
+    if _file_missing(kernel_path(image)) == 1 {
+        db = _kata_dragonball_kernel()
+        if string_length(db) > 0 {
+            return "aeo: firecracker '${res_name}' bundle has no vmlinux at ${kernel_path(image)}. The host kernel likely lacks virtio-mmio (can't be a guest kernel). A ready-made virtio guest kernel is installed: ${db} — stage it, e.g. `cp ${db} ${kernel_path(image)}` (or symlink it)."
+        }
+        return "aeo: firecracker '${res_name}' bundle has no vmlinux at ${kernel_path(image)} (want a virtio-enabled guest kernel Image + rootfs.ext4). If the host kernel lacks virtio-mmio, install kata-containers for its dragonball guest kernel and stage that as the bundle's vmlinux."
+    }
     vc = cpus
     if vc <= 0 {
         vc = 1
@@ -338,6 +362,47 @@ probe(res_name: string, health: string, _unused: string) -> int {
 // exec_capture — NOT yet supported for microVMs (no host-side exec primitive;
 // reaching the guest needs ssh/vsock, a follow-up). Returns "".
 exec_capture(res_name: string, cmd: string) -> string {
+    return ""
+}
+
+// 1 if `path` does NOT exist (test -e). Used to preflight the bundle's vmlinux.
+_file_missing(path: string) -> int {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "[ -e ${_shq(path)} ]")
+    _o, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    if err != "" {
+        return 0                          // can't tell -> don't cry wolf
+    }
+    if status == 0 {
+        return 0                          // exists
+    }
+    return 1                              // absent
+}
+
+// Locate an installed kata-static dragonball guest kernel — a firecracker-class,
+// virtio-mmio-enabled Image, so it works as a bundle's vmlinux on a host whose
+// own kernel lacks virtio (proven on a Pi 5). AEO_FC_KATA_KERNEL overrides. Else
+// probe the two standard kata roots for the version-STABLE symlink (so we don't
+// hardcode a kernel version). Returns "" if none found (the caller then gives the
+// generic hint). This path is only ever used to build a HINT string — the driver
+// never boots it implicitly.
+_kata_dragonball_kernel() -> string {
+    e = getenv("AEO_FC_KATA_KERNEL")
+    if string_length(e) > 0 {
+        if _file_missing(e) == 0 {
+            return e
+        }
+    }
+    c1 = "/opt/kata/share/kata-containers/vmlinux-dragonball-experimental.container"
+    if _file_missing(c1) == 0 {
+        return c1
+    }
+    c2 = "/usr/share/kata-containers/vmlinux-dragonball-experimental.container"
+    if _file_missing(c2) == 0 {
+        return c2
+    }
     return ""
 }
 
