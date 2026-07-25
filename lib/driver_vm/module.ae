@@ -30,7 +30,7 @@
 
 import std.os (run_capture, os_which, getenv)
 import std.list
-import std.string (string_length, string_char_at, string_substring, string_contains, string_from_char, string_index_of)
+import std.string (string_length, string_char_at, string_substring, string_contains, string_from_char, string_index_of, string_equals)
 import secrets
 import death (unit_death_line)
 
@@ -38,7 +38,7 @@ exports (
     name,
     up, bhyve_up, guest_container_up, agent_delegate, agent_delegate_at, agent_delegate_fire, agent_status, agent_status_at, build_agent_seed, exec_capture, down, probe,
     show_death_argv, death_state, guest_death_state, agent_death_at, agent_death_line, bhyve_death_state, bhyve_death_from_log, qemu_argv_shared,
-    bhyve_argv, qemu_argv, bhyvectl_destroy_argv,
+    bhyve_argv, qemu_argv, qemu_argv_arch, bhyvectl_destroy_argv,
     pidfile_for, bootrom_path
 )
 
@@ -117,8 +117,87 @@ qemu_argv(res_name: string, image: string, cpus: int, mem: string, tap: string, 
 // the guest cannot remount its way past it. security_model=none maps guest
 // access to the qemu process's own uid (right for rootless qemu: guest root
 // writes land as the operator's files, no privilege gained).
+// Canonical aarch64 UEFI firmware (Debian/Ubuntu edk2 package qemu-efi-aarch64).
+// AEO_AAVMF_CODE overrides. The CODE half is read-only; the VARS half is a
+// per-VM WRITABLE copy (edk2 persists boot vars there), staged by up() at a
+// deterministic path so probe/down are stateless.
+_aavmf_code() -> string {
+    o = getenv("AEO_AAVMF_CODE")
+    if string_length(o) > 0 {
+        return o
+    }
+    return "/usr/share/AAVMF/AAVMF_CODE.fd"
+}
+_aavmf_vars_template() -> string {
+    o = getenv("AEO_AAVMF_VARS")
+    if string_length(o) > 0 {
+        return o
+    }
+    return "/usr/share/AAVMF/AAVMF_VARS.fd"
+}
+// Per-VM writable UEFI varstore path (a copy of the vars template).
+_aavmf_vars_for(res_name: string) -> string {
+    return "/tmp/aeo-aavmf-vars-${res_name}.fd"
+}
+// Copy the vars template to the per-VM writable varstore. "" on success, else an
+// error string. Idempotent-safe: an existing varstore (a re-up of the same VM)
+// is left as-is so its persisted boot vars survive.
+_stage_aavmf_vars(res_name: string) -> string {
+    dst = _aavmf_vars_for(res_name)
+    av = list_new()
+    list_add(av, "-c")
+    // -n: don't clobber an existing per-VM varstore. Fall back to a blank 64M
+    // pflash if the template is absent (edk2 still initialises it on first boot).
+    src = _aavmf_vars_template()
+    list_add(av, "if [ ! -f '${dst}' ]; then if [ -f '${src}' ]; then cp '${src}' '${dst}'; else truncate -s 64M '${dst}'; fi; fi")
+    _o, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    if err != "" {
+        return "aeo: kvm could not stage UEFI varstore for '${res_name}': ${err}"
+    }
+    if status != 0 {
+        return "aeo: kvm UEFI varstore staging exited ${status} for '${res_name}'"
+    }
+    return ""
+}
+
+// Arch-aware qemu argv. x86_64 = the historical path (default machine + BIOS,
+// no firmware args). aarch64 = prepend `-M virt -cpu host` and the UEFI pflash
+// pair (CODE read-only + a per-VM writable VARS), THEN the shared body (disk,
+// seed, nic, virtfs). Proven live on a Pi 5: an arm64 cloud image boots to
+// cloud-init under KVM with exactly these deltas.
+qemu_argv_arch(arch: string, res_name: string, image: string, cpus: int, mem: string, tap: string, pidfile: string, shares: string) -> ptr {
+    if string_equals(arch, "aarch64") == 0 {
+        return qemu_argv_shared(res_name, image, cpus, mem, tap, pidfile, shares)
+    }
+    // aarch64: machine + cpu + UEFI pflash, prepended to the shared body. The
+    // shared args are appended INTO this same list (one owner) — do NOT build a
+    // second list and splice+free it: list_free would release the owned string
+    // elements the spliced pointers still reference (a use-after-free that
+    // corrupted -smp/-drive args to garbage; caught live on the Pi).
+    av = list_new()
+    list_add(av, "-M")
+    list_add(av, "virt")
+    list_add(av, "-cpu")
+    list_add(av, "host")
+    list_add(av, "-drive")
+    list_add(av, "if=pflash,format=raw,file=${_aavmf_code()},readonly=on")
+    list_add(av, "-drive")
+    list_add(av, "if=pflash,format=raw,file=${_aavmf_vars_for(res_name)}")
+    _append_qemu_shared(av, res_name, image, cpus, mem, tap, pidfile, shares)
+    return av
+}
+
 qemu_argv_shared(res_name: string, image: string, cpus: int, mem: string, tap: string, pidfile: string, shares: string) -> ptr {
     av = list_new()
+    _append_qemu_shared(av, res_name, image, cpus, mem, tap, pidfile, shares)
+    return av
+}
+
+// Append the arch-agnostic qemu body (disk, seed, nic, virtfs) onto `av`. Single
+// owner: whatever list is passed in owns all the string elements, so there's no
+// splice+free ownership hazard.
+_append_qemu_shared(av: ptr, res_name: string, image: string, cpus: int, mem: string, tap: string, pidfile: string, shares: string) {
     list_add(av, "-enable-kvm")
     list_add(av, "-name")
     list_add(av, res_name)
@@ -170,7 +249,6 @@ qemu_argv_shared(res_name: string, image: string, cpus: int, mem: string, tap: s
             list_add(av, "user")
         }
     }
-    return av
 }
 
 // Agent-courier reads (boot side of the agent path). Per-VM override then the
@@ -1173,9 +1251,33 @@ _vm_ok(sub: string, name: string) -> int {
 }
 
 _up_kvm(res_name: string, image: string, cpus: int, mem: string, tap: string, shares: string) -> string {
+    // Arch-aware: prefer the native qemu system emulator. x86_64 boots with the
+    // default machine + BIOS (no firmware args); aarch64 has NO default machine
+    // and NO default firmware — it needs `-M virt -cpu host` + a UEFI pflash pair
+    // (proven live on a Pi 5). We pick by which qemu-system-* is on PATH: the one
+    // present IS the arch we can KVM-accelerate on this host.
+    // NB: os_which returns NULL (not "") when a binary is absent, and in Aether
+    // `null == ""` is FALSE — so guard on string_length, not `== ""`, or the
+    // aarch64 fallback never fires and a null bin reaches the launcher ("Failed
+    // to find executable :"). Caught live on the Pi (x86_64 absent -> null).
     bin = os_which("qemu-system-x86_64")
-    if bin == "" {
-        return "aeo: kvm needs qemu-system-x86_64 on PATH (not found)"
+    arch = "x86_64"
+    if string_length(bin) == 0 {
+        bin = os_which("qemu-system-aarch64")
+        arch = "aarch64"
+    }
+    if string_length(bin) == 0 {
+        return "aeo: kvm needs qemu-system-x86_64 or qemu-system-aarch64 on PATH (not found)"
+    }
+    // aarch64: stage a per-VM WRITABLE UEFI varstore (a copy of the vars
+    // template). edk2 needs a writable VARS pflash to persist boot state; the
+    // CODE half stays read-only. Deterministic path so probe/down need no state.
+    // (x86_64 boots BIOS — no firmware staging.)
+    if string_equals(arch, "aarch64") == 1 {
+        verr = _stage_aavmf_vars(res_name)
+        if string_length(verr) > 0 {
+            return verr
+        }
     }
     // AGENT PATH: before boot, courier the agent into the guest via a NoCloud
     // seed (build_agent_seed writes /tmp/aeo-seed-<res_name>.iso, which qemu_argv
@@ -1187,12 +1289,23 @@ _up_kvm(res_name: string, image: string, cpus: int, mem: string, tap: string, sh
             if string_length(abin) == 0 {
                 return "aeo: agent path on but no aeo-agent binary found (set AEO_AGENT_BIN)"
             }
-            _iso = build_agent_seed(res_name, _agent_token_drv(res_name), abin, _guest_pubkey())
+            // Guard the token: _agent_token_drv returns NULL when no AEO_TOKEN is
+            // set, which interpolates into the seed's runcmd as the literal
+            // "AEO_TOKEN=(null)" — an UNQUOTED "(null)" is a shell syntax error
+            // ("(" unexpected), so the whole runcmd fails and the guest agent
+            // never starts (caught live: a token-less agent-path boot). Fail loud
+            // here instead of shipping a broken seed. The real agent flow always
+            // couriers a minted token, so this only bites a mis-set manual run.
+            atok = _agent_token_drv(res_name)
+            if string_length(atok) == 0 {
+                return "aeo: agent path on but no token (set AEO_TOKEN or AEO_TOKEN_${res_name})"
+            }
+            _iso = build_agent_seed(res_name, atok, abin, _guest_pubkey())
             // build_agent_seed writes the deterministic path _agent_seed() finds.
         }
     }
     pf = pidfile_for(res_name)
-    av = qemu_argv_shared(res_name, image, cpus, mem, tap, pf, shares)
+    av = qemu_argv_arch(arch, res_name, image, cpus, mem, tap, pf, shares)
     // Launch so the VM SURVIVES the aeo process exiting. A plain -daemonize'd
     // qemu spawned as a child of the (short-lived) aeo front-door gets SIGHUP'd
     // when its launching session scope is reaped on a systemd box (this bit the
