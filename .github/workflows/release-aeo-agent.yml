@@ -322,12 +322,13 @@ jobs:
       sha256: ${{ steps.sum.outputs.sha256 }}
       built: ${{ steps.build.outputs.built }}
     env:
-      # First ae version carrying the cross-crypto HMAC fix (aether #1271 /
-      # 141967f1). The fix merged AFTER 0.442.0 was cut but before any newer tag,
-      # so 0.443.0 is the EXPECTED first release to carry it — a provisional guess
-      # until that version is actually cut. TODO: set to the real released version,
-      # then this gate self-clears. (Belt-and-braces: a native gcc -static build
-      # with libssl-dev present links a real HMAC regardless, but the gate stops a
+      # First RELEASED ae version carrying the cross-crypto HMAC fix (aether #1271
+      # / 141967f1). The fix merged after 0.442.0 was cut; v0.443.0 (2026-07-25) is
+      # the first published release that contains it (verified: `git merge-base
+      # --is-ancestor 141967f1 v0.443.0`). Below this, std.cryptography's HMAC
+      # stubbed to empty on the cross path and aeo's now-fail-closed verifier makes
+      # the agent inert. (Belt-and-braces: a native gcc -static build with
+      # libssl-dev present links a real HMAC regardless, but the gate stops a
       # pre-fix toolchain from ever shipping a crypto-blind => inert arm64 asset.)
       AEO_ARM64_MIN_AE: '0.443.0'
     steps:
