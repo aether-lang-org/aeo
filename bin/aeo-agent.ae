@@ -38,6 +38,7 @@ import driver_windows
 import driver_wslc
 import driver_proxmox
 import driver_bsd
+import driver_bwrap
 import compose
 import std.http (server_create, server_set_host, server_get, server_post,
                  server_start_background,
@@ -337,6 +338,19 @@ _boot_node(node: string) -> string {
             _env_or("AEO_JAIL_IP", ""),
             _env_or("AEO_JAIL_CMD", ""))
     }
+    // BWRAP SUBSTRATE: AEO_BOOT_KIND=bwrap routes to driver_bwrap — an
+    // unprivileged bubblewrap sandbox sharing the host userland read-only. No
+    // image to pull and no root: the peer of the jail/proxmox arms for a plain
+    // Linux host that has bubblewrap but no podman (proven on the Pi 5 arm64
+    // node). AEO_BOOT_IMAGE, if set, is a ROOTFS PATH to --bind at / (unlike the
+    // podman arm's registry ref); empty = share host /usr et al read-only, the
+    // canonical sandbox. cmd is required (a sandbox has no image init).
+    if string_equals(kind, "bwrap") == 1 {
+        return driver_bwrap.up(node,
+            _env_or("AEO_BOOT_IMAGE", ""),
+            _env_or("AEO_BOOT_CMD", "sleep 600"),
+            "")
+    }
 
     img = _env_or("AEO_BOOT_IMAGE", "docker.io/library/busybox:latest")
     cmd = _env_or("AEO_BOOT_CMD", "sleep 600")
@@ -447,6 +461,9 @@ _probe_node(node: string) -> int {
     if string_equals(pk, "jail") == 1 {
         return driver_bsd.probe(node, "", "")
     }
+    if string_equals(pk, "bwrap") == 1 {
+        return driver_bwrap.probe(node, "", "")
+    }
     if _on_windows() == 1 {
         if string_equals(_win_backend(), "wslc") == 1 {
             return driver_wslc.probe(node, "")
@@ -462,6 +479,9 @@ _down_node(node: string) -> string {
     }
     if string_equals(pk, "jail") == 1 {
         return driver_bsd.down(node)
+    }
+    if string_equals(pk, "bwrap") == 1 {
+        return driver_bwrap.down(node)
     }
     if _on_windows() == 1 {
         if string_equals(_win_backend(), "wslc") == 1 {
