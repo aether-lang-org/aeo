@@ -65,8 +65,25 @@ verify(secret: string, presented: string) -> int {
     if string_length(secret) == 0 {
         return 0                       // no courier key configured -> deny all
     }
+    if string_length(presented) == 0 {
+        return 0                       // empty presented token -> deny
+    }
     want = mac(secret)
     got = mac(presented)
+    // FAIL CLOSED when the MAC could not be computed. mac() returns "" on a
+    // crypto error (e.g. hmac_sha256_hex unavailable — as in an `ae` cross-build
+    // that linked no working HMAC). Without this guard both MACs are "", and
+    // _ct_eq("","") == 1 — EVERY token would authenticate. That is exactly the
+    // fail-OPEN bug caught live on the aarch64 cross-built agent: wrong/empty
+    // tokens returned "report up". An unavailable MAC primitive must deny, never
+    // match empty-vs-empty. (Belt: both want AND got must be the real 64-char
+    // hex; an empty on either side is a compute failure, not a value to compare.)
+    if string_length(want) == 0 {
+        return 0
+    }
+    if string_length(got) == 0 {
+        return 0
+    }
     return _ct_eq(want, got)
 }
 

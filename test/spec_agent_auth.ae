@@ -52,6 +52,14 @@ main() {
                 aeocha.expect_int(verify("", "anything")).to_be_falsy()  // no key -> deny
                 aeocha.expect_int(verify("", "")).to_be_falsy()          // empty vs empty -> deny
             }
+            aeocha.it("is fail-closed: a real secret with an empty presented token denies") callback {
+                // REGRESSION (fail-open bug caught live on the aarch64 cross-built
+                // agent): a configured secret must still REJECT an empty presented
+                // token. Before the guard, an empty token that produced an empty MAC
+                // could match the compare. A blank credential is never valid.
+                s = mint_secret()
+                aeocha.expect_int(verify(s, "")).to_be_falsy()
+            }
         }
 
         aeocha.describe("mac") {
