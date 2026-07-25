@@ -19,11 +19,11 @@
 
 import std.os (run_capture, os_which)
 import std.list
-import std.string (string_length, string_contains, string_char_at, string_substring)
+import std.string (string_length, string_contains, string_char_at, string_substring, string_index_of, string_equals)
 
 exports (
-    name, available, kata_runtime, run_argv, rm_argv, ps_argv,
-    up, down, probe
+    name, available, kata_runtime, run_argv, rm_argv, ps_argv, exec_argv,
+    up, down, probe, exec_capture
 )
 
 name() -> string { return "kata" }
@@ -77,17 +77,35 @@ rm_argv(res_name: string) -> ptr {
     return av
 }
 
-// `nerdctl ps --filter name=^NAME$ --filter status=running --format {{.Names}}` —
-// prints the name iff the microVM is running.
+// `nerdctl ps --filter name=NAME --filter status=running --format {{.Names}}` —
+// lists running containers whose name CONTAINS res_name (probe() then matches the
+// exact line). NB: an ANCHORED `name=^NAME$` returns NOTHING on nerdctl 2.x — the
+// regex-anchor form the older CLI honored is no longer matched (caught live on the
+// Pi: a running kata microVM was invisible to probe, so up() always "failed").
+// Use the plain (substring) filter and exact-match in probe().
 ps_argv(res_name: string) -> ptr {
     av = list_new()
     list_add(av, "ps")
     list_add(av, "--filter")
-    list_add(av, "name=^${res_name}$")
+    list_add(av, "name=${res_name}")
     list_add(av, "--filter")
     list_add(av, "status=running")
     list_add(av, "--format")
     list_add(av, "{{.Names}}")
+    return av
+}
+
+// `nerdctl exec NAME /bin/sh -c CMD` — run a command INSIDE the kata microVM,
+// capturing stdout. The operability primitive (the peer of every other driver's
+// exec_capture); kata lacked it. Proven live: exec into a kata microVM returns
+// the GUEST kernel version (differs from the host — it's a real VM boundary).
+exec_argv(res_name: string, cmd: string) -> ptr {
+    av = list_new()
+    list_add(av, "exec")
+    list_add(av, res_name)
+    list_add(av, "/bin/sh")
+    list_add(av, "-c")
+    list_add(av, cmd)
     return av
 }
 
@@ -113,11 +131,30 @@ up(res_name: string, image: string, cmd: string) -> string {
         return "aeo: 'nerdctl --runtime kata run' failed for '${res_name}' (exit ${_i(status)}): ${out}"
     }
     // Confirm the microVM actually reached running (nerdctl run -d can return 0 yet
-    // the sandbox fail to boot — a bad shim/kvm, no /dev/kvm, etc.).
-    if probe(res_name, "", "") != 1 {
-        return "aeo: kata '${res_name}' did not become running after launch (containerd up? kata shim on containerd's PATH? /dev/kvm?)"
+    // the sandbox fail to boot — a bad shim/kvm, no /dev/kvm, etc.). Unlike a runc
+    // container, a kata microVM boots a full guest kernel, so `ps status=running`
+    // lags `run -d` returning by a few seconds — an IMMEDIATE probe races and
+    // false-negatives (caught live on the Pi: up() failed while the microVM was in
+    // fact Up). Retry with a short backoff before declaring failure.
+    tries = 0
+    while tries < 10 {
+        if probe(res_name, "", "") == 1 {
+            return ""
+        }
+        _sleep_s(1)
+        tries = tries + 1
     }
-    return ""
+    return "aeo: kata '${res_name}' did not become running after launch (containerd up? kata shim on containerd's PATH? /dev/kvm?)"
+}
+
+// Sleep `n` seconds via /bin/sh (no stdlib sleep imported here; matches the
+// driver's shell-out discipline).
+_sleep_s(n: int) {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "sleep ${_i(n)}")
+    _o, _s, _e = run_capture("/bin/sh", av, null)
+    list_free(av)
 }
 
 down(res_name: string) -> string {
@@ -142,8 +179,39 @@ probe(res_name: string, health: string, _unused: string) -> int {
     list_free(av)
     if err != "" { return 0 }
     if status != 0 { return 0 }
-    if string_length(_chomp(out)) == 0 { return 0 }
-    return 1
+    // The filter is a SUBSTRING match (name=NAME), so a running "aeokata2" would
+    // appear when probing "aeokata". Require the EXACT name on one of the lines.
+    return _has_exact_line(out, res_name)
+}
+
+// 1 if `text` (newline-separated) contains a line exactly equal to `name`.
+_has_exact_line(text: string, name: string) -> int {
+    rest = text
+    while string_length(rest) > 0 {
+        nl = string_index_of(rest, "\n")
+        line = rest
+        if nl >= 0 {
+            line = string_substring(rest, 0, nl)
+            rest = string_substring(rest, nl + 1, string_length(rest))
+        } else {
+            rest = ""
+        }
+        if string_equals(_chomp(line), name) == 1 {
+            return 1
+        }
+    }
+    return 0
+}
+
+// Run `cmd` inside the kata microVM, returning trimmed stdout ("" on failure).
+// The operability primitive shared by every substrate driver.
+exec_capture(res_name: string, cmd: string) -> string {
+    av = exec_argv(res_name, cmd)
+    out, status, err = _sudo("nerdctl", av)
+    list_free(av)
+    if err != "" { return "" }
+    if status != 0 { return "" }
+    return _chomp(out)
 }
 
 // --- helpers -------------------------------------------------------------------

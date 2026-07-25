@@ -67,8 +67,32 @@ create_argv(res_name: string, image: string) -> ptr {
     list_add(av, "-r")
     list_add(av, image_release(image))
     list_add(av, "-a")
-    list_add(av, "amd64")
+    list_add(av, _lxc_arch())
     return av
+}
+
+// The LXC download-template arch. Was hardcoded "amd64" — wrong on arm64 (the
+// download server has no amd64 image for an aarch64 host to run). AEO_LXC_ARCH
+// overrides; else derive from `uname -m`: aarch64 -> arm64, x86_64 -> amd64
+// (LXC image-server arch names differ from uname's). Proven on a Pi 5 (arm64).
+_lxc_arch() -> string {
+    o = getenv("AEO_LXC_ARCH")
+    if string_length(o) > 0 {
+        return o
+    }
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "uname -m")
+    m, _s, _e = run_capture("/bin/sh", av, null)
+    list_free(av)
+    if string_contains(m, "aarch64") == 1 {
+        return "arm64"
+    }
+    if string_contains(m, "x86_64") == 1 {
+        return "amd64"
+    }
+    // fall back to amd64 for anything unrecognised (historical default)
+    return "amd64"
 }
 
 start_argv(res_name: string) -> ptr {
