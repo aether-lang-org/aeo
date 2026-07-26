@@ -42,6 +42,8 @@ import driver_bsd
 import driver_bwrap
 import driver_vm
 import driver_mac_exec
+import driver_lxc
+import driver_nspawn
 import compose
 import secure_channel
 import std.http (server_create, server_set_host, server_get, server_post,
@@ -504,6 +506,25 @@ _boot_node(node: string, kind_override: string) -> string {
             _env_or("AEO_BOOT_CMD", "sleep 600"),
             _env_or("AEO_EXEC_PROFILE", ""))
     }
+    // LXC SUBSTRATE: AEO_BOOT_KIND=lxc routes to driver_lxc — a SYSTEM container
+    // via the LXC toolchain (self-installed if absent). AEO_BOOT_IMAGE is the
+    // download-template "dist:release" (default debian:trixie); driver picks the
+    // arch. Self-contained: install lxc -> lxc-create downloads the rootfs -> start.
+    if string_equals(kind, "lxc") == 1 {
+        return driver_lxc.up(node,
+            _env_or("AEO_BOOT_IMAGE", "debian:trixie"),
+            "")
+    }
+    // NSPAWN SUBSTRATE: AEO_BOOT_KIND=nspawn routes to driver_nspawn — a
+    // systemd-nspawn system container over a rootfs dir (systemd-container
+    // self-installed if absent). AEO_BOOT_IMAGE is the rootfs directory;
+    // AEO_BOOT_CMD "" boots the rootfs init, else runs the payload under a stub.
+    if string_equals(kind, "nspawn") == 1 {
+        return driver_nspawn.up(node,
+            _env_or("AEO_BOOT_IMAGE", "/var/lib/machines/${node}"),
+            _env_or("AEO_BOOT_CMD", ""),
+            "")
+    }
     // VM SUBSTRATE: AEO_BOOT_KIND=vm routes to driver_vm's kvm arm — a real
     // hardware-virt VM (qemu/KVM), arch-aware (x86_64 or aarch64; proven on a Pi
     // 5). The local-KVM peer of the proxmox arm: an agent RESIDENT ON a
@@ -636,6 +657,12 @@ _probe_node(node: string, kind_override: string) -> int {
     if string_equals(pk, "exec") == 1 {
         return driver_mac_exec.probe(node, "")
     }
+    if string_equals(pk, "lxc") == 1 {
+        return driver_lxc.probe(node, "", "")
+    }
+    if string_equals(pk, "nspawn") == 1 {
+        return driver_nspawn.probe(node, "", "")
+    }
     if string_equals(pk, "vm") == 1 {
         return driver_vm.probe("kvm", node, "")
     }
@@ -663,6 +690,12 @@ _down_node(node: string, kind_override: string) -> string {
     }
     if string_equals(pk, "exec") == 1 {
         return driver_mac_exec.down(node)
+    }
+    if string_equals(pk, "lxc") == 1 {
+        return driver_lxc.down(node)
+    }
+    if string_equals(pk, "nspawn") == 1 {
+        return driver_nspawn.down(node)
     }
     if string_equals(pk, "vm") == 1 {
         return driver_vm.down("kvm", node)
