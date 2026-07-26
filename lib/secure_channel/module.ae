@@ -1,0 +1,261 @@
+// lib/secure_channel — an authenticated-ENCRYPTED wrapper for the aeo-agent
+// wire, keyed by the same "motorcycle-courier" pre-shared key as lib/agent_auth.
+//
+// WHY: the agent's HTTP/file transports carry the dispatch line in cleartext;
+// HMAC (agent_auth) authenticates but does NOT hide the payload, and a
+// cross-built agent has no OpenSSL so TLS/AES-GCM are unavailable. This module
+// gives confidentiality + integrity + anti-replay in PURE AETHER — it works on
+// the smallest cross-built arm64 node (proven on a Pi Zero 2 W). Client and
+// server are both aeo and share the courier key, so no negotiation is needed:
+// one agreed lightweight AEAD (Ascon-AEAD128, NIST SP 800-232).
+//
+// KEY: HKDF-SHA256(courier_key, salt="aeo-secure-channel-v1") -> a 16-byte AEAD
+// key. Both sides derive the SAME key from the SAME courier secret; nothing is
+// exchanged on the wire.
+//
+// WIRE (a single text line, so it drops into the existing line-based transports):
+//   AE1:<nonce_hex>:<ciphertext+tag_hex>
+// where AE1 is the version tag, nonce is 16 random bytes, and the AEAD's
+// associated-data binds the version tag (so a downgrade can't strip it silently).
+// A line WITHOUT the AE1: prefix is plaintext (backward-compat / AEO_SECURE off).
+//
+// NB base64 is NOT usable here — std.encoding.base64 is an OpenSSL extern that
+// stubs to NULL on the cross-build (the exact target). Hex is pure-Aether and our
+// payloads are tiny (a dispatch line is tens of bytes), so hex's 2x is a non-issue.
+
+import std.bytes
+import std.string (string_length, string_char_at, string_index_of, string_substring, string_equals, string_from_char, string_from_long, to_long)
+import std.cryptography.ascon_aead128 (aead_seal, aead_open)
+import std.cryptography.hkdf (hkdf)
+import std.cryptography (random_bytes)
+import std.time (now_ms)
+
+exports (
+    is_wrapped, seal_line, open_line,
+    derive_key, to_hex, from_hex, PREFIX, WINDOW_MS, in_window
+)
+
+// Version/frame tag. Bump if the wire format changes.
+PREFIX() -> string {
+    return "AE1:"
+}
+
+// Anti-replay freshness window (milliseconds). A frame is accepted only if its
+// sealed timestamp is within +/- WINDOW_MS of the opener's clock. This bounds
+// verbatim-replay to the window (SigV4-style) WITHOUT server-side state, which a
+// boot-scoped agent doesn't keep. It does NOT eliminate replay inside the window,
+// and it assumes both clocks are ~synced (NTP). 30s tolerates modest clock skew +
+// LAN/WAN latency while keeping the replay window short.
+WINDOW_MS() -> long {
+    return 30000
+}
+
+// --- key derivation ---------------------------------------------------------
+
+// Derive the 16-byte Ascon-AEAD128 key from the courier PSK via HKDF-SHA256.
+// Deterministic: same PSK -> same key on both ends, no exchange.
+derive_key(courier: string) -> ptr {
+    ikm = _sbytes(courier)
+    salt = _sbytes("aeo-secure-channel-v1")
+    info = _sbytes("ascon-aead128-key")
+    // hkdf(algo, salt, salt_len, ikm, ikm_len, info, info_len, out_len)
+    return hkdf("sha256", salt, bytes_len_of("aeo-secure-channel-v1"),
+                ikm, string_length(courier),
+                info, bytes_len_of("ascon-aead128-key"), 16)
+}
+
+// --- frame test -------------------------------------------------------------
+
+// 1 if `line` is an AE1: sealed frame (vs plaintext). Cheap prefix check.
+is_wrapped(line: string) -> int {
+    p = PREFIX()
+    if string_length(line) < string_length(p) {
+        return 0
+    }
+    if string_equals(string_substring(line, 0, string_length(p)), p) == 1 {
+        return 1
+    }
+    return 0
+}
+
+// --- seal / open ------------------------------------------------------------
+
+// Seal `plaintext` under the courier key -> "AE1:<nonce_hex>:<ct_hex>".
+// A fresh random 16-byte nonce per call (anti-replay: the caller/verifier can
+// also reject a nonce it has seen, but a fresh nonce per message already means
+// two identical plaintexts don't produce identical frames). "" on failure.
+seal_line(courier: string, plaintext: string) -> string {
+    key = derive_key(courier)
+    if key == null {
+        return ""
+    }
+    nonce = _rand16()
+    if nonce == null {
+        return ""
+    }
+    // Prepend the current epoch-ms as the FIRST field of the SEALED plaintext:
+    //   "<ts_ms>|<command>"
+    // The timestamp is inside the AEAD, so it's authenticated — a replayer can't
+    // rewrite it to stay fresh without breaking the tag. open_line checks the
+    // window and strips it, returning just <command>.
+    stamped = "${string_from_long(now_ms())}|${plaintext}"
+    pt = _sbytes(stamped)
+    ptlen = string_length(stamped)
+    aad = _sbytes(PREFIX())                 // bind the version tag as AAD
+    ct = aead_seal(key, nonce, aad, bytes_len_of(PREFIX()), pt, ptlen)
+    if ct == null {
+        return ""
+    }
+    return "${PREFIX()}${to_hex(nonce, 16)}:${to_hex(ct, bytes.length(ct))}"
+}
+
+// Open an "AE1:<nonce_hex>:<ct_hex>" frame under the courier key. Returns
+// (plaintext, "") on success, or ("", error) on a malformed frame or a failed
+// tag (fail-closed — a tampered/forged frame never yields plaintext).
+open_line(courier: string, frame: string) -> string! {
+    ok = ""
+    if is_wrapped(frame) == 0 {
+        return "", "not a sealed frame"
+    }
+    // strip prefix, split "<nonce_hex>:<ct_hex>"
+    body = string_substring(frame, string_length(PREFIX()), string_length(frame))
+    colon = string_index_of(body, ":")
+    if colon < 0 {
+        return "", "malformed frame (no nonce/ct split)"
+    }
+    nonce_hex = string_substring(body, 0, colon)
+    ct_hex = string_substring(body, colon + 1, string_length(body))
+    nonce = from_hex(nonce_hex)
+    ct = from_hex(ct_hex)
+    if nonce == null || ct == null {
+        return "", "malformed hex"
+    }
+    key = derive_key(courier)
+    if key == null {
+        return "", "key derivation failed"
+    }
+    aad = _sbytes(PREFIX())
+    pt, err = aead_open(key, nonce, aad, bytes_len_of(PREFIX()), ct, bytes.length(ct))
+    if err != "" {
+        return "", err                      // tag failure -> fail closed
+    }
+    stamped = bytes.to_string(pt, bytes.length(pt))
+    // Split the authenticated "<ts_ms>|<command>". A missing separator is a
+    // malformed (or pre-timestamp) frame -> reject.
+    bar = string_index_of(stamped, "|")
+    if bar < 0 {
+        return "", "malformed frame (no timestamp)"
+    }
+    ts, tserr = to_long(string_substring(stamped, 0, bar))
+    if tserr != "" {
+        return "", "malformed timestamp"
+    }
+    cmd = string_substring(stamped, bar + 1, string_length(stamped))
+    // Freshness window: reject a stale (or future-dated) frame.
+    if in_window(ts, now_ms()) == 0 {
+        return "", "stale frame (outside the freshness window)"
+    }
+    return cmd, ""
+}
+
+// 1 if a frame stamped at `ts` (epoch ms) is within +/- WINDOW_MS of `now`
+// (epoch ms), else 0. Pure + exported so the window math is unit-testable with
+// explicit values (no clock/sleep dependence). Guards a future-dated frame too.
+in_window(ts: long, now: long) -> int {
+    skew = now - ts
+    if skew < 0 {
+        skew = 0 - skew
+    }
+    if skew > WINDOW_MS() {
+        return 0
+    }
+    return 1
+}
+
+// --- helpers: bytes <-> string, hex, random ---------------------------------
+
+// std.string length of a literal we also need as a bytes length (ascii = 1 byte
+// per char here; the agent's tokens/verbs are ascii).
+bytes_len_of(s: string) -> int {
+    return string_length(s)
+}
+
+// Copy an ascii/utf8 string into a fresh std.bytes buffer.
+_sbytes(s: string) -> ptr {
+    n = string_length(s)
+    b = bytes.new(n)
+    i = 0
+    while i < n {
+        bytes.set(b, i, string_char_at(s, i))
+        i = i + 1
+    }
+    return b
+}
+
+// 16 random bytes for the nonce. std.cryptography.random_bytes is getrandom(2)
+// (with a /dev/urandom fallback) — NOT OpenSSL, so it works on the cross-build.
+// Returns the bytes as a string; we copy it into a std.bytes buffer.
+_rand16() -> ptr {
+    raw, n, err = random_bytes(16)
+    if err != "" {
+        return null
+    }
+    if n < 16 {
+        return null
+    }
+    return _sbytes(raw)
+}
+
+// bytes -> lowercase hex string.
+to_hex(b: ptr, n: int) -> string {
+    out = ""
+    i = 0
+    while i < n {
+        v = bytes.get(b, i)
+        out = "${out}${_nib((v >> 4) & 15)}${_nib(v & 15)}"
+        i = i + 1
+    }
+    return out
+}
+
+// hex string -> fresh std.bytes buffer, or null on odd length / bad digit.
+from_hex(s: string) -> ptr {
+    n = string_length(s)
+    if (n % 2) != 0 {
+        return null
+    }
+    out = bytes.new(n / 2)
+    i = 0
+    while i < n {
+        hi = _unnib(string_char_at(s, i))
+        lo = _unnib(string_char_at(s, i + 1))
+        if hi < 0 || lo < 0 {
+            return null
+        }
+        bytes.set(out, i / 2, (hi << 4) | lo)
+        i = i + 2
+    }
+    return out
+}
+
+// nibble (0-15) -> hex char.
+_nib(v: int) -> string {
+    if v < 10 {
+        return string_from_char(48 + v)     // '0'..'9'
+    }
+    return string_from_char(97 + (v - 10))  // 'a'..'f'
+}
+
+// hex char code -> nibble, or -1 if not a hex digit.
+_unnib(c: int) -> int {
+    if c >= 48 && c <= 57 {
+        return c - 48
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87
+    }
+    if c >= 65 && c <= 70 {
+        return c - 55
+    }
+    return -1
+}

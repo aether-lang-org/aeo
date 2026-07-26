@@ -42,6 +42,7 @@ import driver_bwrap
 import driver_vm
 import driver_mac_exec
 import compose
+import secure_channel
 import std.http (server_create, server_set_host, server_get, server_post,
                  server_start_background,
                  response_set_status, response_set_header, response_set_body,
@@ -69,10 +70,49 @@ _h_health(req: ptr, res: ptr, ud: ptr) -> int {
     return 0
 }
 
+// SECURE CHANNEL (lib/secure_channel): an AEAD envelope over the wire, keyed by
+// the SAME courier PSK as the HMAC auth. Confidentiality + integrity + a
+// freshness window, in pure Aether (Ascon-AEAD128) — so a cross-built agent with
+// no OpenSSL gets an encrypted channel. OPT-IN + backward-compatible: an incoming
+// AE1: frame is unsealed and its reply re-sealed; a plaintext line is handled as
+// before (existing recursion/tests speak plaintext). Detection is on the wire (the
+// AE1: prefix), so one agent serves both during rollout — no flag needed to
+// ACCEPT sealed; AEO_SECURE=1 makes a node's own outbound dials seal (client side).
+//
+// _unseal_in: (wire) -> (inner_line, was_sealed). On a sealed frame that fails to
+// open (bad key / tamper / stale), returns ("", 1) — inner_line empty so the auth
+// gate below denies it (fail-closed: a forged/replayed frame never reaches a verb).
+_unseal_in(token: string, wire: string) -> (string, int) {
+    if secure_channel.is_wrapped(wire) == 0 {
+        return wire, 0                     // plaintext — pass through
+    }
+    inner, err = secure_channel.open_line(token, wire)
+    if err != "" {
+        return "", 1                       // sealed but bad -> empty, marked sealed
+    }
+    return inner, 1
+}
+
+// _seal_out: seal the reply iff the request was sealed (symmetry). On a seal
+// failure, fall back to plaintext rather than dropping the reply.
+_seal_out(token: string, rep: string, was_sealed: int) -> string {
+    if was_sealed == 0 {
+        return rep
+    }
+    sealed = secure_channel.seal_line(token, rep)
+    if string_length(sealed) == 0 {
+        return rep
+    }
+    return sealed
+}
+
 _h_dispatch(req: ptr, res: ptr, ud: ptr) -> int {
     me = config.get("aeo.agent.me")
     token = config.get("aeo.agent.token")
-    line = request_body(req)
+    wire = request_body(req)
+    // Unseal an AE1: frame (or pass plaintext through). A sealed-but-bad frame
+    // yields an empty inner line, which the auth gate then denies — fail-closed.
+    line, was_sealed = _unseal_in(token, wire)
     // Auth gate FIRST (fail-closed) — a bad token never reaches the verb.
     if _auth_ok(token, protocol.token_of(line)) == 0 {
         response_set_status(res, 401)
@@ -82,7 +122,7 @@ _h_dispatch(req: ptr, res: ptr, ud: ptr) -> int {
     rep = _dispatch_verb(me, token, line)
     response_set_status(res, 200)
     response_set_header(res, "Content-Type", "text/plain")
-    response_set_body(res, rep)            // the report line, synchronously
+    response_set_body(res, _seal_out(token, rep, was_sealed))   // seal reply iff request was sealed
     return 0
 }
 
@@ -277,10 +317,14 @@ _dispatch_verb(me: string, token: string, line: string) -> string {
 
 // Handle one command in FILE mode. Returns 1 to keep looping, 0 to stop (on a
 // halt of the agent's OWN node). Wraps the shared dispatch + the outbox write.
-_handle(me: string, token: string, outbox: string, line: string) -> int {
+_handle(me: string, token: string, outbox: string, wire: string) -> int {
+    // Secure-channel symmetry for FILE mode: unseal an AE1: frame (a sealed-but-
+    // bad frame -> empty line, which _dispatch_verb's own auth gate then refuses),
+    // and seal the reply back iff the request was sealed.
+    line, was_sealed = _unseal_in(token, wire)
     rep = _dispatch_verb(me, token, line)
     if string_length(rep) > 0 {
-        _ = put(outbox, _next(), rep)
+        _ = put(outbox, _next(), _seal_out(token, rep, was_sealed))
     }
     // A halt of the agent's OWN node ends the agent (the report still went out).
     if protocol.verb_of(line) == "halt" {
