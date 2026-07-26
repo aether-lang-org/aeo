@@ -95,6 +95,24 @@ _lxc_arch() -> string {
     return "amd64"
 }
 
+// Best-effort install of the LXC toolchain if lxc-create is absent — the
+// driver_linux podman-bootstrap parallel for the lxc substrate. Silent, apt-based
+// (lxc + lxc-templates + debootstrap for the download template), retried. Opt-out
+// AEO_LINUX_AUTOINSTALL=0; `command -v apt-get` guard = clean no-op on non-apt.
+_ensure_lxc() {
+    v = getenv("AEO_LINUX_AUTOINSTALL")
+    if v != null {
+        if v == "0" {
+            return
+        }
+    }
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "command -v lxc-create >/dev/null 2>&1 && exit 0; command -v apt-get >/dev/null 2>&1 || exit 0; i=0; while [ $i -lt 5 ]; do sudo -n DEBIAN_FRONTEND=noninteractive apt-get update -qq && sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y -qq lxc lxc-templates debootstrap && command -v lxc-create >/dev/null 2>&1 && exit 0; i=$((i+1)); sleep 5; done")
+    _o, _s, _e = run_capture("/bin/sh", av, null)
+    list_free(av)
+}
+
 start_argv(res_name: string) -> ptr {
     return start_argv_shared(res_name, "")
 }
@@ -223,6 +241,10 @@ up(res_name: string, image: string, shares: string) -> string {
     if string_length(image) == 0 {
         return "aeo: lxc '${res_name}' has no image() set (want dist:release, e.g. alpine:3.21)"
     }
+    // SELF-BOOTSTRAP the LXC toolchain if absent — the driver_linux parallel for
+    // the lxc substrate. So a `boot` of an lxc node installs lxc through the agent
+    // alone. Opt-out AEO_LINUX_AUTOINSTALL=0; apt-based, retried; non-apt no-op.
+    _ensure_lxc()
     // create (if the container isn't defined yet — lxc-create errors loudly if it
     // already exists, which we tolerate: a defined-but-stopped one just needs start)
     cav = create_argv(res_name, image)

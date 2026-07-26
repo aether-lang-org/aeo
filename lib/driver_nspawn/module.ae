@@ -31,7 +31,7 @@
 // (Bazzite); nspawn does NOT run under Docker-on-macOS (its mount-propagation
 // guard refuses the Docker /run layout), so the live suite is proved on-box.
 
-import std.os (run_capture)
+import std.os (run_capture, getenv)
 import std.list
 import std.string (string_length, string_contains, string_trim, string_index_of, string_substring)
 import death (unit_death_line)
@@ -233,7 +233,14 @@ up(res_name: string, image: string, cmd: string, shares: string) -> string {
         return ""
     }
     if available() == 0 {
-        return "aeo: systemd-nspawn toolchain not found (need systemd-container on a systemd host; Linux-only)"
+        // SELF-BOOTSTRAP the nspawn toolchain (systemd-container) if absent — the
+        // same silent "make the substrate ready" the container tiers get, so a
+        // `boot` of an nspawn node installs it through the agent alone. Opt-out
+        // AEO_LINUX_AUTOINSTALL=0. apt-based, retried; non-apt hosts no-op.
+        _ensure_nspawn()
+    }
+    if available() == 0 {
+        return "aeo: systemd-nspawn toolchain not found (need systemd-container on a systemd host; auto-install failed or disabled)"
     }
     if string_length(image) == 0 {
         return "aeo: nspawn '${res_name}' has no image() set (want a rootfs directory, e.g. /var/lib/machines/${res_name})"
@@ -348,4 +355,19 @@ _sh1(line: string) -> ptr {
     list_add(av, "-c")
     list_add(av, line)
     return av
+}
+
+// Best-effort install of the nspawn toolchain (systemd-container) if absent —
+// the driver_linux podman-bootstrap parallel for the nspawn substrate. Silent,
+// apt-based, retried (transient lock/network). Opt-out AEO_LINUX_AUTOINSTALL=0;
+// `command -v apt-get` guard makes a non-apt host a clean no-op.
+_ensure_nspawn() {
+    v = getenv("AEO_LINUX_AUTOINSTALL")
+    if v != null {
+        if v == "0" {
+            return
+        }
+    }
+    line = "command -v machinectl >/dev/null 2>&1 && exit 0; command -v apt-get >/dev/null 2>&1 || exit 0; i=0; while [ $i -lt 5 ]; do sudo -n DEBIAN_FRONTEND=noninteractive apt-get update -qq && sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y -qq systemd-container && command -v machinectl >/dev/null 2>&1 && exit 0; i=$((i+1)); sleep 5; done"
+    _o, _s, _e = run_capture("/bin/sh", _sh1(line), null)
 }

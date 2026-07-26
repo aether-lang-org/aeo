@@ -21,7 +21,7 @@
 
 import std.os (run_capture, run_full, os_which)
 import std.list
-import std.string (string_length, string_contains, string_char_at, string_substring, string_index_of, string_ends_with)
+import std.string (string_length, string_contains, string_char_at, string_substring, string_index_of, string_ends_with, string_get_int)
 import std.fs (write_atomic)
 
 exports (
@@ -108,7 +108,11 @@ _autoinstall_on() -> int {
 _install_podman() {
     av = list_new()
     list_add(av, "-c")
-    list_add(av, "command -v apt-get >/dev/null 2>&1 || exit 0; sudo -n DEBIAN_FRONTEND=noninteractive apt-get update -qq && sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y -qq podman")
+    // RETRY the apt itself — update/install hit transient failures (a held dpkg
+    // lock during first boot, a network blip, a mirror hiccup). Loop up to 5x with
+    // backoff, succeeding as soon as podman is present. So a flaky-network cold
+    // host still self-installs without the orchestrator re-dispatching.
+    list_add(av, "command -v apt-get >/dev/null 2>&1 || exit 0; i=0; while [ $i -lt 5 ]; do command -v podman >/dev/null 2>&1 && exit 0; sudo -n DEBIAN_FRONTEND=noninteractive apt-get update -qq && sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y -qq podman && command -v podman >/dev/null 2>&1 && exit 0; i=$((i+1)); sleep 5; done")
     _o, _s, _e = run_capture("/bin/sh", av, null)
     list_free(av)
 }
@@ -571,17 +575,55 @@ up_confined(res_name: string, image: string, cmd: string, expose: int, net: stri
     }
     // podman gets `--replace` (in-place idempotency); docker has no such flag,
     // so its path pre-clears any stopped leftover and runs a replace-less argv.
-    with_replace = _pre_clear_for(eng, res_name)
-    av = _run_argv_core(res_name, image, cmd, expose, net, env, confine, shares, with_replace)
-    out, status, err = run_capture(eng, av, null)
+    // RETRY with backoff — a fresh podman install has a transient window where
+    // `run` returns 125 (the post-install race the child-bootstrap script also
+    // rides), and an image pull can hit a network blip. A single attempt made
+    // these self-healing failures fatal; a bounded retry recovers them WITHOUT
+    // the orchestrator re-dispatching — retry/recover built into the driver, not
+    // the caller. Idempotent: --replace / _pre_clear_for makes re-running safe.
+    t = 0
+    lastout = ""
+    laststatus = 0
+    while t < RUN_RETRIES() {
+        with_replace = _pre_clear_for(eng, res_name)
+        av = _run_argv_core(res_name, image, cmd, expose, net, env, confine, shares, with_replace)
+        out, status, err = run_capture(eng, av, null)
+        list_free(av)
+        if err == "" {
+            if status == 0 {
+                return ""
+            }
+        }
+        lastout = out
+        laststatus = status
+        t = t + 1
+        if t < RUN_RETRIES() {
+            _sleep_s(3)
+        }
+    }
+    return "aeo: '${eng} run' failed for '${res_name}' after retries (exit ${laststatus}): ${lastout}"
+}
+
+// Bounded run retries — covers the post-install 125 race + a transient image
+// pull. Tunable via AEO_LINUX_RUN_RETRIES (default 8; ~8*3s = 24s of recovery).
+RUN_RETRIES() -> int {
+    v = getenv("AEO_LINUX_RUN_RETRIES")
+    if v == null {
+        return 8
+    }
+    n = string_get_int(v)
+    if n < 1 {
+        return 8
+    }
+    return n
+}
+// sleep n seconds via /bin/sh (shell-out discipline; no stdlib sleep imported).
+_sleep_s(n: int) {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "sleep ${_itoa(n)}")
+    _o, _s, _e = run_capture("/bin/sh", av, null)
     list_free(av)
-    if err != "" {
-        return "aeo: spawn failed for '${res_name}': ${err}"
-    }
-    if status != 0 {
-        return "aeo: '${eng} run' failed for '${res_name}' (exit ${status}): ${out}"
-    }
-    return ""
 }
 
 // The docker half of `--replace`: quiet-shell `rm -f` any leftover (absent =
