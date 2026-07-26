@@ -17,7 +17,7 @@
 // gate on the *target's* profile, which a future remote driver supplies;
 // this module is the local case.
 
-import std.os (platform, run_capture)
+import std.os (platform, run_capture, getenv)
 import std.capsicum
 import std.casper
 import std.list
@@ -25,7 +25,8 @@ import std.string (string_length, string_char_at, string_substring)
 
 exports (
     profile, is_bsd, is_linux, family,
-    uname_s, capsicum_available, casper_available
+    uname_s, capsicum_available, casper_available,
+    pkg_manager, pkg_install
 )
 
 // The host family aeo selects a driver against. One of:
@@ -118,4 +119,116 @@ _chomp(s: string) -> string {
         return string_substring(s, 0, n - 1)
     }
     return s
+}
+
+// --- portable package install (substrate self-bootstrap) --------------------
+//
+// The fleet is not apt-only: Debian/RaspiOS (apt), Fedora/Bazzite (dnf), RHEL
+// (yum), openSUSE (zypper), Arch (pacman), Alpine (apk), FreeBSD (pkg), macOS
+// (brew). A driver that wants to self-install its substrate engine (podman, lxc,
+// systemd-container, ...) calls host.pkg_install; it detects the manager present
+// and issues the right non-interactive install. So "silent install" works beyond
+// apt-get.
+
+// The package manager on this host, by first-present PATH probe. "" if none
+// recognised (a locked-down or exotic host — the caller then no-ops cleanly).
+pkg_manager() -> string {
+    if _have("apt-get") == 1 { return "apt" }
+    if _have("dnf") == 1     { return "dnf" }
+    if _have("yum") == 1     { return "yum" }
+    if _have("zypper") == 1  { return "zypper" }
+    if _have("pacman") == 1  { return "pacman" }
+    if _have("apk") == 1     { return "apk" }
+    if _have("pkg") == 1     { return "pkg" }     // FreeBSD
+    if _have("brew") == 1    { return "brew" }    // macOS
+    return ""
+}
+
+// Install `pkg` if `have_cmd` (a binary name to `command -v`) is not already
+// present. Portable across the managers above; retried (transient lock/network);
+// silent + best-effort. Opt-out AEO_LINUX_AUTOINSTALL=0. Returns "" on success
+// (or already-present / opted-out / no manager — all non-fatal), else a short
+// note. The caller re-checks the real capability afterward (this is best-effort).
+//   host.pkg_install("podman", "podman")
+//   host.pkg_install("systemd-container", "machinectl")
+//   host.pkg_install("lxc lxc-templates debootstrap", "lxc-create")   // apt names
+pkg_install(pkg: string, have_cmd: string) -> string {
+    off = getenv("AEO_LINUX_AUTOINSTALL")
+    if off != null {
+        if off == "0" {
+            return ""
+        }
+    }
+    mgr = pkg_manager()
+    if string_length(mgr) == 0 {
+        return "no known package manager"
+    }
+    inst = _install_cmd(mgr, pkg)
+    if string_length(inst) == 0 {
+        return "unsupported manager ${mgr}"
+    }
+    // retry up to 5x: skip if have_cmd already there; else install; succeed as
+    // soon as it appears. brew must NOT run under sudo; the others need -n sudo.
+    guard = ""
+    if string_length(have_cmd) > 0 {
+        guard = "command -v ${have_cmd} >/dev/null 2>&1 && exit 0; "
+    }
+    check = ""
+    if string_length(have_cmd) > 0 {
+        check = " && command -v ${have_cmd} >/dev/null 2>&1 && exit 0"
+    }
+    line = "${guard}i=0; while [ $i -lt 5 ]; do ${inst}${check}; i=$((i+1)); sleep 5; done"
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, line)
+    _o, _s, _e = run_capture("/bin/sh", av, null)
+    list_free(av)
+    return ""
+}
+
+// The non-interactive install invocation for a manager. sudo -n for the
+// system managers (operator pre-authorizes NOPASSWD, the fleet contract); brew
+// runs as the user (never sudo). "" for an unknown manager.
+_install_cmd(mgr: string, pkg: string) -> string {
+    if mgr == "apt" {
+        return "sudo -n DEBIAN_FRONTEND=noninteractive apt-get update -qq && sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ${pkg}"
+    }
+    if mgr == "dnf" {
+        return "sudo -n dnf install -y -q ${pkg}"
+    }
+    if mgr == "yum" {
+        return "sudo -n yum install -y -q ${pkg}"
+    }
+    if mgr == "zypper" {
+        return "sudo -n zypper --non-interactive install ${pkg}"
+    }
+    if mgr == "pacman" {
+        return "sudo -n pacman -Sy --noconfirm ${pkg}"
+    }
+    if mgr == "apk" {
+        return "sudo -n apk add --no-progress ${pkg}"
+    }
+    if mgr == "pkg" {
+        return "sudo -n pkg install -y ${pkg}"
+    }
+    if mgr == "brew" {
+        return "brew install ${pkg}"
+    }
+    return ""
+}
+
+// 1 if `bin` is on PATH (via `command -v`), else 0.
+_have(bin: string) -> int {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "command -v ${bin} >/dev/null 2>&1")
+    _o, status, err = run_capture("/bin/sh", av, null)
+    list_free(av)
+    if err != "" {
+        return 0
+    }
+    if status == 0 {
+        return 1
+    }
+    return 0
 }

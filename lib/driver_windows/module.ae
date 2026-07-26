@@ -121,7 +121,11 @@ _ensure_podman_wsl(distro: string) {
     list_add(wav, "--")
     list_add(wav, "/bin/sh")
     list_add(wav, "-c")
-    list_add(wav, "command -v podman >/dev/null 2>&1 && exit 0; command -v apt-get >/dev/null 2>&1 || exit 0; sudo -n DEBIAN_FRONTEND=noninteractive apt-get update -qq && sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y -qq podman")
+    // Portable inside the WSL distro (usually Ubuntu/apt, but detect so a non-apt
+    // distro works too — the host.pkg_install logic, inlined because it runs INSIDE
+    // the distro via wsl, not on the Windows host). Retried; `podman` is the pkg
+    // name on every manager.
+    list_add(wav, "command -v podman >/dev/null 2>&1 && exit 0; i=0; while [ $i -lt 5 ]; do if command -v apt-get >/dev/null 2>&1; then sudo -n DEBIAN_FRONTEND=noninteractive apt-get update -qq && sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y -qq podman; elif command -v dnf >/dev/null 2>&1; then sudo -n dnf install -y -q podman; elif command -v apk >/dev/null 2>&1; then sudo -n apk add --no-progress podman; elif command -v pacman >/dev/null 2>&1; then sudo -n pacman -Sy --noconfirm podman; elif command -v zypper >/dev/null 2>&1; then sudo -n zypper --non-interactive install podman; else exit 0; fi; command -v podman >/dev/null 2>&1 && exit 0; i=$((i+1)); sleep 5; done")
     _o, _s, _e = run_capture(wsl_exe(), wav, null)
     list_free(wav)
 }

@@ -23,6 +23,7 @@ import std.os (run_capture, run_full, os_which)
 import std.list
 import std.string (string_length, string_contains, string_char_at, string_substring, string_index_of, string_ends_with, string_get_int)
 import std.fs (write_atomic)
+import host
 
 exports (
     name, engine_resolve, ensure_engine,
@@ -105,16 +106,11 @@ _autoinstall_on() -> int {
 // delegate path already tolerates minutes; a direct http boot should use the
 // background/pending flow for a cold host). Non-apt hosts: the `command -v apt-get`
 // guard makes this a clean no-op.
+// Install podman via the host's package manager (apt/dnf/yum/zypper/pacman/apk/
+// pkg/brew — host.pkg_install detects it), retried + silent. `podman` is the
+// package name on every one of them, so no per-manager name mapping is needed.
 _install_podman() {
-    av = list_new()
-    list_add(av, "-c")
-    // RETRY the apt itself — update/install hit transient failures (a held dpkg
-    // lock during first boot, a network blip, a mirror hiccup). Loop up to 5x with
-    // backoff, succeeding as soon as podman is present. So a flaky-network cold
-    // host still self-installs without the orchestrator re-dispatching.
-    list_add(av, "command -v apt-get >/dev/null 2>&1 || exit 0; i=0; while [ $i -lt 5 ]; do command -v podman >/dev/null 2>&1 && exit 0; sudo -n DEBIAN_FRONTEND=noninteractive apt-get update -qq && sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y -qq podman && command -v podman >/dev/null 2>&1 && exit 0; i=$((i+1)); sleep 5; done")
-    _o, _s, _e = run_capture("/bin/sh", av, null)
-    list_free(av)
+    _ = host.pkg_install("podman", "podman")
 }
 
 // --- pure argv builders (one per engine subcommand) ------------------

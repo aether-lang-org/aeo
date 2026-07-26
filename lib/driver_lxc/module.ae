@@ -21,7 +21,8 @@
 
 import std.os (run_capture, run_full, getenv)
 import std.list
-import std.string (string_length, string_index_of, string_substring, string_contains, string_char_at, string_from_int)
+import std.string (string_length, string_index_of, string_substring, string_contains, string_char_at, string_from_int, string_equals)
+import host
 
 exports (
     name,
@@ -99,18 +100,17 @@ _lxc_arch() -> string {
 // driver_linux podman-bootstrap parallel for the lxc substrate. Silent, apt-based
 // (lxc + lxc-templates + debootstrap for the download template), retried. Opt-out
 // AEO_LINUX_AUTOINSTALL=0; `command -v apt-get` guard = clean no-op on non-apt.
+// Install the LXC toolchain via the host manager. `lxc` is the core package name
+// across apt/dnf/apk/pacman/pkg; the apt-only download-template extras
+// (lxc-templates, debootstrap) are added when apt is the manager so the
+// `-t download` create works — a non-apt host installs the core lxc and relies on
+// its own template set. host.pkg_install detects the manager, retries, opt-out.
 _ensure_lxc() {
-    v = getenv("AEO_LINUX_AUTOINSTALL")
-    if v != null {
-        if v == "0" {
-            return
-        }
+    pkgs = "lxc"
+    if string_equals(host.pkg_manager(), "apt") == 1 {
+        pkgs = "lxc lxc-templates debootstrap"
     }
-    av = list_new()
-    list_add(av, "-c")
-    list_add(av, "command -v lxc-create >/dev/null 2>&1 && exit 0; command -v apt-get >/dev/null 2>&1 || exit 0; i=0; while [ $i -lt 5 ]; do sudo -n DEBIAN_FRONTEND=noninteractive apt-get update -qq && sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y -qq lxc lxc-templates debootstrap && command -v lxc-create >/dev/null 2>&1 && exit 0; i=$((i+1)); sleep 5; done")
-    _o, _s, _e = run_capture("/bin/sh", av, null)
-    list_free(av)
+    _ = host.pkg_install(pkgs, "lxc-create")
 }
 
 start_argv(res_name: string) -> ptr {
