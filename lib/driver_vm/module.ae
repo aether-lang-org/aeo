@@ -445,9 +445,21 @@ up(kind: string, res_name: string, image: string, cpus: int, mem: string, tap: s
 // vm-bhyve owns tap/disk/boot/networking; aeo orchestrates it like podman.
 // `vm` needs root, so it runs under sudo (operator pre-authorizes; see the
 // NOPASSWD sudoers note). Idempotent: existing+running VM is a no-op.
-// Silent setup of the bhyve substrate: load vmm.ko and pkg-install vm-bhyve +
-// bhyve-firmware if missing. One sudo sh -c (kldload + pkg both need root),
-// retried, guarded by `command -v pkg`. Opt-out AEO_LINUX_AUTOINSTALL=0.
+// Silent, FULL setup of the bhyve substrate — the FreeBSD analog of the Linux
+// podman self-install, but bhyve needs host VM-infra INIT, not just packages
+// (that gap made an install-only version unable to `vm create`). Idempotent, all
+// under one `sudo -n sh -c` (every step needs root), each guarded so a re-run is a
+// no-op. Opt-out AEO_LINUX_AUTOINSTALL=0. The sequence (from
+// docs/operations/bsd-host-setup.md + test/setup-nat.sh):
+//   1. kldload vmm                          (the hypervisor module)
+//   2. pkg install vm-bhyve bhyve-firmware  (only what's missing; retried)
+//   3. sysrc vm_enable=YES vm_dir=zfs:zroot/vm; zfs create + mount zroot/vm
+//   4. vm init; cp the example templates    (creates .templates + datastore)
+//   5. vm switch create + address + nat      (a NAT switch so guests get a lease
+//      from a LOCAL range, never touching the LAN — the bhyve-networking lesson)
+//   6. write the linux-nat template on that switch (what _bhyve_provision expects)
+// AEO_BHYVE_SWITCH names the switch (default aeonat); AEO_BHYVE_VMDIR the datastore
+// dataset (default zroot/vm).
 _ensure_bhyve() {
     off = getenv("AEO_LINUX_AUTOINSTALL")
     if off != null {
@@ -455,14 +467,27 @@ _ensure_bhyve() {
             return
         }
     }
-    // sudo -n sh -c '<script>' — the whole thing runs as root (kldload + pkg both
-    // need it). kldload is idempotent (already-loaded -> harmless, ignored).
-    // Install only what's missing. Braceless shell vars (Aether interpolates ${}).
+    sw = getenv("AEO_BHYVE_SWITCH")
+    if sw == null {
+        sw = "aeonat"
+    }
+    if string_length(sw) == 0 {
+        sw = "aeonat"
+    }
+    ds = getenv("AEO_BHYVE_VMDIR")
+    if ds == null {
+        ds = "zroot/vm"
+    }
+    if string_length(ds) == 0 {
+        ds = "zroot/vm"
+    }
     av = list_new()
     list_add(av, "-n")
     list_add(av, "/bin/sh")
     list_add(av, "-c")
-    list_add(av, "kldload vmm 2>/dev/null; command -v pkg >/dev/null 2>&1 || exit 0; i=0; while [ $i -lt 3 ]; do need=; command -v vm >/dev/null 2>&1 || need=\"$need vm-bhyve\"; [ -f /usr/local/share/uefi-firmware/BHYVE_UEFI.fd ] || need=\"$need bhyve-firmware\"; [ -z \"$need\" ] && exit 0; pkg install -y $need && continue; i=`expr $i + 1`; sleep 5; done")
+    // Braceless shell vars (Aether interpolates ${...}); ${sw}/${ds} ARE Aether
+    // params we want substituted. mp is the mountpoint (/ + dataset basename path).
+    list_add(av, "set +e; kldload vmm 2>/dev/null; command -v pkg >/dev/null 2>&1 || exit 0; i=0; while [ $i -lt 3 ]; do need=; command -v vm >/dev/null 2>&1 || need=\"$need vm-bhyve\"; [ -f /usr/local/share/uefi-firmware/BHYVE_UEFI.fd ] || need=\"$need bhyve-firmware\"; [ -z \"$need\" ] && break; pkg install -y $need; i=`expr $i + 1`; sleep 3; done; command -v vm >/dev/null 2>&1 || exit 0; sysrc vm_enable=YES >/dev/null 2>&1; sysrc vm_dir=\"zfs:${ds}\" >/dev/null 2>&1; zfs list ${ds} >/dev/null 2>&1 || zfs create ${ds}; zfs set mountpoint=/${ds} ${ds} >/dev/null 2>&1; [ -d /${ds}/.templates ] || vm init; [ -f /${ds}/.templates/linux.conf ] || cp /usr/local/share/examples/vm-bhyve/* /${ds}/.templates/ 2>/dev/null; vm switch list 2>/dev/null | awk '{print $1}' | grep -qx ${sw} || { vm switch create ${sw}; vm switch address ${sw} 172.16.0.1/24; vm switch nat ${sw} on; }; if [ ! -f /${ds}/.templates/linux-nat.conf ]; then sed 's/network0_switch=.*/network0_switch=\"${sw}\"/' /${ds}/.templates/linux.conf > /${ds}/.templates/linux-nat.conf 2>/dev/null; grep -q network0_switch /${ds}/.templates/linux-nat.conf || echo 'network0_switch=\"${sw}\"' >> /${ds}/.templates/linux-nat.conf; fi; exit 0")
     _o, _s, _e = run_capture("sudo", av, null)
     list_free(av)
 }
