@@ -34,11 +34,20 @@ name() -> string {
     return "mac_exec"
 }
 
-// This backend only makes sense on macOS. platform() is compile-time; a mac
-// build returns "darwin". (The agent gates on AEO_BOOT_KIND, so available() is
-// mostly for a runner-side preflight.)
+// A host-native tracked PROCESS works on ANY POSIX host — the launch/probe/down
+// builders are pure sh (`sh -c '...' & echo $!`, `kill -0`, `kill -TERM`). macOS
+// is where this substrate is the ONLY honest enclosure (no container primitive),
+// but Linux uses it too for the "place a bare process on the host, no vm / no
+// container" mode (e.g. a RAM-tight Pi Zero 2 W). The ONLY macOS-specific bit is
+// the optional sandbox-exec (Seatbelt) confinement profile; on Linux the profile
+// is left empty (unconfined) — Linux confinement is bwrap/seccomp, a different
+// kind. (The agent gates on AEO_BOOT_KIND, so available() is mostly a runner-side
+// preflight.)
 available() -> int {
     if platform() == "darwin" {
+        return 1
+    }
+    if platform() == "linux" {
         return 1
     }
     return 0
