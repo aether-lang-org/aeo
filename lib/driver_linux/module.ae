@@ -65,6 +65,35 @@ engine_resolve(pref: string) -> string {
     return d
 }
 
+// 1 unless AEO_LINUX_AUTOINSTALL is explicitly "0" — self-bootstrap the engine
+// by default so a fresh podman-less host becomes usable through the agent alone.
+_autoinstall_on() -> int {
+    v = getenv("AEO_LINUX_AUTOINSTALL")
+    if v == null {
+        return 1
+    }
+    if v == "0" {
+        return 0
+    }
+    return 1
+}
+
+// Best-effort install of podman via apt (Debian / Raspberry Pi OS — the arm64
+// fleet). Self-sudo (the agent runs unprivileged; the operator pre-authorizes apt
+// NOPASSWD, same contract as the lxc/nspawn/kata drivers). Synchronous: the caller
+// re-resolves the engine after this returns, so a boot that triggered the install
+// completes once apt finishes (may take a minute on a cold cache — the async
+// delegate path already tolerates minutes; a direct http boot should use the
+// background/pending flow for a cold host). Non-apt hosts: the `command -v apt-get`
+// guard makes this a clean no-op.
+_install_podman() {
+    av = list_new()
+    list_add(av, "-c")
+    list_add(av, "command -v apt-get >/dev/null 2>&1 || exit 0; sudo -n DEBIAN_FRONTEND=noninteractive apt-get update -qq && sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y -qq podman")
+    _o, _s, _e = run_capture("/bin/sh", av, null)
+    list_free(av)
+}
+
 // --- pure argv builders (one per engine subcommand) ------------------
 
 // `<engine> ps --filter name=^NAME$ --filter status=running --format {{.Names}}`
@@ -512,7 +541,20 @@ up_net(res_name: string, image: string, cmd: string, expose: int, net: string, e
 up_confined(res_name: string, image: string, cmd: string, expose: int, net: string, env: string, confine: string, shares: string, engine_pref: string) -> string {
     eng = engine_resolve(engine_pref)
     if eng == "" {
-        return "aeo: no container engine found (need podman or docker on PATH)"
+        // No engine on the host. SELF-BOOTSTRAP podman so "deploy a workload" makes
+        // the substrate ready — the orchestrator dispatches one `boot`, the agent
+        // installs the engine then runs the container (ssh is used only ONCE, to
+        // plant the agent; everything after flows through the agent). Opt-out with
+        // AEO_LINUX_AUTOINSTALL=0. Install is best-effort + apt-based (Debian/
+        // Raspberry Pi OS, the arm64 fleet); a non-apt host just gets the original
+        // "no engine" error after the attempt.
+        if _autoinstall_on() == 1 {
+            _install_podman()
+            eng = engine_resolve(engine_pref)
+        }
+    }
+    if eng == "" {
+        return "aeo: no container engine found (need podman or docker on PATH; auto-install failed or disabled)"
     }
     if image == "" {
         return "aeo: container '${res_name}' has no image() set"
