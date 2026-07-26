@@ -319,8 +319,11 @@ _dispatch_verb(me: string, token: string, line: string) -> string {
     }
 
     if v == "boot" {
-        println("aeo-agent[${me}]: boot ${node}")
-        err = _boot_node(node)
+        // optional per-dispatch kind: `boot <tok> <node> <kind>` (field 3). "" =
+        // the agent's AEO_BOOT_KIND default. Lets one agent boot mixed substrates.
+        bkind = protocol.arg2_of(line)
+        println("aeo-agent[${me}]: boot ${node} ${bkind}")
+        err = _boot_node(node, bkind)
         st = "up"
         if err != "" {
             println("aeo-agent[${me}]: boot ${node} failed: ${err}")
@@ -365,7 +368,7 @@ _dispatch_verb(me: string, token: string, line: string) -> string {
         return protocol.encode_report(token, node, st)
     }
     if v == "probe" {
-        alive = _probe_node(node)
+        alive = _probe_node(node, protocol.arg2_of(line))
         st = "down"
         if alive == 1 {
             st = "up"
@@ -392,7 +395,7 @@ _dispatch_verb(me: string, token: string, line: string) -> string {
     }
     if v == "halt" {
         println("aeo-agent[${me}]: halt ${node}")
-        _de = _down_node(node)
+        _de = _down_node(node, protocol.arg2_of(line))
         return protocol.encode_report(token, node, "down")
     }
     println("aeo-agent[${me}]: unknown verb '${v}'")
@@ -428,7 +431,12 @@ _handle(me: string, token: string, outbox: string, wire: string) -> int {
 // container substrate (e.g. on a laptop with no podman). It isolates "the
 // orchestration tree converges" from "a real container ran"; the substrate is
 // tested separately, on a box that has one.
-_boot_node(node: string) -> string {
+// kind_override: a per-dispatch AEO_BOOT_KIND, from the wire (`boot <tok> <node>
+// <kind>`). "" -> fall back to the AEO_BOOT_KIND env (the startup default). Lets
+// ONE agent boot heterogeneous nodes — a podman node AND an lxc node — without a
+// restart, so an orchestrator can rebuild a cold host's whole substrate set over
+// one channel.
+_boot_node(node: string, kind_override: string) -> string {
     fail = _env_or("AEO_BOOT_FAIL", "")
     if string_length(fail) > 0 {
         // Forced failure for tests: return a distinct error so the child reports
@@ -448,7 +456,10 @@ _boot_node(node: string) -> string {
     // which drives the PVE API to make VMs/LXCs INSIDE pve. The driver reads its
     // config from the compose model (aeo.cmp.*); _stamp_proxmox_cfg populates
     // those keys from the AEO_PVE_* env the parent stamped.
-    kind = _env_or("AEO_BOOT_KIND", "")
+    kind = kind_override
+    if string_length(kind) == 0 {
+        kind = _env_or("AEO_BOOT_KIND", "")
+    }
     if string_equals(kind, "proxmox_vm") == 1 {
         return _boot_proxmox(node, "proxmox_vm")
     }
@@ -608,8 +619,11 @@ _win_backend() -> string {
 
 // Leaf probe/down, substrate-selected like _boot_node so a node's whole lifecycle
 // (boot/probe/halt) uses ONE arm. On Windows both go through driver_windows (WSL).
-_probe_node(node: string) -> int {
-    pk = _env_or("AEO_BOOT_KIND", "")
+_probe_node(node: string, kind_override: string) -> int {
+    pk = kind_override
+    if string_length(pk) == 0 {
+        pk = _env_or("AEO_BOOT_KIND", "")
+    }
     if _stamp_pve_cfg(node, pk) == 1 {
         return driver_proxmox.probe(node)
     }
@@ -633,8 +647,11 @@ _probe_node(node: string) -> int {
     }
     return driver_linux.probe(node, "", "")
 }
-_down_node(node: string) -> string {
-    pk = _env_or("AEO_BOOT_KIND", "")
+_down_node(node: string, kind_override: string) -> string {
+    pk = kind_override
+    if string_length(pk) == 0 {
+        pk = _env_or("AEO_BOOT_KIND", "")
+    }
     if _stamp_pve_cfg(node, pk) == 1 {
         return driver_proxmox.down(node)
     }
