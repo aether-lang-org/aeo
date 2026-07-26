@@ -31,7 +31,7 @@ import std.cryptography (random_bytes)
 import std.time (now_ms)
 
 exports (
-    is_wrapped, seal_line, open_line,
+    is_wrapped, seal_line, open_line, open_line_ex,
     derive_key, to_hex, from_hex, PREFIX, WINDOW_MS, in_window
 )
 
@@ -112,50 +112,66 @@ seal_line(courier: string, plaintext: string) -> string {
 // Open an "AE1:<nonce_hex>:<ct_hex>" frame under the courier key. Returns
 // (plaintext, "") on success, or ("", error) on a malformed frame or a failed
 // tag (fail-closed — a tampered/forged frame never yields plaintext).
+// Backward-compatible open: (cmd, err). "" err == success. Thin wrapper over
+// open_line_ex; drops the nonce + classified reason.
 open_line(courier: string, frame: string) -> string! {
-    ok = ""
-    if is_wrapped(frame) == 0 {
-        return "", "not a sealed frame"
+    cmd, _nonce, reason = open_line_ex(courier, frame)
+    if string_equals(reason, "ok") == 1 {
+        return cmd, ""
     }
-    // strip prefix, split "<nonce_hex>:<ct_hex>"
+    return "", reason
+}
+
+// Rich open for the agent's stateful policy layer. Returns
+// (cmd, nonce_hex, reason) where reason is a CLASSIFIED code the agent maps to
+// attempt-meta buckets and to the seen-nonce check:
+//   "ok"        — decrypted, in-window, authentic. cmd + nonce_hex are valid.
+//   "bad_key"   — AEAD tag failed (wrong courier key OR tampered ciphertext).
+//   "stale"     — crypto valid but timestamp outside the freshness window.
+//   "malformed" — not a frame / bad structure / bad hex / bad timestamp.
+// nonce_hex is returned WHENEVER the crypto authenticated the frame (ok + stale),
+// so the agent can seen-cache it (a replayed stale frame still carries its nonce).
+// It is "" for bad_key/malformed (no trustworthy nonce). The seen-nonce (replay)
+// check is the AGENT's job — this module stays pure/stateless.
+open_line_ex(courier: string, frame: string) -> (string, string, string) {
+    if is_wrapped(frame) == 0 {
+        return "", "", "malformed"
+    }
     body = string_substring(frame, string_length(PREFIX()), string_length(frame))
     colon = string_index_of(body, ":")
     if colon < 0 {
-        return "", "malformed frame (no nonce/ct split)"
+        return "", "", "malformed"
     }
     nonce_hex = string_substring(body, 0, colon)
     ct_hex = string_substring(body, colon + 1, string_length(body))
     nonce = from_hex(nonce_hex)
     ct = from_hex(ct_hex)
     if nonce == null || ct == null {
-        return "", "malformed hex"
+        return "", "", "malformed"
     }
     key = derive_key(courier)
     if key == null {
-        return "", "key derivation failed"
+        return "", "", "malformed"
     }
     aad = _sbytes(PREFIX())
     pt, err = aead_open(key, nonce, aad, bytes_len_of(PREFIX()), ct, bytes.length(ct))
     if err != "" {
-        return "", err                      // tag failure -> fail closed
+        return "", "", "bad_key"            // wrong key OR tamper -> fail closed
     }
     stamped = bytes.to_string(pt, bytes.length(pt))
-    // Split the authenticated "<ts_ms>|<command>". A missing separator is a
-    // malformed (or pre-timestamp) frame -> reject.
     bar = string_index_of(stamped, "|")
     if bar < 0 {
-        return "", "malformed frame (no timestamp)"
+        return "", nonce_hex, "malformed"   // authenticated but no ts sep
     }
     ts, tserr = to_long(string_substring(stamped, 0, bar))
     if tserr != "" {
-        return "", "malformed timestamp"
+        return "", nonce_hex, "malformed"
     }
     cmd = string_substring(stamped, bar + 1, string_length(stamped))
-    // Freshness window: reject a stale (or future-dated) frame.
     if in_window(ts, now_ms()) == 0 {
-        return "", "stale frame (outside the freshness window)"
+        return cmd, nonce_hex, "stale"      // valid crypto, outside window
     }
-    return cmd, ""
+    return cmd, nonce_hex, "ok"
 }
 
 // 1 if a frame stamped at `ts` (epoch ms) is within +/- WINDOW_MS of `now`

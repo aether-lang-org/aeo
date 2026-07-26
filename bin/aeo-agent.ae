@@ -29,6 +29,7 @@ import std.os (run_capture, platform)
 import std.list
 import std.config
 import std.string (string_length, string_char_at, string_contains, string_equals)
+import std.time (now_ms)
 import protocol
 import agent_auth
 import transport_file (ensure_dirs, inbox_dir, outbox_dir, put, recv_one)
@@ -79,27 +80,110 @@ _h_health(req: ptr, res: ptr, ud: ptr) -> int {
 // AE1: prefix), so one agent serves both during rollout — no flag needed to
 // ACCEPT sealed; AEO_SECURE=1 makes a node's own outbound dials seal (client side).
 //
-// _unseal_in: (wire) -> (inner_line, was_sealed). On a sealed frame that fails to
-// open (bad key / tamper / stale), returns ("", 1) — inner_line empty so the auth
-// gate below denies it (fail-closed: a forged/replayed frame never reaches a verb).
+// --- security telemetry: seen-nonce cache + attempt meta -------------------
+// State lives in std.config under aeo.sec.* (the agent's cross-handler store —
+// module vars don't survive the handler-thread/closure boundary, see LLM.md).
+//
+// SEEN-NONCE CACHE makes a sealed frame strictly SINGLE-USE: even within the
+// freshness window, a replayed frame (same nonce) is rejected. Bounded by the
+// window — an entry stores its expiry and a stale entry is treated as absent, so
+// the set can't grow past ~one window of legit traffic. Closes the
+// replay-within-window gap.
+_sec_seen(nonce_hex: string) -> int {
+    if string_length(nonce_hex) == 0 {
+        return 0
+    }
+    k = "aeo.sec.nonce.${nonce_hex}"
+    if config.has(k) == 1 {
+        exp = _atoi(config.get(k))
+        // still within its window? -> a genuine replay. Expired -> treat as unseen
+        // (and it'll be re-stamped below), so the map self-prunes lazily.
+        if exp > _now_s() {
+            return 1
+        }
+    }
+    // record: expire one window (WINDOW_MS -> seconds, +1 slack) from now
+    config.put(k, _itoa_seq(_now_s() + 31))
+    return 0
+}
+
+// ATTEMPT META: bump a per-kind counter (bad_key|replay|stale|malformed) and
+// stamp last-seen. NOT told to the caller (no oracle) — drained onto the next
+// AUTHENTICATED reply so only the courier-key-holding orchestrator ever sees it.
+_sec_record(kind: string) {
+    k = "aeo.sec.n.${kind}"
+    n = 0
+    if config.has(k) == 1 {
+        n = _atoi(config.get(k))
+    }
+    config.put(k, _itoa_seq(n + 1))
+    config.put("aeo.sec.last", _itoa_seq(_now_s()))
+}
+
+// Drain the accumulated attempt meta into a compact suffix and RESET it. Empty
+// string when nothing to report. Appended (inside the sealed reply) to the next
+// authed response so the orchestrator learns of probes since its last touch.
+_sec_drain() -> string {
+    bk = _sec_take("bad_key")
+    rp = _sec_take("replay")
+    st = _sec_take("stale")
+    mf = _sec_take("malformed")
+    if (bk + rp + st + mf) == 0 {
+        return ""
+    }
+    last = "0"
+    if config.has("aeo.sec.last") == 1 {
+        last = config.get("aeo.sec.last")
+    }
+    config.put("aeo.sec.last", "0")
+    return " | sec: bad_key=${_itoa_seq(bk)} replay=${_itoa_seq(rp)} stale=${_itoa_seq(st)} malformed=${_itoa_seq(mf)} last=${last}"
+}
+// read+zero one counter
+_sec_take(kind: string) -> int {
+    k = "aeo.sec.n.${kind}"
+    if config.has(k) == 0 {
+        return 0
+    }
+    n = _atoi(config.get(k))
+    config.put(k, "0")
+    return n
+}
+
+// _unseal_in: (wire) -> (inner_line, was_sealed). Uses the RICH open so it can
+// classify + record attempts and enforce single-use. On any sealed frame that
+// fails (bad key / tamper / replay / stale), returns ("", 1) — inner_line empty
+// so the auth gate below denies it (fail-closed) AND the attempt is recorded for
+// the orchestrator's next authed reply. The attacker just gets a uniform 401.
 _unseal_in(token: string, wire: string) -> (string, int) {
     if secure_channel.is_wrapped(wire) == 0 {
         return wire, 0                     // plaintext — pass through
     }
-    inner, err = secure_channel.open_line(token, wire)
-    if err != "" {
-        return "", 1                       // sealed but bad -> empty, marked sealed
+    cmd, nonce_hex, reason = secure_channel.open_line_ex(token, wire)
+    if string_equals(reason, "ok") == 0 {
+        _sec_record(reason)                // bad_key | stale | malformed
+        return "", 1
     }
-    return inner, 1
+    // authentic + in-window — now enforce SINGLE-USE (replay defense).
+    if _sec_seen(nonce_hex) == 1 {
+        _sec_record("replay")
+        return "", 1
+    }
+    return cmd, 1
 }
 
 // _seal_out: seal the reply iff the request was sealed (symmetry). On a seal
-// failure, fall back to plaintext rather than dropping the reply.
+// failure, fall back to plaintext rather than dropping the reply. When sealing (an
+// authenticated channel to the orchestrator), PIGGYBACK any accumulated attempt
+// meta INSIDE the sealed reply — so the orchestrator learns of probes on its next
+// touch, and the meta only ever travels encrypted to the legitimate party (never
+// to an attacker; a rejected caller got a bare 401). Plaintext replies carry NO
+// meta (don't leak attack telemetry in the clear).
 _seal_out(token: string, rep: string, was_sealed: int) -> string {
     if was_sealed == 0 {
         return rep
     }
-    sealed = secure_channel.seal_line(token, rep)
+    payload = "${rep}${_sec_drain()}"      // report [+ " | sec: ..." if any]
+    sealed = secure_channel.seal_line(token, payload)
     if string_length(sealed) == 0 {
         return rep
     }
@@ -917,4 +1001,15 @@ _d(x: int) -> string {
     if x == 7 { return "7" }
     if x == 8 { return "8" }
     return "9"
+}
+
+// Epoch SECONDS (int) from std.time.now_ms — the granularity the seen-nonce
+// expiry + the sec-meta last-seen need. int is fine for the aeo-sec horizon.
+_now_s() -> int {
+    return _l2i(now_ms() / 1000)
+}
+// narrow a long to int (epoch seconds fit until 2038; the nonce-expiry math only
+// cares about relative ordering within ~30s, so wraparound is a non-issue here).
+_l2i(v: long) -> int {
+    return v
 }
