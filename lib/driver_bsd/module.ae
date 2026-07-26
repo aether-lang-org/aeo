@@ -25,7 +25,7 @@
 // NOTE: jail/jexec/jls/zfs live in /usr/sbin and /sbin; we use absolute
 // paths so a non-login ssh PATH (which often omits /usr/sbin) still works.
 
-import std.os (run_capture)
+import std.os (run_capture, getenv)
 import std.list
 import std.string (string_length)
 
@@ -129,6 +129,12 @@ up(res_name: string, dataset: string, root: string, ip: string, start_cmd: strin
         _zo, _zs, _ze = _sudo_run("/sbin/zfs", zav)
         list_free(zav)
     }
+    // SELF-PROVISION the jail base: if jail_root has no populated FreeBSD base
+    // (no /bin/sh inside), fetch the matching base.txz and extract it — the BSD
+    // analog of driver_linux's podman self-install ("deploy a jail" makes the
+    // substrate ready). Opt-out AEO_JAIL_AUTOBASE=0. Best-effort; jail -c below
+    // still fails loudly if the root ends up unusable.
+    _ensure_jail_base(jail_root)
     // Create + start the jail.
     cav = jail_create_argv(res_name, jail_root, ip, start_cmd)
     out, status, err = _sudo_run("/usr/sbin/jail", cav)
@@ -240,3 +246,33 @@ _sudo_run(prog: string, argv: ptr) -> {
 // (_squote / _chr removed: the sudo path no longer builds a shell string — argv
 // goes straight to run_capture("sudo", [...]) as a real vector, so no per-element
 // shell quoting is needed. See _sudo_run above.)
+
+// Self-provision a FreeBSD base into an empty jail root — the BSD "silent setup"
+// analog of driver_linux's podman self-install. If <root>/bin/sh already exists
+// the root is populated (no-op). Else: mkdir the root, fetch the base.txz for the
+// RUNNING release (freebsd-version -u -> e.g. 15.0-RELEASE, from the canonical
+// download mirror), and extract it. Retried (network transient). Opt-out
+// AEO_JAIL_AUTOBASE=0. Best-effort — the jail -c that follows fails loudly if the
+// root is still unusable. The whole thing is ONE sudo sh -c (root: mkdir under
+// /usr/local/jails, write into the root, and fetch/tar need root anyway).
+_ensure_jail_base(root: string) {
+    off = getenv("AEO_JAIL_AUTOBASE")
+    if off != null {
+        if off == "0" {
+            return
+        }
+    }
+    if string_length(root) == 0 {
+        return
+    }
+    av = list_new()
+    list_add(av, "-c")
+    // freebsd-version -u gives the userland version (e.g. 15.0-RELEASE-p10); strip
+    // the -pN patch for the dist path (releases are published as X.Y-RELEASE).
+    // NB Aether interpolates ${...} in strings, so shell variables use the
+    // BRACELESS form ($rel/$arch/$i) which Aether leaves alone; only ${root} (an
+    // Aether param) is interpolated. The URL is built by shell string-concat.
+    list_add(av, "[ -x '${root}/bin/sh' ] && exit 0; mkdir -p '${root}'; rel=`freebsd-version -u 2>/dev/null | sed 's/-p[0-9]*$//'`; arch=`uname -m`; i=0; while [ $i -lt 3 ]; do [ -x '${root}/bin/sh' ] && exit 0; fetch -o /tmp/aeo-base.txz \"https://download.freebsd.org/releases/$arch/$rel/base.txz\" && tar -xf /tmp/aeo-base.txz -C '${root}' && rm -f /tmp/aeo-base.txz && exit 0; i=`expr $i + 1`; sleep 5; done")
+    _o, _s, _e = _sudo_run("/bin/sh", av)
+    list_free(av)
+}

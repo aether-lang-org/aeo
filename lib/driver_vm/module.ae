@@ -445,10 +445,38 @@ up(kind: string, res_name: string, image: string, cpus: int, mem: string, tap: s
 // vm-bhyve owns tap/disk/boot/networking; aeo orchestrates it like podman.
 // `vm` needs root, so it runs under sudo (operator pre-authorizes; see the
 // NOPASSWD sudoers note). Idempotent: existing+running VM is a no-op.
+// Silent setup of the bhyve substrate: load vmm.ko and pkg-install vm-bhyve +
+// bhyve-firmware if missing. One sudo sh -c (kldload + pkg both need root),
+// retried, guarded by `command -v pkg`. Opt-out AEO_LINUX_AUTOINSTALL=0.
+_ensure_bhyve() {
+    off = getenv("AEO_LINUX_AUTOINSTALL")
+    if off != null {
+        if off == "0" {
+            return
+        }
+    }
+    // sudo -n sh -c '<script>' — the whole thing runs as root (kldload + pkg both
+    // need it). kldload is idempotent (already-loaded -> harmless, ignored).
+    // Install only what's missing. Braceless shell vars (Aether interpolates ${}).
+    av = list_new()
+    list_add(av, "-n")
+    list_add(av, "/bin/sh")
+    list_add(av, "-c")
+    list_add(av, "kldload vmm 2>/dev/null; command -v pkg >/dev/null 2>&1 || exit 0; i=0; while [ $i -lt 3 ]; do need=; command -v vm >/dev/null 2>&1 || need=\"$need vm-bhyve\"; [ -f /usr/local/share/uefi-firmware/BHYVE_UEFI.fd ] || need=\"$need bhyve-firmware\"; [ -z \"$need\" ] && exit 0; pkg install -y $need && continue; i=`expr $i + 1`; sleep 5; done")
+    _o, _s, _e = run_capture("sudo", av, null)
+    list_free(av)
+}
+
 bhyve_up(res_name: string, guest_image: string, realize_target: string, guest_ip: string, cpus: int, mem: string, network: string, ssh_key: string) -> string {
     if _bhyve_running(res_name) == 1 {
         return ""
     }
+    // SILENT SETUP of the bhyve substrate — the FreeBSD analog of driver_linux's
+    // podman self-install. Load vmm.ko and pkg-install vm-bhyve + bhyve-firmware
+    // when absent, so "deploy a bhyve VM" makes the substrate ready. Opt-out
+    // AEO_LINUX_AUTOINSTALL=0 (the shared switch). Best-effort; the vm-bhyve calls
+    // below fail loudly if it's still not usable.
+    _ensure_bhyve()
     // Provision if the VM doesn't exist yet. FAST PATH: the image recipe's
     // realize_as("clone:<snap>") names a prepared golden snapshot (the runner
     // resolves it + passes it as realize_target). If that snapshot exists,

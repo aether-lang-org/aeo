@@ -525,6 +525,21 @@ _boot_node(node: string, kind_override: string) -> string {
             _env_or("AEO_BOOT_CMD", ""),
             "")
     }
+    // BHYVE SUBSTRATE: AEO_BOOT_KIND=bhyve routes to driver_vm's bhyve arm — a
+    // FreeBSD hardware-virt VM via vm-bhyve (self-set-up: vmm.ko + vm-bhyve +
+    // firmware installed if absent). AEO_BHYVE_IMAGE is the guest cloud image URL;
+    // AEO_BHYVE_TEMPLATE a golden snapshot to clone (fast path); AEO_BHYVE_IP/
+    // CPUS/MEM/NETWORK/SSHKEY size + place it. The FreeBSD peer of the kvm vm arm.
+    if string_equals(kind, "bhyve") == 1 {
+        return driver_vm.bhyve_up(node,
+            _env_or("AEO_BHYVE_IMAGE", ""),
+            _env_or("AEO_BHYVE_TEMPLATE", ""),
+            _env_or("AEO_BHYVE_IP", ""),
+            _atoi(_env_or("AEO_BHYVE_CPUS", "1")),
+            _env_or("AEO_BHYVE_MEM", "512M"),
+            _env_or("AEO_BHYVE_NETWORK", ""),
+            _env_or("AEO_BHYVE_SSHKEY", ""))
+    }
     // VM SUBSTRATE: AEO_BOOT_KIND=vm routes to driver_vm's kvm arm — a real
     // hardware-virt VM (qemu/KVM), arch-aware (x86_64 or aarch64; proven on a Pi
     // 5). The local-KVM peer of the proxmox arm: an agent RESIDENT ON a
@@ -663,6 +678,9 @@ _probe_node(node: string, kind_override: string) -> int {
     if string_equals(pk, "nspawn") == 1 {
         return driver_nspawn.probe(node, "", "")
     }
+    if string_equals(pk, "bhyve") == 1 {
+        return driver_vm.probe("bhyve", node, "")
+    }
     if string_equals(pk, "vm") == 1 {
         return driver_vm.probe("kvm", node, "")
     }
@@ -696,6 +714,9 @@ _down_node(node: string, kind_override: string) -> string {
     }
     if string_equals(pk, "nspawn") == 1 {
         return driver_nspawn.down(node)
+    }
+    if string_equals(pk, "bhyve") == 1 {
+        return driver_vm.down("bhyve", node)
     }
     if string_equals(pk, "vm") == 1 {
         return driver_vm.down("kvm", node)
