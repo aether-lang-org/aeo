@@ -27,7 +27,7 @@
 // available() lets a caller SKIP cleanly off a host with no WSL — a plain PATH
 // test for wsl.exe (mirrors driver_bwrap/driver_nspawn.available).
 
-import std.os (run_capture, os_which)
+import std.os (run_capture, os_which, getenv)
 import std.list
 import std.string (string_length, string_contains, string_char_at, string_substring)
 import driver_linux (
@@ -97,6 +97,35 @@ wsl_argv(distro: string, inner: ptr) -> ptr {
 
 // --- exec'ing entry points (mirror driver_linux's contract) ----------
 
+// Best-effort install of podman INSIDE the WSL distro if absent. The
+// driver_linux._install_podman parallel, wrapped in `wsl -d <distro> --`: the
+// engine lives in the distro, so the check + apt run happen there. Silent,
+// synchronous (up re-runs the podman argv after); a distro without apt is a
+// clean no-op via the `command -v apt-get` guard. Gated by AEO_LINUX_AUTOINSTALL
+// (shared with driver_linux — one "auto-ready engine" switch across the fleet).
+_ensure_podman_wsl(distro: string) {
+    v = getenv("AEO_LINUX_AUTOINSTALL")
+    if v != null {
+        if v == "0" {
+            return
+        }
+    }
+    // Build the wsl argv DIRECTLY (not via wsl_argv, which hardcodes `podman` as
+    // the command — here the command is /bin/sh, not a podman subcommand):
+    //   wsl [-d DISTRO] -- /bin/sh -c '<check-then-install>'
+    wav = list_new()
+    if string_length(distro) > 0 {
+        list_add(wav, "-d")
+        list_add(wav, distro)
+    }
+    list_add(wav, "--")
+    list_add(wav, "/bin/sh")
+    list_add(wav, "-c")
+    list_add(wav, "command -v podman >/dev/null 2>&1 && exit 0; command -v apt-get >/dev/null 2>&1 || exit 0; sudo -n DEBIAN_FRONTEND=noninteractive apt-get update -qq && sudo -n DEBIAN_FRONTEND=noninteractive apt-get install -y -qq podman")
+    _o, _s, _e = run_capture(wsl_exe(), wav, null)
+    list_free(wav)
+}
+
 // Bring the container up idempotently inside the WSL distro. Returns "" on
 // success else an error message. Same signature shape as driver_linux.up_confined
 // minus the engine_pref (podman is fixed under WSL); `confine` is the rendered
@@ -112,6 +141,13 @@ up(res_name: string, distro: string, image: string, cmd: string, expose: int, ne
     if probe(res_name, distro, "") == 1 {
         return ""
     }
+    // SELF-BOOTSTRAP podman INSIDE the WSL distro if absent — the driver_linux
+    // parallel, one seam over (the engine lives in the distro, not on the host).
+    // So "deploy a workload" installs the engine here too: dispatch one boot, the
+    // agent apt-installs podman in the distro then runs the container. Opt-out with
+    // AEO_LINUX_AUTOINSTALL=0 (shared with driver_linux — same "auto-ready engine"
+    // policy). Silent + best-effort; a distro without apt is a clean no-op.
+    _ensure_podman_wsl(distro)
     inner = run_argv_confined(res_name, image, cmd, expose, net, env, confine)
     av = wsl_argv(distro, inner)
     list_free(inner)

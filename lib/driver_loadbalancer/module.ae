@@ -347,8 +347,13 @@ lb_health_timing(lb: string) -> string {
 // Bring the balancer up: run the aeo-lb container on the backends' net, with the
 // pool rendered into AEO_LB_* env, publishing publish() to the host.
 up(res_name: string) -> string {
-    if available() == 0 {
-        return "aeo: no container engine found (need podman or docker on PATH)"
+    // ensure-or-install the engine (shared driver_linux.ensure_engine): a
+    // podman-less host self-bootstraps podman here, so the LB deploys through the
+    // agent alone — the same "auto-ready engine" the container/windows tiers get.
+    // (available() stays a pure PROBE — it must NOT trigger an install as a side
+    // effect, so up() calls ensure_engine directly.)
+    if string_length(driver_linux.ensure_engine("")) == 0 {
+        return "aeo: no container engine found (need podman or docker on PATH; auto-install failed or disabled)"
     }
     // Build the balancer image on demand (idempotent) — aeo bakes it, no manual step.
     ierr = ensure_image(res_name)
