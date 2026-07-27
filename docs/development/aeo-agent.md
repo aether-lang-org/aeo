@@ -15,14 +15,27 @@ wrong directionality; the resident deputy replaces it.
   fail-closed), async delegate (fire-in-background + `status` poll),
   self-attestation (`attest` → deny_egress drift), and the full `aeo up` join —
   all live on the Bazzite box.
+- ✅ **Encrypted channel (shipped)** — the `/dispatch` wire is now an
+  AEAD-sealed envelope (`AE1:<nonce>:<ct+tag>`, pure-Aether Ascon-AEAD128, keyed
+  by an HKDF of the courier PSK) with anti-replay (freshness window + single-use
+  nonce cache) and attack-meta piggybacked on the next authed reply. This
+  SUPERSEDES the "TLS on the socket is designed / wire is plaintext today" note
+  that was here — see `lib/secure_channel` and
+  `operations/agent-host-setup.md` § "The encrypted channel". Not PKI/TLS: a
+  closed fleet where both ends share the courier key needs no handshake or cert,
+  and it works with OpenSSL stubbed out (cross builds).
+- ✅ **Silent substrate self-install (shipped)** — a `boot <kind>` on a cold host
+  installs that substrate's engine itself (podman/lxc/nspawn via the host package
+  manager; jail base.txz; vm-bhyve init) — see `operations/agent-host-setup.md`.
 - ⬜ Modeled/opt-in still: the agent path is behind `AEO_AGENT_PATH=1` (ssh path
-  is the default until it's blessed); boots are `AEO_BOOT_NOOP` (the tree
-  converges — no real workload in the child yet); TLS on the socket is designed
-  (§"Channel security") but the wire is plaintext-under-a-couriered-token today;
-  depth is proven at two levels (N by construction).
+  is the default until it's blessed); depth is proven at two levels (N by
+  construction).
 
 The rest of this doc is the design; where a section still says "next" / "when we
 get to it," read it as the original plan — most of it is now the shipped path.
+
+> **Operational how-to:** `operations/agent-host-setup.md` describes the
+> ssh-plant → self-install → sealed-dispatch lifecycle and what mutates on a host.
 
 ## The one sentence
 
