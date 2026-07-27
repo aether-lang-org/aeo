@@ -6,7 +6,7 @@ that keep it coherent, the footguns. Re-read at the start of every session. **Fo
 an observer wanting to *use* aeo for its purpose:** the "What aeo is for" and "A
 composition, end to end" sections are your entry; the rest is the engine room.
 
-Not a CLAUDE.md. Short, opinionated, current as of ae 0.364 (2026-07-07).
+Not a CLAUDE.md. Short, opinionated, current as of ae 0.452 (2026-07-27).
 
 ---
 
@@ -33,11 +33,12 @@ aeo is the third sibling to `aether` (the language) and `aeb` (the build runner)
 born spun-out. **config IS code** — the composition is a `.ae` you *run*, full
 Aether around the declarations; no YAML, ever.
 
-## Status (honest, ae 0.364)
+## Status (honest, ae 0.452)
 
-Working, with a **live-proven containment story**. Of six containment axes, **all
-six are now live-proven on real hardware** (a rootless Fedora-atomic "Bazzite" box
-for Linux, a GhostBSD box for FreeBSD, plus macOS via Docker Desktop):
+Working, with a **live-proven containment story** AND a **live-proven resident-agent
+story** (see the aeo-agent note below). Of six containment axes, **all six are
+live-proven on real hardware** (a rootless Fedora-atomic "Bazzite" box for Linux, a
+GhostBSD box for FreeBSD, plus macOS via Docker Desktop):
 
 | Axis | State |
 |---|---|
@@ -46,13 +47,27 @@ for Linux, a GhostBSD box for FreeBSD, plus macOS via Docker Desktop):
 | Audit trail (tamper-evident hash chain) | ✅ live — an edited log is caught by `aeo audit` |
 | FreeBSD jail boundary | ✅ live on GhostBSD |
 | rctl resource caps | ✅ live on GhostBSD |
-| pf inter-VM network delivery | ✅ live on FreeBSD 14.3 — deny-default + whitelist bites (whitelisted flow completes, non-whitelisted blocked). The old "red axis / if_bridge bug" was a MIS-ATTRIBUTION: GhostBSD's default-enabled `ipfw` was dropping the bridged packet, not pf. Fix = keep ipfw off the guest bridge path (`docs/if_bridge-pf-delivery-bug.md`). |
+| pf inter-VM network delivery | ✅ live on FreeBSD 14.3 — deny-default + whitelist bites (whitelisted flow completes, non-whitelisted blocked). The old "red axis / if_bridge bug" was a MIS-ATTRIBUTION: GhostBSD's default-enabled `ipfw` was dropping the bridged packet, not pf. Fix = keep ipfw off the guest bridge path (`docs/research/bhyve-networking-journey.md`). |
 
 Drivers all exist and the Linux ones (`containers`/`lxc`/`kvm`) are live-proven
 end-to-end via `aeo up` on Bazzite. The front-door, the actor runtime, the compose
 DSL, host-gating, lifecycle ops (snapshot/rollback/backup/prune/exec/restart), and
 the audit trail are all built. See `TODO.md` for the per-item proven-vs-modeled
-scorecard, `aeo-design.md` for the design, `README.md` for the user-facing tour.
+scorecard, `docs/core/design-rationale.md` for the design, `README.md` for the
+user-facing tour.
+
+**aeo-agent (resident deputy) — SHIPPED, not drafted.** The recursive-orchestration
+story is now live, not design-intent: the agent runs the node's lifecycle
+(`boot/probe/halt`) over **HTTP** with an **AEAD-encrypted channel** (`lib/secure_channel`,
+Ascon-AEAD128, courier-PSK-keyed, single-use + anti-replay + attack-meta), and each
+substrate **self-installs its engine** when absent (`host.pkg_install` across
+apt/dnf/apk/pkg/brew; jail base.txz; vm-bhyve init). One ssh plants the agent; then
+everything — install, deploy, tear down — flows through the sealed channel. Proven
+end-to-end on a Pi 5 (podman + lxc), a Pi Zero 2 W (host-exec on ~415MB), and
+GhostBSD .204 (jails; vm-bhyve setup). Released binaries per OS/arch,
+SHA-pinned. **The full host lifecycle is documented in
+`operations/agent-host-setup.md`** (ssh-plant → self-install → sealed dispatch; what
+mutates on the host; why nothing but the one binary is shipped).
 
 ## The one thing to never get wrong: aeo is NOT aeb
 
@@ -180,7 +195,7 @@ operator's compose file as the `aeo_compose` module, copies `lib/aeo/runner.ae`
 (which contains the inlined actor + `main`) as the top-level entry, and `ae build`s
 that single unit. `examples/` files are the hand-written shape of what gets staged.
 On an immutable host where `ae` isn't on PATH, an `ae` container-shim builds it
-inside a toolchain container (`docs/build-in-container.md`).
+inside a toolchain container (`docs/operations/build-in-container.md`).
 
 ### State, never in a module `var`
 
@@ -243,6 +258,27 @@ is load-bearing: Aether's module `var` had a string of cross-import soundness bu
 - **Aether's std.http.client SIGABRTs intermittently on macOS** (mid-request).
   Specs that only need transport shell out to curl.
 
+### Agent / deployment footguns (operational, cost real session time)
+
+- **`pkill -x aeo-agent`, NEVER `pkill -f /tmp/aeo-agent`.** `-f` matches the whole
+  command line — including your *own ssh command* that contains the path — so it
+  leaves the real agent alive holding the port; the next agent then fails
+  `server_create` and exits, looking like a mystery crash. (Burned ~an hour on a Pi
+  5 chasing this phantom.)
+- **The sealed channel's ±30 s freshness window needs synced clocks.** A host an
+  hour off (a BST-vs-UTC mix-up on .204) rejects *every* sealed frame as `stale` —
+  indistinguishable from an auth failure at a glance. Sync first
+  (`sudo date -r <epoch>` / ntpdate) before dispatching. Meta says `stale=N`.
+- **Detach properly or the agent dies with the login session.** Linux:
+  `systemd-run --user` (+ `loginctl enable-linger`); FreeBSD: `daemon(8)`. A bare
+  `setsid … &` can be reaped. On a flaky link, fire long ops **detached +
+  poll-a-logfile** rather than holding an interactive ssh.
+- **A firewall may block inbound on `AEO_PORT`** (a FreeBSD ipfw box did). Bind
+  loopback + reach it through an ssh tunnel (`ssh -L …`) — the AEAD is still
+  end-to-end. Don't punch firewall holes on a console-less box (pf-lockout risk).
+- **vm-bhyve NAT needs pf; on an ipfw host the switch is created but NAT can't
+  enable** — a networked bhyve guest can't boot there. Jails have no such issue.
+
 ## DSL conventions (don't fight them)
 
 - **config IS code.** Composition is a `.ae` you run. NEVER add a YAML/JSON/HCL
@@ -273,20 +309,23 @@ is load-bearing: Aether's module `var` had a string of cross-import soundness bu
 > aeo's contribution is the **resident-deputy** shape: `lib/protocol/` +
 > `aeo-agent` (`bin/aeo-agent.ae`) keep the paper's best idea — *a stable verb set
 > with a replaceable transport beneath it* (`boot/halt/probe/announce/report` over
-> `transport_file` in use, a drafted `transport_http` on `std.http.server` — NOT
-> ssh; ssh is bootstrap-only): a metaobject protocol in miniature — and put it
-> inside the node as the **container's deputy**. The agent
-> enacts the container's will + reports health, but exposes **zero ABI surface to
-> the node's other processes** (the workload gets no upward channel through it) and
-> the parent channel runs over TLS authed by an **ssh-couriered one-time symmetric
-> secret — the 1970s bank-courier model, no CA, no keypair** (ssh is the motorbike:
-> bootstrap hand-delivers the key; design-intent — v0 is file-transport + warn-level
-> token; transport_http is drafted + fail-closed; all the crypto is stock stdlib —
-> `std.cryptography.drbg`/`hmac` + `std.http.server` h2-TLS — so it's wiring, not
-> inventing). The agent IS the standing live connection the paper describes via `→`,
-> made concrete *and* containment-safe (workload can't speak on it, can't forge
-> onto it). The runner is just the depth-0 agent. The front door still has **no
-> `→` operator** and shells to aeb for static structure. (See `docs/aeo-agent.md`.)
+> `transport_file` or `transport_http` on `std.http.server` — NOT ssh; ssh is
+> bootstrap-only): a metaobject protocol in miniature — and put it inside the node
+> as the **container's deputy**. The agent enacts the container's will + reports
+> health, but exposes **zero ABI surface to the node's other processes** (the
+> workload gets no upward channel through it) and the parent channel is
+> **AEAD-encrypted** (`lib/secure_channel`, pure-Aether Ascon-AEAD128 + HKDF) keyed
+> by an **ssh-couriered one-time symmetric secret — the 1970s bank-courier model,
+> no CA, no keypair** (ssh is the motorbike: bootstrap hand-delivers the key). This
+> is **shipped, not designed** — HTTP transport, the sealed channel (single-use +
+> freshness window + attack-meta piggyback), and per-dispatch substrate kinds are
+> all live-proven; see the status table above and `operations/agent-host-setup.md`.
+> The agent IS the standing live connection the paper describes via `→`, made
+> concrete *and* containment-safe (workload can't speak on it, can't forge onto
+> it). The runner is just the depth-0 agent. The front door still has **no `→`
+> operator** and shells to aeb for static structure.
+> (See `development/aeo-agent.md` for the design, `operations/agent-host-setup.md`
+> for the ssh-plant → self-install → sealed-dispatch host lifecycle.)
 
 > Historical note: early design docs (and old versions of this file) describe a
 > `cap` threaded through every handle — `jail(cap, "db")`, `aeo(cap)` DI. That
