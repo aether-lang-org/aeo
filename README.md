@@ -128,6 +128,10 @@ ciphertext everywhere aeo holds state and decrypt only at use, fail-closed.
 | **Multi-OS** (Linux, macOS, FreeBSD) | ✅ | ⚠️ Linux-first | ✅ | ✅ |
 | **Portable driver model** (docker/podman/lxc/bhyve/jail) | ✅ | ❌ | ⚠️ engine only | ✅ |
 
+> Full landscape comparison — how aeo relates to cloud provisioners, config
+> management, cluster orchestrators, and where it draws its boundaries on purpose:
+> **[`docs/core/aeo-vs-iac-landscape.md`](docs/core/aeo-vs-iac-landscape.md)**.
+
 ## The one-line distinction
 
 | | does | invocation |
